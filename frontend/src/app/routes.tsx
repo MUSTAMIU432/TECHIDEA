@@ -1,5 +1,6 @@
 import { createBrowserRouter } from 'react-router-dom'
 
+import { ActivateAccountPage } from '../features/identity/components/ActivateAccountPage'
 import { AuthPage } from '../features/identity/components/AuthPage'
 import { RequireAuth } from '../features/identity/components/RequireAuth'
 import { ResetPasswordPage } from '../features/identity/components/ResetPasswordPage'
@@ -14,9 +15,15 @@ import { NotFoundPage } from '../routes/NotFoundPage'
  * ideas, ...) each get their own route module under src/features/<domain>
  * and are wired in here.
  *
- * /auth and /reset-password are top-level routes rather than RootLayout
- * children: the auth system owns the full viewport (split-screen brand +
- * form panel) instead of sitting inside the shared app shell/header.
+ * /auth, /reset-password and /activate-account are top-level routes rather
+ * than RootLayout children: the auth system owns the full viewport
+ * (split-screen brand + form panel) instead of sitting inside the shared app
+ * shell/header. The latter two are the pages the emailed links point at -
+ * the backend builds those URLs from FRONTEND_URL (see
+ * backend/identity/email.py), so the paths here and the ones it uses are one
+ * contract: `identity.email.ACTIVATION_PATH` / `PASSWORD_RESET_PATH`, pinned
+ * from both sides by the backend suite and by
+ * `ActivateAccountForm.test.tsx` / `ResetPasswordForm.test.tsx`.
  *
  * /app is the authenticated application area, gated by RequireAuth - it
  * redirects to /auth when there's no authenticated session.
@@ -32,6 +39,7 @@ export const router = createBrowserRouter([
   },
   { path: '/auth', element: <AuthPage /> },
   { path: '/reset-password', element: <ResetPasswordPage /> },
+  { path: '/activate-account', element: <ActivateAccountPage /> },
   {
     path: '/app',
     element: <RequireAuth />,

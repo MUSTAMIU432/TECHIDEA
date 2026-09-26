@@ -2,11 +2,14 @@
 Authentication throttling (S1-009).
 
 The unauthenticated entry points that can be turned into an amplifier -
-`login`, `refreshToken`, `googleLogin` and `register` - are the ones this
-module guards. Each of them is reachable with no session at all, and the
-first two are reachable with a value the caller chooses, so an attacker can
-issue unlimited attempts: unlimited guesses against one account, or a spray
-across many. The same limit answers it.
+`login`, `refreshToken`, `googleLogin`, `register`, and the emailed-link
+flows (`requestPasswordReset`, `resetPassword`, `activateAccount`,
+`resendActivationEmail`) - are the ones this module guards. Each of them is
+reachable with no session at all. The first two are reachable with a value the
+caller chooses, so an attacker can issue unlimited attempts; the emailed ones
+are reachable with an address the caller chooses, so they can be used to mail
+someone else on demand. Both are the same problem, and the same limit answers
+it.
 
 Why a cache, and which one. Counting has to be shared by every process: with
 a per-process counter, worker 1 blocks the 11th attempt while workers 2..N
@@ -144,6 +147,61 @@ REFRESH_PER_CLIENT = ThrottlePolicy('refresh.client', limit=600, window_seconds=
 # has a new email, so a per-email limit would never be reached by exactly
 # the abuse it was meant to stop.
 REGISTER_PER_CLIENT = ThrottlePolicy('register.client', limit=10, window_seconds=3600)
+
+# Password-reset request, per submitted address. The tightest limit in this
+# module, and the reason is email, not guessing: every request that reaches an
+# existing account mints a token and sends a real message, so an unmetered
+# version of this is a way to use the platform as a mail cannon - filling
+# someone else's inbox, and getting a third party's domain to absorb the
+# bounces and the reputation damage. Five an hour per address is well above
+# what someone locked out of their own account needs (they request once, wait,
+# retry) and far below anything worth automating.
+#
+# Keyed on the *submitted* address, never a looked-up account, for the same
+# reason login does: whether this address has an account cannot change the
+# answer, or the counter itself becomes an enumeration oracle. That is why
+# both the hit and the miss cost the caller the same budget.
+PASSWORD_RESET_REQUEST_PER_ACCOUNT = ThrottlePolicy(
+    'password_reset.request.account', limit=5, window_seconds=3600
+)
+
+# Password-reset request, per client address. What bounds a *spray* - one
+# address, many different victims - which the per-account counter above cannot
+# see at all, since each victim's address carries its own separate budget.
+# Without it, an attacker with a list could mail every name on it.
+PASSWORD_RESET_REQUEST_PER_CLIENT = ThrottlePolicy(
+    'password_reset.request.client', limit=20, window_seconds=3600
+)
+
+# Password reset (spending a token), per client address. This is not a
+# credential-guessing limit: the token is 384 bits of `secrets` output, which
+# no amount of trying guesses. It is here because each attempt is a database
+# write - a password re-hash, a revoke-all-sessions update - performed by an
+# anonymous caller who controls the input, so the number to bound is "how much
+# work can an unauthenticated request make this server do", same as the login
+# per-client limit but for a cheaper operation, hence a higher number.
+PASSWORD_RESET_PER_CLIENT = ThrottlePolicy('password_reset.client', limit=30, window_seconds=900)
+
+# Account activation (spending a token), per client address. Same reasoning as
+# the reset limit above and the same order of magnitude; kept as a separate
+# policy rather than shared because the two flows have genuinely different
+# traffic - an activation link is followed once, a reset link maybe a few times
+# - and one deployment may legitimately want them set differently.
+ACTIVATION_PER_CLIENT = ThrottlePolicy('activation.client', limit=30, window_seconds=900)
+
+# Resending the activation email, per submitted address. Tighter than the
+# request-per-account limit above for the same mail-cannon reason, and tighter
+# still in effect: a resend is only ever wanted because the first one was
+# lost, so a handful per day is a lost-inbox budget, not a busy-day one.
+ACTIVATION_RESEND_PER_ACCOUNT = ThrottlePolicy(
+    'activation.resend.account', limit=3, window_seconds=86400
+)
+
+# Resending the activation email, per client address, for the same spray
+# reason as PASSWORD_RESET_REQUEST_PER_CLIENT.
+ACTIVATION_RESEND_PER_CLIENT = ThrottlePolicy(
+    'activation.resend.client', limit=10, window_seconds=3600
+)
 
 
 def _throttle_cache():
@@ -310,6 +368,58 @@ def guard_google_login(request, credential: str) -> None:
 def guard_registration(request) -> None:
     """Admit or refuse one `register` attempt, by client address."""
     _guard(REGISTER_PER_CLIENT, _client_address(request))
+
+
+def guard_password_reset_request(request, email: str) -> None:
+    """
+    Admit or refuse one `requestPasswordReset` attempt.
+
+    Two counters, the per-account one first because it is the tighter of the
+    pair and the cheaper decision is the one that most often refuses. The
+    per-account subject is the *submitted* address, normalized and never
+    checked against a stored account, so the answer cannot depend on whether
+    that address has an account - which would otherwise make the throttle
+    itself the enumeration oracle this whole flow exists to avoid.
+    """
+    _guard(PASSWORD_RESET_REQUEST_PER_ACCOUNT, _normalize_email_subject(email))
+    _guard(PASSWORD_RESET_REQUEST_PER_CLIENT, _client_address(request))
+
+
+def guard_password_reset(request) -> None:
+    """
+    Admit or refuse one `resetPassword` attempt, by client address.
+
+    Scoped to the address rather than to the presented token: the token is
+    384 bits of `secrets` output, so a "grind one token" counter would only
+    ever be measuring the client's request rate anyway, and keying on the
+    token would additionally let a caller who happened to hold a valid one
+    escape the limit by presenting a different (invalid) one.
+    """
+    _guard(PASSWORD_RESET_PER_CLIENT, _client_address(request))
+
+
+def guard_activation(request) -> None:
+    """
+    Admit or refuse one `activateAccount` attempt, by client address.
+
+    Same reasoning as `guard_password_reset`: the token is unguessable, and
+    the work each attempt causes (a lookup and a flag flip) is what needs a
+    ceiling.
+    """
+    _guard(ACTIVATION_PER_CLIENT, _client_address(request))
+
+
+def guard_activation_resend(request, email: str) -> None:
+    """
+    Admit or refuse one `resendActivationEmail` attempt.
+
+    Both counters, per-account first, on exactly the same reasoning as
+    `guard_password_reset_request` - including the requirement that the
+    per-account subject is the submitted address and is never resolved to a
+    user, so a miss costs the caller the same budget as a hit.
+    """
+    _guard(ACTIVATION_RESEND_PER_ACCOUNT, _normalize_email_subject(email))
+    _guard(ACTIVATION_RESEND_PER_CLIENT, _client_address(request))
 
 
 def _normalize_email_subject(email: str) -> str:

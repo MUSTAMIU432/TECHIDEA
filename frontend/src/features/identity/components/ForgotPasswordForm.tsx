@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 
+import { NETWORK_ERROR_MESSAGE, requestPasswordResetRequest } from '../auth/authApi'
 import { validateEmail } from '../schemas/authValidation'
 import { SpinnerIcon } from './icons'
 import { TextField } from './TextField'
@@ -18,12 +19,21 @@ const PRIMARY_BUTTON_CLASSES =
  * In/Sign Up tabs and form — the same in-card swap pattern AuthTabs already
  * uses — rather than a modal, so the whole auth system reads as one
  * continuous form instead of a popup interrupting it.
+ *
+ * What this view does *not* do is claim anything about the address. The
+ * backend answers this mutation identically whether the address has an
+ * account, is deactivated, signed up through Google, or does not exist at
+ * all, so that the endpoint cannot be used to find out whether somebody is
+ * registered here. The success copy is therefore the backend's own message,
+ * shown verbatim, and this component must never add a "we found your
+ * account" flourish or a different tone that would give the game away.
  */
 export function ForgotPasswordForm({ onBackToSignIn }: ForgotPasswordFormProps) {
   const [email, setEmail] = useState('')
   const [error, setError] = useState<string | undefined>()
   const [attempted, setAttempted] = useState(false)
   const [status, setStatus] = useState<Status>('idle')
+  const [notice, setNotice] = useState<string | undefined>()
   const isSubmitting = status === 'submitting'
 
   function handleEmailChange(value: string) {
@@ -33,30 +43,55 @@ export function ForgotPasswordForm({ onBackToSignIn }: ForgotPasswordFormProps) 
     }
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setAttempted(true)
+    setNotice(undefined)
 
     const emailError = validateEmail(email)
     setError(emailError)
     if (emailError) return
 
     setStatus('submitting')
-    // Placeholder only: wired to the `requestPasswordReset` GraphQL mutation
-    // once the Identity backend contract lands. The mutation always resolves
-    // with the same generic result regardless of whether the email has an
-    // account (see the success copy below), so showing that view here isn't
-    // claiming anything the real backend won't also do — no email is
-    // actually sent by this placeholder.
-    window.setTimeout(() => setStatus('success'), 400)
+    try {
+      const result = await requestPasswordResetRequest(email)
+      if (result.success) {
+        // The backend's wording, not ours: it is identical whether or not
+        // anything was sent, and this component must not narrow it.
+        setNotice(result.message)
+        setStatus('success')
+        return
+      }
+      if (result.field === 'email') {
+        // The one failure genuinely about this input — and the backend reports
+        // it identically for a registered and an unregistered address, so
+        // showing it narrows nothing.
+        setError(result.message)
+        setStatus('idle')
+        return
+      }
+      // Anything else — a throttle, most of all — did *not* send a message, so
+      // the confirmation view would be a lie. Reported as a form-level error
+      // instead, which is also why the notice is cleared on the next attempt.
+      setNotice(result.message)
+      setStatus('idle')
+    } catch {
+      // A transport failure is a different fact from a refusal: the request
+      // never reached a decision about the account, so it is reported as its
+      // own error rather than as the generic "check your email" - which would
+      // tell somebody to wait for a message that was never sent.
+      setNotice(NETWORK_ERROR_MESSAGE)
+      setStatus('idle')
+    }
   }
 
   if (status === 'success') {
     return (
       <div>
         <h1 className="text-[26px] font-bold tracking-tight text-gray-900">Check your email</h1>
+        <p className="mt-2 text-sm text-gray-500">{notice}</p>
         <p className="mt-2 text-sm text-gray-500">
-          If an account exists for that email, we&apos;ve sent instructions to reset your password.
+          The link can only be used once, and it stops working after a short while.
         </p>
         <button type="button" onClick={onBackToSignIn} className={`mt-7 ${PRIMARY_BUTTON_CLASSES}`}>
           Back to Sign In
@@ -71,6 +106,12 @@ export function ForgotPasswordForm({ onBackToSignIn }: ForgotPasswordFormProps) 
       <p className="mt-2 text-sm text-gray-500">
         Enter your email and we&apos;ll send you a secure password reset link.
       </p>
+
+      {notice && (
+        <p role="alert" className="mt-5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+          {notice}
+        </p>
+      )}
 
       <form noValidate onSubmit={handleSubmit} aria-busy={isSubmitting} className="mt-7 space-y-5">
         <TextField

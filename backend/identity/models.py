@@ -7,7 +7,9 @@ and future authentication mechanisms build on top of it, not into it).
 external provider identity (Google now, others later) without putting any
 provider-specific field directly on User. `RefreshSession` is the
 server-side record backing a refresh credential (see its own docstring for
-why a stateless refresh JWT was deliberately not used instead).
+why a stateless refresh JWT was deliberately not used instead), and
+`EmailToken` is the same idea for the one-time credentials that arrive by
+email (password reset, account activation).
 """
 
 import re
@@ -256,3 +258,86 @@ class RefreshSession(models.Model):
     @property
     def is_active(self) -> bool:
         return self.revoked_at is None and self.expires_at > timezone.now()
+
+
+class EmailTokenPurpose(models.TextChoices):
+    """
+    What an `EmailToken` authorizes, kept in the row rather than implied by
+    which table it lives in.
+
+    Both purposes share one table, one hashing scheme and one lookup path, and
+    the only real difference between them is which operation consumes the
+    token. Encoding the purpose in the row means the two can never be crossed:
+    a password-reset token presented to the activation mutation is not "an
+    unknown token" that happens to look similar, it is a token for the wrong
+    operation and is refused as such. One table per purpose would buy nothing
+    and double the indexes.
+    """
+
+    # (ruff's hardcoded-password heuristic just pattern-matches the word
+    # "password" in a name; this is an enum of purposes, not a credential.)
+    PASSWORD_RESET = 'password_reset'  # noqa: S105
+    ACTIVATION = 'activation'
+
+
+class EmailToken(models.Model):
+    """
+    One single-use, expiring, emailed credential (password reset, account
+    activation).
+
+    Same shape of decision as `RefreshSession` above - the raw credential is
+    never stored, only a SHA-256 hash of it, so a database leak yields nothing
+    replayable - and for the same reason: it is high-entropy random data
+    (`secrets.token_urlsafe`, in `identity.services`), not a low-entropy
+    human-chosen secret like a password, so a fast hash is the right tool and a
+    slow adaptive one would only delay an honest user.
+
+    `used_at` rather than deletion, and for the same reason `RefreshSession`
+    keeps its revoked rows: a token that has already been spent is
+    meaningfully different from one that never existed, and only the former
+    can be reported as "this link has already been used" rather than a
+    misleading "invalid link".
+
+    Issuance supersedes: asking for a new reset link invalidates any earlier
+    unused one for the same purpose, so only the most recently emailed link
+    ever works. That is the behaviour people expect from a "resend" button
+    anyway, and it means a leaked older email is not a live credential for as
+    long as its window lasts. A superseded token is recorded in `used_at`
+    too, which is slightly imprecise about the reason - nothing redeemed it -
+    but is the distinction not worth a third column: from every caller's side
+    an invalid superseded link and a spent one are the same unusable link, and
+    no code branches on why. Tokens that were *already* spent are left alone
+    when a new one is issued, so superseding cannot erase the record that a
+    link was once redeemed.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_tokens')
+    purpose = models.CharField(max_length=32, choices=EmailTokenPurpose.choices)
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        help_text='SHA-256 hex digest of the raw emailed token. Never the token itself.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-created_at']
+        indexes: ClassVar[list[models.Index]] = [
+            # The lookup a spent/expired cleanup runs: "which unused tokens
+            # are past their expiry?" (token_hash itself is already indexed
+            # by its own unique=True).
+            models.Index(fields=['expires_at']),
+            # Issuing a new token supersedes the user's outstanding ones for
+            # the same purpose, and the activation page has to find every live
+            # activation token for an account.
+            models.Index(fields=['user', 'purpose']),
+        ]
+
+    def __str__(self) -> str:
+        return f'EmailToken(user={self.user_id}, purpose={self.purpose})'
+
+    @property
+    def is_active(self) -> bool:
+        return self.used_at is None and self.expires_at > timezone.now()

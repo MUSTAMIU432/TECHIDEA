@@ -19,7 +19,12 @@ from .base import (
     CACHES,
     CORS_ALLOWED_ORIGINS,
     CSRF_TRUSTED_ORIGINS,
+    DEFAULT_FROM_EMAIL,
+    EMAIL_BACKEND,
+    EMAIL_HOST_PASSWORD,
+    EMAIL_HOST_USER,
     ENVIRONMENT,
+    FRONTEND_URL,
     JWT_SIGNING_KEY,
     SECRET_KEY,
     SHARED_CACHE_ALIASES,
@@ -113,6 +118,52 @@ for _setting_name, _origins in (
                 f'{_setting_name} entries must be explicit https:// origins '
                 f'without wildcards (got {_origin!r}).'
             )
+
+# Outgoing email. The two emailed flows (password reset, account activation)
+# are only useful if the mail actually leaves the process, and both fail in a
+# way that is easy to miss: a reset request reports the same generic success
+# whether or not an account exists, precisely so it can't be used to probe for
+# one - which also means a deployment whose mail is silently broken looks
+# exactly like a deployment nobody has used yet. So refuse to start on a
+# backend that cannot send, rather than discover it from a support ticket.
+if EMAIL_BACKEND == 'django.core.mail.backends.console.EmailBackend':
+    raise ImproperlyConfigured(
+        'EMAIL_BACKEND must not be the console backend in a deployed environment: '
+        'it prints messages to the log instead of sending them, so password-reset '
+        'and activation links would reach nobody while the mutations still reported '
+        'success. Set it to django.core.mail.backends.smtp.EmailBackend (see '
+        'backend/.env.example).'
+    )
+
+for _setting_name, _value in (
+    ('EMAIL_HOST_USER', EMAIL_HOST_USER),
+    ('EMAIL_HOST_PASSWORD', EMAIL_HOST_PASSWORD),
+):
+    if not _value:
+        raise ImproperlyConfigured(f'{_setting_name} must be set in a deployed environment.')
+
+if not DEFAULT_FROM_EMAIL or DEFAULT_FROM_EMAIL == 'no-reply@localhost':
+    raise ImproperlyConfigured(
+        'DEFAULT_FROM_EMAIL must be set to a real sender address in a deployed '
+        'environment (see backend/.env.example).'
+    )
+
+# Where emailed links point. A missing value produces a link to nowhere, and a
+# wrong scheme (http) hands the token to the network in the clear, so both are
+# refused here rather than discovered by a user clicking a broken link.
+if not FRONTEND_URL:
+    raise ImproperlyConfigured(
+        'FRONTEND_URL must be set in a deployed environment, e.g. '
+        'https://app.example.com. Password-reset and activation links are built '
+        'from it (see identity/email.py).'
+    )
+
+if not FRONTEND_URL.startswith('https://'):
+    raise ImproperlyConfigured(
+        f'FRONTEND_URL must be an https:// origin in a deployed environment '
+        f'(got {FRONTEND_URL!r}); an emailed link over plain http would expose '
+        'the one-time token in it to anyone on the network path.'
+    )
 
 # Transport security. Cookies are never sent over plain HTTP; this is not
 # configurable so it cannot be turned off by mistake.

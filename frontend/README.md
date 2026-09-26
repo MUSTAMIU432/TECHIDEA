@@ -134,7 +134,11 @@ and attaches `Authorization: Bearer <token>` when one is set.
 authentication state:
 
 - `authApi.ts` — the `login`/`googleLogin`/`refreshToken`/`logout`/`register`
-  GraphQL operations.
+  GraphQL operations, plus the four emailed-link ones
+  (`requestPasswordReset`, `resetPassword`, `activateAccount`,
+  `resendActivationEmail`). None of those four establishes a session, so
+  none returns an access token — asking for one would be a contract the
+  backend does not have.
 - `AuthContext.tsx` — `AuthProvider` (wraps the router in `App.tsx`) and the
   `useAuth()` hook, exposing `status` (`'loading' | 'authenticated' |
   'unauthenticated'`), `user`, `login()`, `loginWithGoogle()` and
@@ -203,7 +207,28 @@ and maps the backend's field-level failure onto the matching field, so a
 duplicate email is shown next to the email input exactly like a client-side
 validation error. Registration does not authenticate — the backend's
 `register` mutation creates the account only — so success shows a
-confirmation that leads to sign-in rather than navigating into the app.
+confirmation that leads to sign-in rather than navigating into the app. That
+confirmation also says a confirmation link has been emailed *and* that
+confirming is not required: the backend's `login` does not check
+`isVerified`, so an unconfirmed account can sign in and work normally, and
+copy that implied otherwise would strand anyone who lost the first message.
+
+`ForgotPasswordForm` and `ResetPasswordForm` are wired to the real
+`requestPasswordReset` and `resetPassword` mutations. Three outcomes are kept
+apart, because conflating any two of them misleads the user about something
+that matters:
+
+| Outcome | Shown as | Why |
+| ------- | -------- | --- |
+| success | confirmation, or the success view | a definite claim the backend backs |
+| `field === 'token'` | invalid-link view | the link is no good and the form would be pointless |
+| `field === 'password'` | message next to the input | the link is still live; only the password was rejected |
+| no `field` (e.g. a throttle) | form-level error | no field is at fault, and nothing was sent |
+| transport failure | form-level error, form kept | the request never reached a decision — claiming the link is dead would send the user off to request a new one for no reason |
+
+A successful reset says that every session on the account was signed out,
+including this browser's, because that is the part people are surprised by
+and it is the backend's actual behaviour.
 
 `src/features/identity/components/RequireAuth.tsx` gates the `/app` route:
 it shows a neutral loading state while the initial `refreshToken` call is in
@@ -225,8 +250,14 @@ fallback message instead of an uncontrolled blank page.
 - `/auth` (`AuthPage`) — sign in, sign up and forgot password, combined into
   one view that swaps in place (see the Identity feature's own docs in
   `src/features/identity/`).
-- `/reset-password` (`ResetPasswordPage`) — UI only; no backend mutation
-  exists yet (see What this is not).
+- `/reset-password` (`ResetPasswordPage`) — where a password-reset link lands
+  (`?token=…`). Redeems the token with the real `resetPassword` mutation.
+- `/activate-account` (`ActivateAccountPage`) — where a confirmation link
+  lands. Confirms the address with `activateAccount`, and offers
+  `resendActivationEmail` for a lost first message. Following the link is an
+  explicit button press rather than a request on mount, because mail clients
+  and link scanners fetch URLs in a message before a person sees them and the
+  token is single-use.
 - `/app` (`RequireAuth` → `DashboardPage`) — the authenticated area,
   redirecting to `/auth` when there's no session. `DashboardPage` is a
   placeholder proving the login/session lifecycle end to end, not a real
@@ -239,11 +270,24 @@ Future business domains each get their own route module under
 
 Real product features (ideas, reviews, projects, notifications, ...) don't
 exist yet. What exists is Identity (sign in, sign up, Google sign-in, session
-lifecycle) and the organizations tier (create an organization, switch
-between them, see members and roles). Within Identity itself, the
-forgot-password/reset-password *backend* is not implemented (the UI is ready
-for it); the reset-password form is a visual placeholder. Those land in later
-Identity tasks.
+lifecycle, password reset and email confirmation) and the organizations tier
+(create an organization, switch between them, see members and roles). Within
+Identity, what is still missing is an authenticated Google-account-linking
+flow: Google sign-in authenticates or provisions, and never links to an
+existing account by email.
+
+Two things the reset and confirmation flows deliberately do **not** do on this
+side, because the backend is the authority for both:
+
+- They do not decide whether an email address has an account. Both
+  `requestPasswordReset` and `resendActivationEmail` answer identically for a
+  registered address, an unregistered one, and a deactivated account, so
+  these pages show the backend's own message verbatim rather than wording
+  their own — a locally-worded "we found your account" would quietly turn the
+  page into an existence oracle.
+- They do not explain *why* a link failed. The backend gives one message for
+  every unusable token (never real, expired, already used, or belonging to
+  the other flow), and the UI repeats that discipline instead of helping.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no

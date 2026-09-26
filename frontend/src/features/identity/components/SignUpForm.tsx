@@ -163,6 +163,16 @@ export function SignUpForm({ onSwitchToSignIn, returnTo = '/app' }: SignUpFormPr
         <output className="mt-2 block text-sm text-gray-500">
           Your account is ready. Sign in to continue.
         </output>
+        {/* Registration emails a confirmation link. Worth saying out loud, and
+            worth saying it is optional: the backend's `login` does not check
+            `isVerified`, so an unconfirmed account can sign in and work
+            normally. Without that sentence this reads as "you must confirm
+            before you can continue", which is not true and would strand
+            anyone who lost the first message. */}
+        <p className="mt-3 text-sm text-gray-500">
+          We&apos;ve emailed you a link to confirm your address. You can sign in now and confirm
+          later — it isn&apos;t required.
+        </p>
         <button
           type="button"
           onClick={onSwitchToSignIn}

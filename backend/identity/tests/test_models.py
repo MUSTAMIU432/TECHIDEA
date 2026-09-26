@@ -5,7 +5,13 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.utils import timezone
 
-from identity.models import ExternalIdentity, RefreshSession, User
+from identity.models import (
+    EmailToken,
+    EmailTokenPurpose,
+    ExternalIdentity,
+    RefreshSession,
+    User,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 
@@ -268,3 +274,110 @@ class TestRefreshSessionModel:
 
         with pytest.raises(IntegrityError):
             self._make_session(user=user, token_hash='b' * 64)
+
+
+@pytest.mark.django_db
+class TestEmailTokenModel:
+    """
+    The emailed credential itself.
+
+    A second single-use, expiring credential alongside `RefreshSession`, and
+    for the same reasons: only a hash is stored, expiry and use are recorded
+    rather than implied by deletion, and the row stays after it is spent so
+    that "already used" remains distinguishable from "never existed" in the
+    record - even though the API deliberately refuses to tell the two apart.
+    """
+
+    def _make_token(self, **overrides):
+        fields = {
+            'user': overrides.pop('user', None) or _make_user(),
+            'purpose': EmailTokenPurpose.PASSWORD_RESET,
+            'token_hash': 'c' * 64,
+            'expires_at': timezone.now() + timedelta(hours=1),
+        }
+        fields.update(overrides)
+        return EmailToken.objects.create(**fields)
+
+    def test_str_includes_user_and_purpose(self):
+        token = self._make_token()
+
+        assert str(token) == f'EmailToken(user={token.user_id}, purpose={token.purpose})'
+
+    def test_is_active_when_unused_and_unexpired(self):
+        assert self._make_token().is_active is True
+
+    def test_is_not_active_once_used(self):
+        assert self._make_token(used_at=timezone.now()).is_active is False
+
+    def test_is_not_active_once_expired(self):
+        assert self._make_token(expires_at=timezone.now() - timedelta(seconds=1)).is_active is False
+
+    def test_token_hash_is_unique(self):
+        self._make_token(token_hash='d' * 64)
+
+        with pytest.raises(IntegrityError):
+            self._make_token(token_hash='d' * 64)
+
+    def test_purpose_records_which_operation_the_token_authorizes(self):
+        """
+        Kept in the row rather than implied by which table it lives in, so a
+        reset token presented to the activation mutation is refused as being
+        for the wrong operation instead of looking like an unknown token.
+        """
+        assert EmailTokenPurpose.PASSWORD_RESET == 'password_reset'
+        assert EmailTokenPurpose.ACTIVATION == 'activation'
+        assert self._make_token().purpose == EmailTokenPurpose.PASSWORD_RESET
+
+    def test_the_two_purposes_are_independent_for_one_user(self):
+        """
+        Both tokens for the same user coexist: asking for a reset must not
+        burn an activation link, or a user who forgot their password could
+        not confirm their address afterwards.
+        """
+        user = _make_user()
+
+        reset = self._make_token(user=user, purpose=EmailTokenPurpose.PASSWORD_RESET)
+        activation = self._make_token(
+            user=user, purpose=EmailTokenPurpose.ACTIVATION, token_hash='e' * 64
+        )
+
+        assert reset.is_active is True
+        assert activation.is_active is True
+
+    def test_deleting_a_user_deletes_their_tokens(self):
+        """
+        An emailed credential must not outlive the account it grants access
+        to, so this cascades like every other child row.
+        """
+        user = _make_user()
+        self._make_token(user=user)
+
+        user.delete()
+
+        assert EmailToken.objects.count() == 0
+
+    def test_it_has_no_field_that_could_hold_the_raw_token(self):
+        """
+        The storage boundary, asserted structurally: the model has nowhere to
+        put the plaintext even by accident. A future field that did would fail
+        here rather than in a post-incident review.
+        """
+        field_names = {field.name for field in EmailToken._meta.get_fields()}
+
+        assert 'token' not in field_names
+        assert 'raw_token' not in field_names
+        assert 'token_hash' in field_names
+
+    def test_created_at_is_recorded_and_rows_are_newest_first(self):
+        """
+        `ordering` is what makes "the most recently emailed link" a cheap
+        query for the supersede path, and it is asserted so a change to it
+        cannot quietly alter which token a caller is offered.
+        """
+        user = _make_user()
+        first = self._make_token(user=user, token_hash='f' * 64)
+        second = self._make_token(user=user, token_hash='1' * 64)
+
+        assert first.created_at is not None
+        assert second.created_at is not None
+        assert list(EmailToken.objects.all()) == [second, first]

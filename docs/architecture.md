@@ -54,8 +54,8 @@ Expected future domains:
 - audit
 
 Implemented: the Django project, split settings, the `graphql_api`
-infrastructure app (not a business domain), and the first two business
-domain apps — `identity` and `organizations`. The rest are
+infrastructure app (not a business domain), and the first three business
+domain apps — `identity`, `organizations` and `ideas`. The rest are
 introduced incrementally in later sprints.
 
 ### API (target — foundation implemented)
@@ -71,7 +71,7 @@ Implemented: the `/graphql/` endpoint with a foundation schema and the
 
 PostgreSQL, configured entirely through environment variables — no
 credentials committed to source control. Implemented via `DATABASE_URL`.
-`identity` and `organizations` own the business models and
+`identity`, `organizations` and `ideas` own the business models and
 migrations; every other domain is still only Django's built-in tables.
 
 ### Asynchronous Processing (target — not yet implemented)
@@ -92,10 +92,17 @@ rather than being scattered across business domain apps, and its output
 will be treated as a recommendation subject to human validation. No AI
 functionality exists yet.
 
-### Storage (target — not yet implemented)
+### Storage (target — boundary implemented, no object store yet)
 
 Object storage (e.g. S3-compatible) for files, rather than storing large
-binary content in PostgreSQL. Not present yet.
+binary content in PostgreSQL.
+
+S2-001 implements the *boundary*: `ideas.Attachment` stores only metadata
+(`storage_key`, `filename`, `content_type`, `size`) and holds no file
+column of any kind, so attachments cannot end up in PostgreSQL by accident
+— see [`ideas-domain.md`](ideas-domain.md#storage-boundary). The bucket
+itself, the presigned-upload flow and signed download URLs are not
+implemented yet.
 
 ### Security (target — partly implemented)
 
@@ -302,15 +309,103 @@ this purpose, because the second worker admits what the first one blocked.
 Both consumers fail **closed** if the cache is unreachable - the alternative
 is a silent, invisible removal of a security control.
 
-Not yet implemented: email verification (the `User.is_verified` flag
-exists and is now set for Google sign-ins, but registration still leaves
-it `False` and current policy lets an unverified user log in either way),
-the forgot-password and reset-password *backend* (the frontend UI exists;
-no mutation backs it yet), an authenticated "link this Google account to my
+Implemented (S1-010): the two emailed-link flows - password reset and
+account activation. Both mint a single-use, expiring `EmailToken`, mail a
+link into the *frontend* built from `FRONTEND_URL`, and redeem it once.
+The properties that matter are these, and each is asserted by a test rather
+than left to review:
+
+- **Neither request side discloses whether an address is registered.**
+  `requestPasswordReset` and `resendActivationEmail` take a caller-supplied
+  address, so a different answer for a hit than for a miss would make each one
+  an account-existence oracle. Every outcome - no account, deactivated,
+  already verified, Google-only with no password to reset - returns the same
+  message, and only the *hit* side sends a message at all.
+- **Only a hash is stored.** The raw token exists in exactly one place, the
+  email; `EmailToken.token_hash` is a SHA-256 digest, so a database leak
+  yields nothing replayable. A fast hash is the right tool here precisely
+  because the value is 384 bits of `secrets` output rather than a
+  human-chosen secret.
+- **One-time, expiring, and superseded.** A redeemed token is recorded as
+  used rather than deleted, so "already used" stays distinguishable from
+  "never existed" in the record even though the caller cannot tell them
+  apart. Requesting a new link supersedes any outstanding one for the same
+  purpose, so a leaked older email stops being a live credential.
+- **One message for every unusable token.** Never real, expired, already used,
+  or belonging to the other flow. A message per case would tell whoever holds
+  a stolen link exactly how far it got.
+- **A reset ends every session on the account**, the caller's own browser
+  included, and clears its refresh cookie. Without that step a password
+  changed *because it may have been stolen* leaves the attacker's existing
+  session signed in and working until it expires on its own schedule.
+- **Verification is not a login requirement.** `login` does not check
+  `isVerified`, so an unconfirmed account owns a legitimate account and is
+  not locked out of it. Turning verification into an authorization gate is a
+  separate decision, to be made in one place, once there is a reason to.
+- **Delivery failure is logged, never raised** (`identity/email.py`), with the
+  user's primary key and never the token. Raising would either leak account
+  existence to fix a mail problem or force every caller to reimplement the
+  catch - and a broken mail setup is found in the logs rather than in a
+  support ticket, which is why `config/settings/production.py` refuses to
+  start on the settings that cause the commonest version of it (the console
+  backend). See [Email](#email-target--implemented) below.
+- All four operations are throttled on the S1-009 infrastructure, and the
+  per-address limits are keyed on the *submitted* address and never resolved
+  to a user, so a miss costs the caller the same budget as a hit.
+
+Not yet implemented: an authenticated "link this Google account to my
 existing session" flow (today's Google sign-in only ever authenticates or
 provisions - it never links to an existing account), member invitations, a
 role-management UI, logout-everywhere, and audit logging. See
 [`SECURITY.md`](../SECURITY.md).
+
+### Email (target — implemented)
+
+Outgoing transactional mail for the two emailed-link flows, and nothing
+else. The platform sends no other mail: no notifications, no digests, no
+marketing, and no queue. Everything below is `identity/email.py` (transport)
+plus `identity.services` (decisions) plus the settings that point them at an
+SMTP server.
+
+**Transport.** Plain SMTP through `django.core.mail`, so moving to a hosted
+provider later is an `EMAIL_BACKEND` change rather than a rewrite. Plain
+*text* messages on purpose: these carry a credential whose entire purpose is
+"click this link", and HTML would add remote images, a tracking pixel, and a
+link whose text can differ from its target - the things that make a phishing
+mail convincing. Not a Google API client: the only Google credential this
+project holds is a public OAuth *client id* for verifying sign-in ID tokens,
+which authorizes nothing and cannot send. Gmail's SMTP relay needs no
+service account and no key file - a mailbox address and an app password.
+
+**Five variables, all required in a deployed environment.** `EMAIL_BACKEND`
+(must actually send - the console backend is refused), `EMAIL_HOST_USER` and
+`EMAIL_HOST_PASSWORD` (secrets), `DEFAULT_FROM_EMAIL` (rejected at the local
+default: SPF/DKIM are checked against that domain), and `FRONTEND_URL` (must
+be `https://`, because the link carries the token in its query string).
+`EMAIL_HOST`, `EMAIL_PORT` and `EMAIL_USE_TLS` have defaults and no guard.
+See [environments.md](environments.md) and `backend/.env.example`.
+
+**Why "required" rather than "recommended".** Both flows answer generically
+whatever happens, by design - that is what stops them being account-existence
+oracles. The same property means a deployment whose mail is silently broken
+is indistinguishable, at the API boundary, from one nobody has used yet: the
+reset request "succeeds" and the user waits for a message that was never
+sent. A send that fails is therefore logged at `ERROR` with the user's
+primary key and never the token, and the settings that cause the commonest
+version of the failure are refused at startup. The cost of that choice is
+that a mail misconfiguration is found in the logs rather than in a support
+ticket, which is the right way round.
+
+Not implemented, and deliberately so: any queue. Sending is synchronous on
+the request path, which leaves a residual timing signal on
+`requestPasswordReset` - a request for a real account takes measurably
+longer (an SMTP round trip) than one for an address that does not exist. It
+is a weaker oracle than the response body, and what bounds it in practice is
+the throttle: five probes per address per hour, twenty per client per hour, so
+the same limit that stops this endpoint being used as a mail cannon also caps
+the number of samples an enumeration attack can collect. Closing the gap
+properly means moving the send onto a task queue, which is later work
+(Redis + Celery, below).
 
 ### Multi-Tenancy (target — organization tier implemented)
 
@@ -319,7 +414,12 @@ optionally scoped to an organization for tenant isolation. The
 Organization → Membership → User tier and its authorization model are
 implemented (S1-006/S1-007/S1-008) - see
 [Security](#security-target--partly-implemented) for the enforcement model
-and the one bootstrap exception.
+and the one bootstrap exception. `ideas.Idea` is the first resource hung off
+an organization, and requires one on every row (S2-001), so there is no idea
+that exists outside a tenant. A Department tier is still absent:
+`Idea.visibility` reserves a `department` value, but nothing sets or filters
+on it until that tier exists - see
+[`ideas-domain.md`](ideas-domain.md#visibility).
 
 ### Environments (target — convention implemented)
 
@@ -336,9 +436,28 @@ with rotating refresh sessions (S1-003), Google/OAuth sign-in (S1-004), the
 current-user query and protected application route (S1-005), organizations
 and membership (S1-006), roles and permissions (S1-007), authorization and
 tenant isolation (S1-008), and the integration/security hardening pass
-(S1-009). What remains inside Identity is the forgot-password/reset-password
-backend, email verification, and an authenticated Google-account-linking
-flow.
+(S1-009), and the emailed-link flows - password reset and account activation
+(S1-010). What remains inside Identity is an authenticated
+Google-account-linking flow.
+
+Sprint 2 starts the core business domain with the `ideas` app. Only its
+architecture and schema exist so far (S2-001); creation and submission
+(S2-002) and the review workflow (Sprint 3) are not started. Every other
+business domain is not started.
+
+### Implemented (Sprint 2)
+
+| Area | What exists | Task |
+| ---- | ----------- | ---- |
+| Ideas domain | `ideas` app: `Category`, `Idea`, `Comment`, `Vote`, `Attachment`, and their migration/admin | S2-001 |
+| Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices`. Only the vocabulary - no transition is implemented yet | S2-001 |
+| Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
+| Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
+| Domain documentation | [`ideas-domain.md`](ideas-domain.md) | S2-001 |
+
+See [`ideas-domain.md`](ideas-domain.md) for the entities, the
+authorization and storage boundaries, and the planned service, selector,
+GraphQL and frontend seams.
 
 ### Implemented (Sprint 1, in progress)
 
@@ -355,6 +474,9 @@ flow.
 | Authorization | Permission-gated `organization`/`organizationMembers`/`organizationRoles` queries and `assignRoleToMembership`/`removeRoleFromMembership` mutations; tenant isolation across every one | S1-008 |
 | Access-token lifecycle | `tokenStore` holding the token *and* its expiry; `tokenRefresh` proactive, single-flight refresh; `registerRequest` wired into `SignUpForm` | S1-009 |
 | Security hardening | Authentication rate limiting (login/googleLogin/refreshToken/register), shared `replay_protection`/`auth_throttle` cache aliases required in deployed environments, end-to-end auth, tenant-isolation and Google-flow integration suites | S1-009 |
+| Password reset | `requestPasswordReset`/`resetPassword` mutations, single-use hashed `EmailToken`, plaintext reset email over SMTP, all sessions on the account revoked by a successful reset, `/reset-password` wired to the real mutation | S1-010 |
+| Account activation | `activateAccount`/`resendActivationEmail` mutations, a confirmation link emailed at registration, `/activate-account` route; confirmation is *not* a login requirement | S1-010 |
+| Emailed-link throttling | Per-address and per-client limits on all four operations, keyed on the submitted address so a miss costs the same budget as a hit | S1-010 |
 
 ### Implemented (Sprint 0)
 
@@ -377,20 +499,23 @@ How these are used day to day: [`development.md`](development.md),
 
 ### Not implemented (planned)
 
-- Business domain apps other than `identity` and `organizations`: ideas,
+- Business domain apps other than `identity`, `organizations` and `ideas`:
   reviews, opportunities, proposals, developers, projects, tasks,
   notifications, impact, files, audit
-- Email verification and the forgot-password/reset-password backend
-  (frontend UI for these exists; see
-  [Security](#security-target--partly-implemented) above); an
-  authenticated Google-account-linking flow (today's Google sign-in only
+- The Ideas business operations themselves: creation, submission, comments,
+  voting and attachments are schema-only (S2-001); the services, selectors,
+  GraphQL operations and UI are S2-002
+- An authenticated Google-account-linking flow (today's Google sign-in only
   ever authenticates or provisions a *new* account - it never links to an
   existing one, by verified email or otherwise)
-- Member invitations, a role-management or permission-editor UI, and
-  logout-everywhere
+- The Department tier of multi-tenancy (`Idea.visibility` reserves a
+  `department` value but nothing sets or filters on it), member invitations,
+  a role-management or permission-editor UI, and logout-everywhere
 - Redis + Celery background processing
 - AI gateway
 - The object storage bucket, presigned uploads and signed downloads
+  (the attachment metadata boundary is implemented; see
+  [Storage](#storage-target--boundary-implemented-no-object-store-yet))
 - Audit logging
 - React Query in the frontend
 - Deployment automation and any deployed environment (development, staging,
@@ -403,8 +528,9 @@ automation-platform/
 ├── backend/                  # Django project
 │   ├── config/               # settings (base/local/production), urls, health view, wsgi/asgi
 │   ├── graphql_api/          # GraphQL infrastructure (not a business domain)
-│   ├── identity/             # business domain: accounts, sessions, external identities
+│   ├── identity/             # business domain: accounts, sessions, external identities, emailed links
 │   ├── organizations/        # business domain: organizations, memberships, roles, permissions
+│   ├── ideas/                # business domain: ideas, categories, comments, votes, attachments
 │   ├── tests/                # cross-cutting pytest suite (settings, security, integration)
 │   ├── manage.py
 │   ├── requirements.txt
@@ -426,6 +552,7 @@ automation-platform/
 │   ├── environments.md
 │   ├── development.md
 │   ├── testing.md
+│   ├── ideas-domain.md       # business domain: ideas & problem submission
 │   └── git-workflow.md
 ├── infrastructure/           # Placeholder: no infrastructure implemented yet
 ├── scripts/                  # Placeholder: no scripts yet

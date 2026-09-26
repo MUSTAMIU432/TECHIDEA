@@ -103,11 +103,29 @@ Template: [`backend/.env.example`](../backend/.env.example).
 | `DJANGO_SECURE_HSTS_PRELOAD` |        | no (`False`)      | Add the HSTS `preload` directive (deployed only). Requires includeSubDomains and a max-age of at least 31536000 |
 | `GOOGLE_OAUTH_CLIENT_ID`     |        | no                | Google OAuth client id for "Sign in with Google" (Sprint 1, S1-004). The `googleLogin` mutation always fails closed if unset - see `backend/identity/google_oauth.py`. Not secret; must match the frontend's `VITE_GOOGLE_OAUTH_CLIENT_ID`. The name is exact and nothing is inferred from any other name: a differently-named variable is silently ignored, and Google sign-in then fails closed at runtime rather than at startup |
 | `CACHE_URL`                  | **yes**| **deployed**       | Shared cache backend, e.g. `redis://localhost:6379/1`. Required in every deployed environment: the Google ID-token replay check and the authentication rate limits record state that every process must agree on, and a per-process cache is a per-process *copy*. Must not resolve to a local in-memory backend - `config.settings.production` refuses to start if it does. Local development may leave it unset (in-process cache is correct there: there is one process). See [Caching](architecture.md#caching-target--implemented) |
+| `EMAIL_BACKEND`              | **yes**| **deployed**       | Django mail backend for the password-reset and account-activation messages. Deployed environments must use one that actually sends - `config.settings.production` refuses the console backend, which would print reset links to the log instead of mailing them while every request still reported success. Local defaults to `django.core.mail.backends.console.EmailBackend`, which is what makes the flow clickable by hand with no mail account |
+| `EMAIL_HOST`                 |        | no (`localhost`)   | SMTP server. Not guarded - an ordinary knob of every SMTP server |
+| `EMAIL_PORT`                 |        | no (`587`)         | SMTP port. For implicit TLS on 465 use `EMAIL_PORT=465` with `EMAIL_USE_TLS=False`, which Django expresses as SSL-on-connect |
+| `EMAIL_USE_TLS`              |        | no (`True`)        | Use TLS on submission (port 587) |
+| `EMAIL_HOST_USER`            | **yes**| **deployed**       | **Secret.** The mailbox's app password, never the account's real password. Required in every deployed environment |
+| `EMAIL_HOST_PASSWORD`        | **yes**| **deployed**       | **Secret.** The SMTP credential, normally the app password issued for `EMAIL_HOST_USER` |
+| `DEFAULT_FROM_EMAIL`         | **yes**| **deployed**       | The address the messages claim to come from. Rejected in a deployed environment if left at the local default: SPF/DKIM are checked against this domain, so a placeholder sender is how reset mail ends up in spam |
+| `FRONTEND_URL`               | **yes**| **deployed**       | Public origin of the browser app, no trailing slash (a trailing `/` is stripped). The reset and activation links point *into the frontend*, so this decides where a user lands after clicking one. Required in a deployed environment and must be `https://` there - an `http://` link would hand the single-use token in its query string to the network in the clear. Local defaults to the Vite dev server |
+| `PASSWORD_RESET_TOKEN_LIFETIME_MINUTES` | | no (`60`) | How long an emailed password-reset link stays usable. Deliberately short: the link is only needed at the moment its owner clicks it |
+| `ACTIVATION_TOKEN_LIFETIME_HOURS` | | no (`48`)  | How long an emailed account-activation link stays usable |
 
 Notes:
 
 - Real environment variables override `backend/.env`. Deployed
   environments should not use a `.env` file at all.
+- The two emailed flows (password reset, account activation) report the same
+  generic success whether or not anything was sent, so a deployment whose
+  mail is silently broken looks exactly like one nobody has used yet. That
+  asymmetry is the reason the five variables above are *required* in a
+  deployed environment rather than merely recommended: the failure is
+  invisible at the API boundary by construction, and is otherwise found from
+  a support ticket. A failed send is logged at `ERROR` with the user's
+  primary key - never the token - so the logs are where to look.
 - CORS applies only to `/graphql/`. `CORS_ALLOW_CREDENTIALS` is `True`
   (Sprint 1, S1-003): the refresh-token cookie needs credentialed
   cross-origin requests, and this is safe only because

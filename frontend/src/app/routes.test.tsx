@@ -18,6 +18,11 @@ vi.mock('../features/identity/auth/authApi', () => ({
   logoutRequest: vi.fn(),
   refreshTokenRequest: vi.fn(),
   meRequest: vi.fn(),
+  registerRequest: vi.fn(),
+  requestPasswordResetRequest: vi.fn(),
+  resetPasswordRequest: vi.fn(),
+  activateAccountRequest: vi.fn(),
+  resendActivationEmailRequest: vi.fn(),
 }))
 
 const mockedRefresh = vi.mocked(refreshTokenRequest)
@@ -72,6 +77,17 @@ describe('route tree', () => {
 
     expect(
       screen.getByRole('heading', { level: 1, name: 'Reset your password' }),
+    ).toBeInTheDocument()
+  })
+
+  it('renders the activate account page at /activate-account', () => {
+    // The confirmation email links here, so the path is a contract with the
+    // backend (identity.email.ACTIVATION_PATH) rather than a free choice: a
+    // link that 404s would leave a new account with no way to confirm at all.
+    renderRoutes(router.routes, '/activate-account?token=sample-token')
+
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Confirm your email' }),
     ).toBeInTheDocument()
   })
 

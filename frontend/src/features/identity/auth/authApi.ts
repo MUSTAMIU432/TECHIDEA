@@ -182,7 +182,8 @@ export async function meRequest(): Promise<AuthUser | null> {
   return data.me
 }
 
-/** The fields the backend's `RegisterInput` requires. */
+/**
+ * The fields the backend's `RegisterInput` requires. */
 export interface RegisterInput {
   firstName: string
   lastName: string
@@ -215,8 +216,9 @@ const REGISTER_MUTATION = `
 
 /**
  * Creates an account. The backend's `register` mutation creates the User
- * record only - it does not authenticate, so this returns no session and
- * the caller still has to sign in (see `SignUpForm`).
+ * record and emails it an activation link - it does not authenticate, so
+ * this returns no session and the caller still has to sign in (see
+ * `SignUpForm`).
  *
  * A GraphQL-level `errors` array is *not* a registration failure: the
  * backend reports every input problem as `success: false` with a `field`,
@@ -230,4 +232,141 @@ export async function registerRequest(input: RegisterInput): Promise<RegisterRes
     input,
   })
   return data.register
+}
+
+// --- emailed links: password reset and account activation ---------------------------
+//
+// The three operations below share a payload shape (`ActionPayload`) and one
+// rule that matters more than their differences: the backend answers the
+// *request* side generically — the same message and the same outcome whether
+// or not the address has an account — because those mutations take a
+// caller-supplied address and would otherwise be an account-existence oracle.
+// So `requestPasswordResetRequest` and `resendActivationEmailRequest` return
+// a message that says nothing, and the UI must not narrow it. What they
+// return is deliberately not a boolean "an account exists".
+
+/**
+ * The backend's `ActionPayload`: an outcome that establishes no session.
+ *
+ * `field` names the input a failure applies to (`'email'`, `'password'` or
+ * `'token'`) in the same camelCase the schema uses, or is `null` for a
+ * whole-form failure. The frontend uses `token` to know that re-showing the
+ * form would be pointless, and `password` to put a rejected password next to
+ * the input rather than at the top of the form.
+ */
+export interface ActionResult {
+  success: boolean
+  message: string
+  field: string | null
+  user: AuthUser | null
+}
+
+const REQUEST_PASSWORD_RESET_MUTATION = `
+  mutation RequestPasswordReset($input: RequestPasswordResetInput!) {
+    requestPasswordReset(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+const RESET_PASSWORD_MUTATION = `
+  mutation ResetPassword($input: ResetPasswordInput!) {
+    resetPassword(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+const ACTIVATE_ACCOUNT_MUTATION = `
+  mutation ActivateAccount($input: ActivateAccountInput!) {
+    activateAccount(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+const RESEND_ACTIVATION_EMAIL_MUTATION = `
+  mutation ResendActivationEmail($input: ResendActivationEmailInput!) {
+    resendActivationEmail(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+/**
+ * Asks the backend to email a password-reset link.
+ *
+ * The success message is the backend's, verbatim and unedited: it is written
+ * to be identical whether or not the address has an account, and the UI
+ * showing its own wording instead would risk saying something narrower than
+ * the API did. So this returns the message to display rather than a boolean.
+ */
+export async function requestPasswordResetRequest(email: string): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ requestPasswordReset: ActionResult }>(
+    REQUEST_PASSWORD_RESET_MUTATION,
+    { input: { email } },
+  )
+  return data.requestPasswordReset
+}
+
+/**
+ * Sets a new password using the token from a reset link.
+ *
+ * A success here signs the user *out* everywhere: the backend revokes every
+ * session for the account (including the one this browser was holding) and
+ * clears its cookie, so the only correct next step is signing in with the
+ * new password. This establishes no session itself and returns no access
+ * token.
+ */
+export async function resetPasswordRequest(
+  token: string,
+  newPassword: string,
+): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ resetPassword: ActionResult }>(
+    RESET_PASSWORD_MUTATION,
+    {
+      input: { token, newPassword },
+    },
+  )
+  return data.resetPassword
+}
+
+/**
+ * Confirms an email address using the token from an activation link.
+ *
+ * Establishes no session: a confirmation link must never be a way to sign
+ * somebody in, so there is no access token here even on success. The
+ * account's `isVerified` flag is the only thing that changes.
+ */
+export async function activateAccountRequest(token: string): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ activateAccount: ActionResult }>(
+    ACTIVATE_ACCOUNT_MUTATION,
+    { input: { token } },
+  )
+  return data.activateAccount
+}
+
+/**
+ * Asks for the activation email to be sent again, for an account whose first
+ * message was lost. Answers exactly like `requestPasswordResetRequest` — the
+ * same generic message for every outcome — for the same reason.
+ */
+export async function resendActivationEmailRequest(email: string): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ resendActivationEmail: ActionResult }>(
+    RESEND_ACTIVATION_EMAIL_MUTATION,
+    { input: { email } },
+  )
+  return data.resendActivationEmail
 }

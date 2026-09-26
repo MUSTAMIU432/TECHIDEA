@@ -4,7 +4,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from identity.forms import UserChangeForm, UserCreationForm
-from identity.models import ExternalIdentity, RefreshSession, User
+from identity.models import EmailToken, ExternalIdentity, RefreshSession, User
 
 
 @admin.register(User)
@@ -112,6 +112,41 @@ class RefreshSessionAdmin(admin.ModelAdmin):
         'revoked_at',
         'last_used_at',
         'replaced_by',
+    ]
+
+    def has_add_permission(self, request) -> bool:
+        return False
+
+
+@admin.register(EmailToken)
+class EmailTokenAdmin(admin.ModelAdmin):
+    """
+    Read-only visibility into issued emailed tokens (password reset,
+    activation) - never a way to read a raw token back out (only its hash is
+    ever stored, so there's nothing to display even if this were editable).
+
+    No add permission either: a token row is only ever created as a side
+    effect of minting one, which is what puts the matching email in some
+    inbox. Adding one here would create a live credential whose owner was
+    never told about it.
+    """
+
+    list_display: ClassVar[list[str]] = [
+        'user',
+        'purpose',
+        'created_at',
+        'expires_at',
+        'used_at',
+    ]
+    list_filter: ClassVar[list[str]] = ['purpose', 'used_at']
+    search_fields: ClassVar[list[str]] = ['user__email']
+    readonly_fields: ClassVar[list[str]] = [
+        'user',
+        'purpose',
+        'token_hash',
+        'created_at',
+        'expires_at',
+        'used_at',
     ]
 
     def has_add_permission(self, request) -> bool:

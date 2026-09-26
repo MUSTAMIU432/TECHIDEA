@@ -2,12 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { graphqlClient } from '../../../graphql/client'
 import {
+  activateAccountRequest,
   googleLoginRequest,
   loginRequest,
   logoutRequest,
   meRequest,
   refreshTokenRequest,
   registerRequest,
+  requestPasswordResetRequest,
+  resendActivationEmailRequest,
+  resetPasswordRequest,
 } from './authApi'
 
 /**
@@ -324,6 +328,120 @@ describe('authApi', () => {
     // invalid, expired or deactivated-account token, and the caller must not
     // have to distinguish it from a transport failure.
     expect(result).toBeNull()
+  })
+
+  // --- emailed links: password reset and account activation -------------------
+
+  it('sends requestPasswordReset with the address as a variable', async () => {
+    const fetchMock = stubFetch({
+      requestPasswordReset: {
+        success: true,
+        message:
+          "If an account exists for that email, we've sent instructions to reset your password.",
+        field: null,
+        user: null,
+      },
+    })
+
+    const result = await requestPasswordResetRequest('ada@example.com')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('RequestPasswordReset')
+    expect(request.variables).toEqual({ input: { email: 'ada@example.com' } })
+    // The message is the backend's, passed through untouched: it is identical
+    // whether or not the address has an account, and a frontend that rewrote it
+    // could easily say something narrower.
+    expect(result.message).toContain('If an account exists for that email')
+  })
+
+  it('sends resetPassword with the token and the new password', async () => {
+    const fetchMock = stubFetch({
+      resetPassword: {
+        success: true,
+        message: 'Your password has been reset.',
+        field: null,
+        user: null,
+      },
+    })
+
+    await resetPasswordRequest('a-real-token', 'a-new-password')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('ResetPassword')
+    expect(request.variables).toEqual({
+      input: { token: 'a-real-token', newPassword: 'a-new-password' },
+    })
+  })
+
+  it('sends activateAccount with the token', async () => {
+    const fetchMock = stubFetch({
+      activateAccount: { success: true, message: 'Confirmed.', field: null, user: null },
+    })
+
+    await activateAccountRequest('a-real-token')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('ActivateAccount')
+    expect(request.variables).toEqual({ input: { token: 'a-real-token' } })
+  })
+
+  it('sends resendActivationEmail with the address as a variable', async () => {
+    const fetchMock = stubFetch({
+      resendActivationEmail: {
+        success: true,
+        message: "If that email needs confirming, we've sent it a confirmation link.",
+        field: null,
+        user: null,
+      },
+    })
+
+    await resendActivationEmailRequest('ada@example.com')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('ResendActivationEmail')
+    expect(request.variables).toEqual({ input: { email: 'ada@example.com' } })
+  })
+
+  it.each([
+    ['requestPasswordReset', () => requestPasswordResetRequest('ada@example.com')],
+    ['resetPassword', () => resetPasswordRequest('a-real-token', 'a-new-password')],
+    ['activateAccount', () => activateAccountRequest('a-real-token')],
+    ['resendActivationEmail', () => resendActivationEmailRequest('ada@example.com')],
+  ])('reports the backend field on a %s failure', async (rootField, call) => {
+    stubFetch({
+      [rootField]: {
+        success: false,
+        message: 'This link is invalid or has expired.',
+        field: 'token',
+        user: null,
+      },
+    })
+
+    const result = await call()
+
+    // The frontend places a `field` failure next to the input that caused it
+    // and treats a `null` field as a whole-form problem, so the shape has to
+    // survive the trip.
+    expect(result).toMatchObject({ success: false, field: 'token' })
+  })
+
+  it.each([
+    ['requestPasswordReset', () => requestPasswordResetRequest('ada@example.com')],
+    ['resetPassword', () => resetPasswordRequest('a-real-token', 'a-new-password')],
+    ['activateAccount', () => activateAccountRequest('a-real-token')],
+    ['resendActivationEmail', () => resendActivationEmailRequest('ada@example.com')],
+  ])('sends no access token for %s, since none establishes a session', async (rootField, call) => {
+    const fetchMock = stubFetch({
+      [rootField]: { success: true, message: 'Done.', field: null, user: null },
+    })
+
+    await call()
+
+    const [request] = sentRequests(fetchMock)
+    // A reset or a confirmation is emphatically not a login: the backend
+    // returns no access token for any of them, and asking for one here would
+    // be a contract the backend does not have.
+    expect(request.query).not.toContain('accessToken')
   })
 
   it('goes through the shared client, so the refresh cookie travels with me', async () => {

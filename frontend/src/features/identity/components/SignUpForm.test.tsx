@@ -219,6 +219,23 @@ describe('SignUpForm', () => {
     expect(screen.queryByRole('button', { name: 'Create Account' })).not.toBeInTheDocument()
   })
 
+  it('mentions the confirmation email, and that confirming is optional', async () => {
+    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    await renderAndFill()
+
+    submit()
+
+    // Registration emails a confirmation link. The copy has to say both that
+    // it exists and that it is not required: the backend's `login` does not
+    // check `isVerified`, so an unconfirmed account can sign in and work
+    // normally. Reading this as a gate would strand anyone who lost the first
+    // message, which is exactly who this page is read by.
+    expect(
+      await screen.findByText(/emailed you a link to confirm your address/i),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/it isn't required/i)).toBeInTheDocument()
+  })
+
   it('leads to sign-in from the success state, since registration does not authenticate', async () => {
     mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
     const { onSwitchToSignIn } = await renderAndFill()

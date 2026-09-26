@@ -6,6 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — Sprint 2: Ideas & Problem Submission
+
+- S2-001: Ideas domain architecture — the `ideas` app, the platform's first
+  business domain beyond Identity & Access. Five entities: `Category`
+  (platform-wide, flat, reusable, retired rather than deleted once used),
+  `Idea`, `Comment`, `Vote` and `Attachment`, plus their migration and admin
+  registrations. Scope is deliberately schema-only: no service, selector,
+  GraphQL operation or UI ships in this item, and none is stubbed. The
+  design and the planned seams for S2-002 are in `docs/ideas-domain.md`.
+  - **Lifecycle** — the full vocabulary (`draft`, `submitted`,
+    `under_review`, `changes_requested`, `rejected`, `approved`,
+    `automation_proposal`) is established so implementing the review
+    workflow in Sprint 3 is behaviour, not a migration. Only `DRAFT →
+    SUBMITTED` belongs to Sprint 2. `status` and `visibility` are enforced by
+    database `CHECK` constraints *as well as* `choices`, because `choices`
+    only covers `full_clean()` and `bulk_create`/`QuerySet.update`/a
+    management command all bypass it; both are generated from one definition
+    so they cannot drift.
+  - **Visibility** — `public`/`organization`/`department`/`private`,
+    defaulting to `private` so a new submission is visible to nobody until
+    somebody deliberately widens it. `department` is a **reserved value**,
+    not a half-built feature: the platform has no Department model, and
+    inventing one inside `ideas` would have been a different sprint's work.
+    What enforcement will need is recorded in the domain doc.
+  - **No second authorization system.** `ideas` adds no permission codes and
+    no `permissions.py`; membership and organization permissions stay in
+    `organizations/authorization.py`. The one Ideas-specific decision -
+    which ideas a user may *read* - is a visibility filter in the future
+    selector layer, built on `get_membership`, not a parallel permission
+    hierarchy.
+  - **Tenancy** — `Idea.organization` is required on every row, so there is
+    no idea that exists outside a tenant and a forgotten tenant filter cannot
+    reach anything. `Category` is deliberately *not* tenant-scoped: it is
+    what makes ideas comparable across organizations later.
+  - **Storage boundary** — `Attachment` is metadata only
+    (`storage_key`, `filename`, `content_type`, `size`) and holds no file
+    field of any kind, so attachment bytes cannot end up in PostgreSQL. The
+    bucket, presigned uploads and signed downloads are later work. A test
+    asserts no `FileField`/`BinaryField`/`DataField` ever appears.
+  - **Deletion behaviour** — `Idea.category` is `PROTECT`, because an idea
+    that has been reviewed must not vanish when the category list is tidied;
+    `is_active=False` is the supported retirement. `organization` and the
+    child rows cascade, matching `Membership`'s rule in Sprint 1.
+  - **Indexes** — five composite indexes shaped like the queries Sprint 2
+    will actually make (organization feed, organization+status,
+    category, visibility, author), and the three `Idea` foreign keys that
+    lead one of them have Django's automatic single-column index switched
+    off, since it would be a strict prefix of an index PostgreSQL could
+    already use. Asserted by tests so the two cannot diverge.
+  - A test asserts the app's model set is exactly these five, so a review,
+    proposal or developer model arriving here fails the build.
+
 ### Added — Sprint 1: Identity & Access
 
 - S1-002: User registration — the `identity` app's `User` model (email as
@@ -109,6 +161,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     Google account linking, a design that was rejected; `docs/architecture.md`
     now reflects S1-005 through S1-009 and `docs/environments.md` documents
     `CACHE_URL`.
+- S1-010: Password reset and account activation — the two emailed-link flows,
+  and the frontend that consumes them. `EmailToken` (with `EmailTokenPurpose`),
+  `identity/email.py` and its two plain-text templates, the
+  `requestPasswordReset`/`resetPassword`/`activateAccount`/
+  `resendActivationEmail` mutations, the five SMTP/frontend-origin settings,
+  and the `/activate-account` route the confirmation link needs.
+  - **Neither request side discloses whether an address is registered.**
+    `requestPasswordReset` and `resendActivationEmail` take a caller-supplied
+    address, so a different answer for a hit than for a miss would make each
+    an account-existence oracle. Every outcome — no account, deactivated,
+    already verified, or Google-only with no password to reset — returns one
+    message, and only the hit side sends anything. The frontend displays that
+    message verbatim rather than wording its own, for the same reason.
+  - **Only a hash is stored.** The raw token exists in exactly one place,
+    the email; `EmailToken.token_hash` is a SHA-256 digest, so a database
+    leak yields nothing replayable. A fast hash is right here precisely
+    because the value is 384 bits of `secrets` output rather than a
+    human-chosen secret — the reasoning `RefreshSession` already used,
+    applied again rather than assumed.
+  - **One-time, expiring, superseded.** A redeemed token is recorded as used
+    rather than deleted, so "already used" stays distinguishable from "never
+    existed" in the record even though the caller cannot tell them apart.
+    Requesting a new link supersedes any outstanding one for the same
+    purpose, so a leaked older email stops being a live credential — and
+    superseding cannot erase the record that an earlier link was redeemed.
+  - **One message for every unusable token**, and one per flow: never real,
+    expired, already used, or belonging to the other operation. A message per
+    case would tell whoever holds a stolen link exactly how far it got.
+  - **A reset ends every session on the account**, the caller's own browser
+    included, and clears its refresh cookie in the same response. Without
+    that step a password changed *because it may have been stolen* leaves the
+    attacker's existing session signed in until it expires on its own
+    schedule.
+  - **Verification is not a login requirement.** `login` does not check
+    `isVerified`, so an unconfirmed account owns a legitimate account and is
+    not locked out of it. Making verification an authorization gate is a
+    separate decision, to be taken in one place, once there is a reason to.
+  - **Delivery failure is logged, never raised**, at `ERROR` with the user's
+    primary key and never the token — raising would either leak account
+    existence to fix a mail problem or force every caller to reimplement the
+    catch. The cost is that a broken mail setup is found in the logs rather
+    than in a support ticket, which is why production settings now *require*
+    the five email variables and refuse the console backend outright: both
+    flows report generic success whether or not anything was sent, so a
+    deployment that cannot send is otherwise indistinguishable from one
+    nobody has used yet.
+  - **All four operations are throttled** on the S1-009 infrastructure, with
+    the per-address limits keyed on the *submitted* address and never
+    resolved to a user, so a miss costs the caller the same budget as a hit.
+    The password-reset and activation-resend limits are the mail-cannon
+    bound; the reset/activation execution limits are about how much work an
+    anonymous request can cause, not about guessing an unguessable token.
+  - **Frontend wiring**: `ForgotPasswordForm` and `ResetPasswordForm` are no
+    longer placeholders, and a new `/activate-account` route exists for the
+    confirmation link. The three outcomes are kept apart on purpose — a
+    refused token, a rejected password, and an unreachable server are three
+    different facts, and treating them as one either sends a user off to
+    request a new link for a link that was fine, or tells them their link is
+    dead when the request never arrived. Following an activation link is an
+    explicit press rather than a request on mount, because mail clients and
+    link scanners fetch URLs before a person sees them and the token is
+    single-use.
+  - Tests: the flows at the service, GraphQL, transport and real-HTTP layers,
+    the four throttle policies, the settings guards, and `.env.example`
+    completeness. Several were written to fail first — a throttle rendered as
+    "check your email" on the forgot-password form, and a permanently
+    disabled confirm button on the activation page, were both caught this
+    way.
 
 ### Added — Sprint 0: Foundation
 

@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     # adapter layer that exposes them.
     'identity',
     'organizations',
+    'ideas',
     'graphql_api',
 ]
 
@@ -95,6 +96,53 @@ REFRESH_TOKEN_LIFETIME = timedelta(days=env.int('REFRESH_TOKEN_LIFETIME_DAYS', d
 # exchanges an authorization code, so the backend has no use for a client
 # secret at all (see identity/google_oauth.py's module docstring).
 GOOGLE_OAUTH_CLIENT_ID = env('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+
+# Outgoing email (identity/email.py)
+# ---------------------------------------------------------------------------------
+# Everything the two emailed flows need: where the browser app lives (to build
+# the link a user clicks), how long a link stays usable, and how to reach an
+# SMTP server.
+#
+# Deliberately plain SMTP rather than a Google API client: the only Google
+# credential this project holds is a public OAuth *client id* for verifying
+# sign-in ID tokens, which is not a credential that can send anything. Sending
+# mail through Gmail's SMTP relay needs a mailbox and an app password - no
+# service account, no domain-wide delegation, no key file to leak - and
+# EMAIL_BACKEND is a plain Django setting, so swapping in a hosted provider
+# later (SES, Postmark, django-anymail) is a settings change, not a rewrite.
+#
+# EMAIL_BACKEND defaults to Django's console backend: it writes the message to
+# stdout instead of sending it, so a developer can complete a reset or
+# activation locally with no mail account at all. production.py refuses that
+# default - a deployment that printed its password-reset links to a log
+# instead of mailing them would look like it worked and reach nobody.
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = env('EMAIL_HOST', default='localhost')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+# Submission (port 587) is encrypted in transit; implicit TLS on 465 is
+# instead selected by setting EMAIL_USE_TLS=False and EMAIL_PORT=465, which
+# Django expresses as SSL-on-connect.
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='no-reply@localhost')
+
+# The public origin of the browser app, without a trailing slash. Password
+# reset and activation emails are links *into the frontend*, not into the API,
+# so this is the one setting that decides where a user is sent after clicking
+# one. Required in every deployed environment (a link built from an empty
+# value is a link to nowhere); local.py fills in the Vite dev server.
+FRONTEND_URL = env('FRONTEND_URL', default='').rstrip('/')
+
+# How long an emailed link stays usable. Both are deliberately short: the link
+# travels over plaintext-ish channels (a mail client's search index, a shared
+# inbox, a chat app someone forwards it into) and is only needed at the moment
+# its owner clicks it, so there is no reason for it to stay good for days.
+PASSWORD_RESET_TOKEN_LIFETIME = timedelta(
+    minutes=env.int('PASSWORD_RESET_TOKEN_LIFETIME_MINUTES', default=60)
+)
+ACTIVATION_TOKEN_LIFETIME = timedelta(hours=env.int('ACTIVATION_TOKEN_LIFETIME_HOURS', default=48))
 
 
 # Cache framework
