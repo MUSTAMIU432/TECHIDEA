@@ -421,6 +421,65 @@ that exists outside a tenant. A Department tier is still absent:
 on it until that tier exists - see
 [`ideas-domain.md`](ideas-domain.md#visibility).
 
+### Ideas (target — partly implemented)
+
+`ideas` is the first business domain beyond Identity & Access, and S2-002
+implements its first vertical slice end to end: file an idea, edit it as a
+draft, submit it.
+
+**Authorization is Sprint 1's, unchanged.** `ideas` adds no permission code and
+no `permissions.py`. Filing an idea requires an *active membership* in the
+target organization, resolved by `organizations.authorization.get_membership`,
+and editing or submitting requires *authorship* on top of that. Both halves
+are needed and for different reasons: membership is whether a person may act
+in that tenant at all, and it is re-checked on every write so that leaving an
+organization takes the ability to write into it with you; authorship is who
+owns the content, and a colleague in the same organization may not rewrite it.
+An earlier idea that `idea.create` should be a permission code was rejected -
+the question is already answered, and a second answer would be free to drift
+from the first.
+
+**The client is never trusted with ownership or tenancy.** `organizationId` is
+an input to a *decision* - the server authorizes that organization and then
+uses it - and the author is always the authenticated user, read from the
+access token. Neither appears in any input type, so "file this as somebody
+else" and "move this to another tenant" are not operations the API has the
+vocabulary for. Refusals never distinguish *no such idea* from *not yours*,
+so none of these operations can be used to discover which idea ids are real.
+
+**Reads live in `ideas/selectors.py`, and the filter is not optional.** Every
+read goes through a selector that has already applied tenancy and visibility,
+so the only way to obtain an idea is through a function that decided whether
+the caller may see it. `IdeaType` carries `authorId` and `organizationId` as
+ids and deliberately does not embed a user object: a `PUBLIC` idea is readable
+platform-wide, so a nested user would publish a member's email address with
+it.
+
+**`DEPARTMENT` fails closed.** It is reserved vocabulary with no Department
+model behind it, so the service refuses it as a choice and the selectors
+treat it as author-only. Treating it as `ORGANIZATION` would mean an idea an
+author deliberately scoped to their department was readable by their whole
+team - the exact outcome the reserved value exists to prevent. When the
+department tier arrives, the selectors are the one place that changes.
+
+**Submission is a rule of the transition, not of the schema.** A draft is
+incomplete by definition, so completeness (a title, a description of at least
+20 characters, a category) is checked by `submit_idea` rather than by a
+`null=False` column or a database constraint that would make a half-written
+idea unsavable. A successful submission stamps `submitted_at` in the same
+transaction as the status change, because the model treats the two as
+inconsistent apart.
+
+**Submitting ends editability, not the author's access.** A submitted idea is
+refused by `updateIdea` - by its own author, in its own organization - until
+Sprint 3 introduces the `CHANGES_REQUESTED` route back to a draft. That is the
+whole of what `SUBMITTED` changes in S2-002; it grants nothing and revokes
+nothing else, and no part of the review workflow is reachable from any
+mutation.
+
+See [`ideas-domain.md`](ideas-domain.md) for the entity design and the
+reasoning behind each decision above.
+
 ### Environments (target — convention implemented)
 
 LOCAL, DEVELOPMENT, STAGING, PRODUCTION, each configured via environment
@@ -450,7 +509,9 @@ business domain is not started.
 | Area | What exists | Task |
 | ---- | ----------- | ---- |
 | Ideas domain | `ideas` app: `Category`, `Idea`, `Comment`, `Vote`, `Attachment`, and their migration/admin | S2-001 |
-| Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices`. Only the vocabulary - no transition is implemented yet | S2-001 |
+| Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices` | S2-001 |
+| Idea creation and submission | `createIdea`/`updateIdea`/`submitIdea`, `idea`/`ideas`/`organizationIdeas`/`categories` queries, tenant- and visibility-filtered selectors, and the `/app/ideas` UI. `DRAFT → SUBMITTED` only; the review transitions are Sprint 3 | S2-002 |
+| Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
 | Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
 | Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
 | Domain documentation | [`ideas-domain.md`](ideas-domain.md) | S2-001 |
@@ -502,9 +563,13 @@ How these are used day to day: [`development.md`](development.md),
 - Business domain apps other than `identity`, `organizations` and `ideas`:
   reviews, opportunities, proposals, developers, projects, tasks,
   notifications, impact, files, audit
-- The Ideas business operations themselves: creation, submission, comments,
-  voting and attachments are schema-only (S2-001); the services, selectors,
-  GraphQL operations and UI are S2-002
+- The Ideas operations beyond creation and submission: comments, voting,
+  attachments (their *bytes* and upload flow), and the whole review workflow -
+  `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` and
+  `AUTOMATION_PROPOSAL` are named in the schema and reachable in no mutation.
+  S2-002 implements `DRAFT → SUBMITTED` and nothing past it
+- Discovery: there is no cross-organization idea search, no category browsing
+  page, and no feed beyond the one organization's ideas a reader is already in
 - An authenticated Google-account-linking flow (today's Google sign-in only
   ever authenticates or provisions a *new* account - it never links to an
   existing one, by verified email or otherwise)

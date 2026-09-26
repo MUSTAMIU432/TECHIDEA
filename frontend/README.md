@@ -103,7 +103,9 @@ src/
 ├── app/            # App root wiring: route tree (routes.tsx)
 ├── components/     # Shared reusable UI (ErrorBoundary, etc.)
 ├── features/
-│   └── identity/   # Sign in/up/forgot-password UI, auth state (auth/)
+│   ├── identity/     # Sign in/up/reset/confirm UI, auth state (auth/)
+│   ├── organizations/ # Organizations, members, roles; the active-organization context
+│   └── ideas/        # File, edit and submit ideas (S2-002)
 ├── graphql/         # Centralized GraphQL client (client.ts), token store
 ├── layouts/        # Page shells (RootLayout)
 ├── lib/            # Cross-cutting utilities (env access)
@@ -262,19 +264,24 @@ fallback message instead of an uncontrolled blank page.
   redirecting to `/auth` when there's no session. `DashboardPage` is a
   placeholder proving the login/session lifecycle end to end, not a real
   product surface.
+- `/app/ideas` (`RequireAuth` → `IdeasPage`) — the Ideas area. An `/app`
+  child rather than a top-level route, so it inherits the auth gate and the
+  `OrganizationProvider`, and takes its organization from the same switcher as
+  the rest of the authenticated app rather than from a picker of its own.
 
 Future business domains each get their own route module under
 `src/features/<domain>` and are wired into this tree.
 
 ## What this is not
 
-Real product features (ideas, reviews, projects, notifications, ...) don't
-exist yet. What exists is Identity (sign in, sign up, Google sign-in, session
-lifecycle, password reset and email confirmation) and the organizations tier
-(create an organization, switch between them, see members and roles). Within
-Identity, what is still missing is an authenticated Google-account-linking
-flow: Google sign-in authenticates or provisions, and never links to an
-existing account by email.
+What exists is Identity (sign in, sign up, Google sign-in, session lifecycle,
+password reset and email confirmation), the organizations tier (create an
+organization, switch between them, see members and roles), and the first
+Ideas slice (file an idea, edit your own draft, submit it for review).
+Reviews, projects, notifications, comments, voting and everything else in that
+direction do not exist yet. Within Identity, what is still missing is an
+authenticated Google-account-linking flow: Google sign-in authenticates or
+provisions, and never links to an existing account by email.
 
 Two things the reset and confirmation flows deliberately do **not** do on this
 side, because the backend is the authority for both:
@@ -288,6 +295,20 @@ side, because the backend is the authority for both:
 - They do not explain *why* a link failed. The backend gives one message for
   every unusable token (never real, expired, already used, or belonging to
   the other flow), and the UI repeats that discipline instead of helping.
+
+Two things the Ideas area deliberately does **not** do on this side:
+
+- It does not filter anything. Every read goes through a query the backend has
+  already applied the tenant and visibility rules to, and the client offers no
+  filter argument that could widen the result — a client-side filter over
+  ideas would be a client-side control over what somebody may read, which is
+  the one thing a browser cannot be trusted with. The frontend narrows what it
+  *shows* (a "Your drafts" heading, a sort) and never what it is *given*.
+- It does not decide who may edit. `idea.authorId` compared with the signed-in
+  user's id decides what to *offer* — an Edit or Submit button, or none — and
+  offering is presentation. The server refuses an edit or a submission it
+  should refuse whether or not the buttons were rendered, so hiding them is
+  a courtesy to the reader, not a control.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no

@@ -256,10 +256,27 @@ require the author; `vote_for_idea` must be idempotent at the service level
 and enforced at the database level, and a user may not vote on an idea they
 cannot read.
 
-`ideas/services.py` does not exist yet. It will be created with these
-operations in S2-002 rather than as a file of empty functions now.
+**As implemented (S2-002).** `create_idea`, `update_idea` and `submit_idea`
+ship, with `IdeaInput` carrying the four writable content fields and nothing
+else. `add_comment`, `update_comment`, `delete_comment`, `vote_for_idea` and
+`remove_vote` are still to come, and are not stubbed.
 
-## Selector layer (planned, S2-002)
+Two decisions the implementation had to make that this document did not
+anticipate:
+
+- **"What must be filled in to submit" is a real rule, and it is a threshold
+  rather than a boolean.** A title, a description of *at least 20
+  characters*, and a category. The description minimum is the one number in
+  this domain that is a judgement call rather than a consequence of the
+  schema: a blank description cannot be acted on by a reviewer, and a
+  one-word description is not a problem statement. It is a module constant, so
+  changing it is a visible decision.
+- **A submitted idea is no longer editable, by anybody.** `update_idea` and
+  `submit_idea` both refuse anything past `DRAFT`. Sprint 3 introduces
+  `CHANGES_REQUESTED`, which is the route back to a draft; until it exists,
+  refusing is the only answer that is not a lie about what `SUBMITTED` means.
+
+## Selector layer (implemented, S2-002)
 
 Reads live in `ideas/selectors.py`, separate from writes, so the visibility
 and tenancy rules are applied in exactly one place:
@@ -278,10 +295,10 @@ apply it: the only way to get ideas is through a selector that applied it.
 The filter is built from `get_membership`, so it is the same membership
 Sprint 1 authorizes with.
 
-## GraphQL boundary (planned, S2-002)
+## GraphQL boundary (implemented, S2-002)
 
-S2-001 adds **nothing** to the GraphQL schema. `graphql_api/schema.py` merges
-one `Query`/`Mutation` per domain app, so the ideas seam is a single import
+S2-001 added **nothing** to the GraphQL schema. `graphql_api/schema.py` merges
+one `Query`/`Mutation` per domain app, so the ideas seam was a single import
 and one extra base class:
 
 ```python
@@ -317,14 +334,17 @@ omission.
 
 ```
 frontend/src/features/ideas/
-    api/          ideaApi.ts, ideaQueries.ts, categoryApi.ts - graphql-request calls
-    components/   IdeaCard, IdeaForm, IdeaStatusBadge, VoteButton, CommentThread
-    hooks/        useIdeas, useIdea, useVote
-    pages/        IdeaListPage, IdeaDetailPage, IdeaFormPage
-    types/        idea.ts - the frontend mirror of the GraphQL types
-    utils/        visibility.ts, ideaStatus.ts
-    tests/
+    api/          ideasApi.ts - the documents and typed request functions
+    components/   IdeaForm, IdeaList, IdeasWorkspace
 ```
+
+As implemented (S2-002), the data loading is held in the components rather
+than in the `hooks/` layer sketched above: the workspace owns the mutations
+and the list owns its one fetch, and neither needs a shared cache yet — the
+app has no React Query and S2-002 has one screen and one list. The `pages/`,
+`types/`, `utils/` and `CommentThread`/`VoteButton` parts are still to come,
+and a `useIdeas` hook is the natural first extraction if a second screen ever
+needs the same list.
 
 This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
@@ -352,7 +372,7 @@ the typed request functions, `context/`-free hooks read them, and
 | Sprint | Scope |
 | ------ | ----- |
 | S2-001 (this) | `ideas` app, five models, migration, admin, model tests, this document |
-| S2-002 | `createIdea`/`updateIdea`/`submitIdea`, `addComment`, `voteIdea`/`removeVote`, selectors, the GraphQL schema, the frontend feature module |
+| S2-002 | `createIdea`/`updateIdea`/`submitIdea`, selectors, the GraphQL schema, the frontend feature module — implemented. `addComment`/`voteIdea` were scoped into S2-002 in this document and are **not** implemented |
 | S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 

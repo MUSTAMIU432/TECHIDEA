@@ -57,6 +57,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     already use. Asserted by tests so the two cannot diverge.
   - A test asserts the app's model set is exactly these five, so a review,
     proposal or developer model arriving here fails the build.
+- S2-002: Idea creation and submission — the first complete vertical slice of
+  the Ideas domain, and the first business-domain operations on the platform.
+  A real authenticated user can open the Ideas area, file an idea, edit their
+  own draft, and submit it. `ideas/services.py` (create, update, submit),
+  `ideas/selectors.py` (the read layer), `ideas/schema.py` (the GraphQL
+  adapter), the `createIdea`/`updateIdea`/`submitIdea` mutations with
+  `idea`/`ideas`/`organizationIdeas`/`categories` queries, and the
+  `/app/ideas` frontend feature module.
+  - **Authorization stays Sprint 1's.** `ideas` adds no permission code and
+    no `permissions.py`: filing an idea requires an active membership in the
+    target organization via `organizations.authorization.get_membership`,
+    and editing or submitting requires authorship on top of that. Membership
+    is re-checked on *every* write rather than only at creation, so leaving an
+    organization takes the ability to write into it with you. An
+    `idea.create` permission code was considered and rejected — the question
+    is already answered, and a second answer would be free to drift from the
+    first.
+  - **The client is never trusted with ownership or tenancy.** `organizationId`
+    is an input to a *decision* (the server authorizes that organization and
+    then uses it) and the author is always the authenticated user, read from
+    the access token. Neither appears in any input type, so "file this as
+    somebody else" and "move this to another tenant" are not operations the
+    API has the vocabulary for. A test asserts the input dataclass has no
+    such field, so the property cannot be reintroduced quietly.
+  - **Refusals never confirm existence.** A nonexistent idea, another
+    author's, another tenant's, and one already submitted are answered
+    identically — at the service, the selector and the GraphQL layer — so
+    none of these operations can be used to discover which idea ids are real.
+  - **Reads go through selectors, and the filter cannot be skipped.** Every
+    read passes through `ideas/selectors.py`, which has already applied
+    tenancy and `Idea.visibility`; the returned `QuerySet`s mean a caller
+    cannot forget the filter by forgetting to apply it. `can_view_idea` and
+    the queryset filter are the same rule twice, and a test asserts they
+    agree, because a divergence would make the list and the "may I open
+    this?" answer contradict each other.
+  - **`DEPARTMENT` fails closed.** It is reserved vocabulary with no
+    Department model behind it, so the service refuses it as a *choice* and
+    the selectors treat it as author-only. Treating it as `ORGANIZATION`
+    would mean an idea an author deliberately narrowed to their department
+    was readable by their whole team — the exact outcome the reserved value
+    exists to prevent. The frontend's picker does not offer it either, and
+    the selectors are the one place that changes when the tier arrives.
+  - **Submission is a rule of the transition, not of the schema.** A draft is
+    incomplete by definition, so completeness — a title, a description of at
+    least 20 characters, a category — is checked by `submit_idea`, not by a
+    `null=False` column or a database constraint that would make a
+    half-written idea unsavable. `submitted_at` is stamped in the same
+    transaction as the status change, because the model treats the two as
+    inconsistent apart. Only `DRAFT → SUBMITTED` is implemented; the review
+    transitions are named in the enum and reachable from no mutation.
+  - **The GraphQL type is stricter than the organizations one, deliberately.**
+    `IdeaType` carries `authorId` and `organizationId` as ids and no nested
+    user object: a `PUBLIC` idea is readable by any signed-in member of the
+    platform, so an embedded user would publish a member's email address
+    along with it. `status` and `visibility` are enums built from the
+    model's own `TextChoices`, so the GraphQL names cannot drift from the
+    database's and the review-only statuses are part of the contract from the
+    start. A test asserts the field list contains no user or security field.
+  - **Frontend**: `features/ideas/` with the API module, `IdeaForm`
+    (create *and* edit — one form, because two would drift), `IdeaList`, and
+    `IdeasWorkspace`, routed at `/app/ideas` as an `/app` child so it
+    inherits `RequireAuth` and the existing `OrganizationProvider`. What the
+    UI offers is decided from the signed-in user's id, which is a question of
+    presentation and never a control: the server refuses an edit or a
+    submission regardless of whether the buttons were rendered. A refused
+    token, a rejected field, a field-less refusal and a transport failure are
+    four distinct outcomes in the UI, because collapsing them either sends a
+    user off to request something for a link that was fine, or tells them
+    their idea was accepted when the request never arrived.
+  - **No migration.** S2-002 is behaviour over the S2-001 schema;
+    `makemigrations --check` reports no changes, which is the intended
+    result rather than a lucky one.
+  - Not implemented, and deliberately: comments, voting, attachment uploads,
+    discovery, the review workflow, approval, automation proposals, developer
+    matching, AI and payments. `docs/ideas-domain.md` scoped comments and
+    votes into S2-002; this item implements neither, and the document now
+    says so.
+
 
 ### Added — Sprint 1: Identity & Access
 

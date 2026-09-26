@@ -14,6 +14,8 @@ per domain.
 import django
 import strawberry
 
+from ideas.schema import Mutation as IdeasMutation
+from ideas.schema import Query as IdeasQuery
 from identity.schema import Mutation as IdentityMutation
 from identity.schema import Query as IdentityQuery
 from organizations.schema import Mutation as OrganizationsMutation
@@ -30,7 +32,7 @@ class ApiStatus:
 
 
 @strawberry.type
-class Query(IdentityQuery, OrganizationsQuery):
+class Query(IdentityQuery, OrganizationsQuery, IdeasQuery):
     @strawberry.field(
         description=(
             'Infrastructure check: proves the GraphQL endpoint is reachable and resolving.'
@@ -45,7 +47,7 @@ class Query(IdentityQuery, OrganizationsQuery):
 
 
 @strawberry.type
-class Mutation(IdentityMutation, OrganizationsMutation):
+class Mutation(IdentityMutation, OrganizationsMutation, IdeasMutation):
     @strawberry.mutation(
         description=('Infrastructure check: echoes the input to prove the mutation root resolves.')
     )

@@ -88,6 +88,33 @@ def is_member_of(user: User | None, organization: Organization | object) -> bool
     return get_membership(user, organization) is not None
 
 
+def active_organization_ids(user: User | None) -> list[int]:
+    """
+    The ids of every organization `user` is an *active* member of.
+
+    The set-valued sibling of `get_membership`, for the questions that are
+    about many organizations at once rather than one - a tenant-scoped feed,
+    or a visibility filter that has to answer "is this reader in the same
+    organization as this idea?" in a single query.
+
+    It exists here, and not in the domain that first needed it, so that the
+    definition of "an active membership" stays in exactly one place. A
+    visibility filter written against its own copy of the Membership query
+    would be free to drift from the one `require_permission` uses - and the
+    drift would be invisible, because both would look correct in isolation.
+    """
+    active_user = _active_user(user)
+    if active_user is None:
+        return []
+
+    return list(
+        Membership.objects.filter(
+            user=active_user,
+            status=Membership.Status.ACTIVE,
+        ).values_list('organization_id', flat=True)
+    )
+
+
 def membership_has_permission(membership: Membership | None, permission_code: str) -> bool:
     if membership is None or not permission_code:
         return False

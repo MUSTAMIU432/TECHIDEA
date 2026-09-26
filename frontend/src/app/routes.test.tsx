@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setAccessToken } from '../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../features/identity/auth/authApi'
+import { organizationIdeasRequest } from '../features/ideas/api/ideasApi'
 import { organizationsRequest } from '../features/organizations/api/organizationApi'
 import { renderRoutes } from '../test/renderWithRouter'
 import { router } from './routes'
@@ -10,6 +11,17 @@ import { router } from './routes'
 vi.mock('../features/organizations/api/organizationApi', () => ({
   organizationsRequest: vi.fn(),
   createOrganizationRequest: vi.fn(),
+}))
+
+// The Ideas feature's own API module. Mocked wholesale because
+// `/app/ideas` mounts IdeaList, which fetches on mount; the module's own
+// documents are asserted in `features/ideas/api/ideasApi.test.ts`.
+vi.mock('../features/ideas/api/ideasApi', () => ({
+  organizationIdeasRequest: vi.fn(),
+  categoriesRequest: vi.fn(),
+  createIdeaRequest: vi.fn(),
+  updateIdeaRequest: vi.fn(),
+  submitIdeaRequest: vi.fn(),
 }))
 
 vi.mock('../features/identity/auth/authApi', () => ({
@@ -28,6 +40,7 @@ vi.mock('../features/identity/auth/authApi', () => ({
 const mockedRefresh = vi.mocked(refreshTokenRequest)
 const mockedMe = vi.mocked(meRequest)
 const mockedOrganizations = vi.mocked(organizationsRequest)
+const mockedIdeas = vi.mocked(organizationIdeasRequest)
 
 const USER = {
   id: '1',
@@ -47,6 +60,7 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
     mockedMe.mockResolvedValue(null)
     mockedOrganizations.mockResolvedValue([])
+    mockedIdeas.mockResolvedValue([])
   })
 
   afterEach(() => {
@@ -94,6 +108,32 @@ describe('route tree', () => {
   it('redirects /app to /auth when there is no authenticated session', async () => {
     renderRoutes(router.routes, '/app')
 
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { level: 1, name: 'Welcome back' })).toBeInTheDocument(),
+    )
+  })
+
+  it('renders the ideas page at /app/ideas when authenticated', async () => {
+    mockedRefresh.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+    })
+    mockedMe.mockResolvedValue(USER)
+
+    renderRoutes(router.routes, '/app/ideas')
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Put a problem forward.' }),
+    ).toBeInTheDocument()
+  })
+
+  it('redirects /app/ideas to /auth when there is no authenticated session', async () => {
+    renderRoutes(router.routes, '/app/ideas')
+
+    // Inherits `RequireAuth` by being an `/app` child: an ideas screen
+    // reachable without a session would be a screen whose every write the
+    // server refuses.
     await waitFor(() =>
       expect(screen.getByRole('heading', { level: 1, name: 'Welcome back' })).toBeInTheDocument(),
     )

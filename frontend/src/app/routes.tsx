@@ -7,6 +7,7 @@ import { ResetPasswordPage } from '../features/identity/components/ResetPassword
 import { OrganizationProvider } from '../features/organizations/context/OrganizationProvider'
 import { RootLayout } from '../layouts/RootLayout'
 import { DashboardPage } from '../routes/DashboardPage'
+import { IdeasPage } from '../routes/IdeasPage'
 import { HomePage } from '../routes/HomePage'
 import { NotFoundPage } from '../routes/NotFoundPage'
 
@@ -26,7 +27,11 @@ import { NotFoundPage } from '../routes/NotFoundPage'
  * `ActivateAccountForm.test.tsx` / `ResetPasswordForm.test.tsx`.
  *
  * /app is the authenticated application area, gated by RequireAuth - it
- * redirects to /auth when there's no authenticated session.
+ * redirects to /auth when there's no authenticated session. `/app/ideas` is a
+ * child rather than a top-level route for exactly that reason: it inherits the
+ * gate and the OrganizationProvider, so the ideas screen cannot be reached
+ * without a session and takes its organization from the same switcher as the
+ * rest of the authenticated app.
  */
 export const router = createBrowserRouter([
   {
@@ -49,6 +54,14 @@ export const router = createBrowserRouter([
         element: (
           <OrganizationProvider>
             <DashboardPage />
+          </OrganizationProvider>
+        ),
+      },
+      {
+        path: 'ideas',
+        element: (
+          <OrganizationProvider>
+            <IdeasPage />
           </OrganizationProvider>
         ),
       },
