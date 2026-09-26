@@ -4,6 +4,7 @@ source =
     graphql_api
     identity
     organizations
+    ideas
 omit =
     */tests/*
     */migrations/*
