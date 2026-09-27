@@ -136,6 +136,58 @@ class TestAuthorizationPrimitives:
 
 
 @pytest.mark.django_db
+class TestActiveOrganizationIds:
+    """
+    The set-valued sibling of `get_membership`, added in S2-003 for the
+    questions that span many organizations at once - a tenant feed, or a
+    visibility filter that has to answer "is this reader in the same
+    organization as this idea?" in one query.
+
+    Its guards are asserted directly rather than through a caller, because the
+    one place that calls it (`ideas/selectors`) has already established that the
+    user is authenticated, so the guards are only reachable by a direct caller -
+    and an untested guard in a public helper is a guard nobody has checked.
+    """
+
+    def test_it_lists_the_organizations_an_active_member_belongs_to(self):
+        owner = _make_user()
+        first = services.create_organization_for_user(
+            owner, services.CreateOrganizationInput(name='Acme Labs')
+        )
+        second = services.create_organization_for_user(
+            owner, services.CreateOrganizationInput(name='Other Co')
+        )
+        colleague = _make_user('colleague@example.com')
+        Membership.objects.create(user=colleague, organization=first.organization)
+
+        assert sorted(authorization.active_organization_ids(owner)) == sorted(
+            [first.organization.pk, second.organization.pk]
+        )
+        assert authorization.active_organization_ids(colleague) == [first.organization.pk]
+
+    def test_it_ignores_an_inactive_membership(self):
+        owner = _make_user()
+        created = services.create_organization_for_user(
+            owner, services.CreateOrganizationInput(name='Acme Labs')
+        )
+        membership = Membership.objects.get(user=owner, organization=created.organization)
+        membership.status = Membership.Status.INACTIVE
+        membership.save(update_fields=['status'])
+
+        assert authorization.active_organization_ids(owner) == []
+
+    def test_an_unauthenticated_caller_gets_nothing(self):
+        assert authorization.active_organization_ids(None) == []
+
+    def test_a_deactivated_caller_gets_nothing(self):
+        user = _make_user()
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        assert authorization.active_organization_ids(user) == []
+
+
+@pytest.mark.django_db
 class TestAuthorizationBoundaries:
     def test_member_cannot_self_escalate_to_owner(self):
         owner = _make_user()

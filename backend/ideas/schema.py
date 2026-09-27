@@ -26,6 +26,11 @@ No comments, votes or attachments appear here. They are later sprints; the
 types are not stubbed, so nothing in this schema promises a surface that does
 not work.
 
+Status changes go through `transitionIdea` only. `updateIdea` takes content
+and nothing else - there is no `status` on `IdeaInput`, and no mutation that
+sets one - so "promote my own idea to Approved" is not an operation this schema
+expresses, whatever a client sends.
+
 Enums rather than strings
 -------------------------
 `status` and `visibility` are real GraphQL enums, built from the model's own
@@ -40,7 +45,7 @@ service describes what may be *used* today.
 
 import strawberry
 
-from ideas import selectors, services
+from ideas import lifecycle, selectors, services
 from ideas.models import Category, Idea
 
 IdeaStatus = strawberry.enum(Idea.Status, name='IdeaStatus')
@@ -83,9 +88,14 @@ class IdeaType:
     author_id: strawberry.ID
     organization_id: strawberry.ID
     category: CategoryType | None
+    # The statuses *this viewer* may move this idea to right now, derived from
+    # the same transition matrix that enforces the change. It saves the client
+    # from hard-coding a second, drifting copy of the lifecycle - and it is a
+    # convenience, not a control: `transitionIdea` asks the matrix again.
+    available_transitions: list[IdeaStatus]
 
     @staticmethod
-    def from_model(idea: Idea) -> 'IdeaType':
+    def from_model(idea: Idea, user=None) -> 'IdeaType':
         return IdeaType(
             id=strawberry.ID(str(idea.pk)),
             title=idea.title,
@@ -98,6 +108,9 @@ class IdeaType:
             author_id=strawberry.ID(str(idea.author_id)),
             organization_id=strawberry.ID(str(idea.organization_id)),
             category=CategoryType.from_model(idea.category) if idea.category_id else None,
+            available_transitions=[
+                IdeaStatus(status) for status in lifecycle.available_transitions(user, idea)
+            ],
         )
 
 
@@ -151,6 +164,14 @@ class SubmitIdeaPayload:
     idea: IdeaType | None = None
 
 
+@strawberry.type(description='Result of moving an idea to another lifecycle state.')
+class TransitionIdeaPayload:
+    success: bool
+    message: str
+    field: str | None = None
+    idea: IdeaType | None = None
+
+
 def _service_error(exc: services.IdeaError) -> tuple[str, str | None]:
     return exc.message, exc.field
 
@@ -162,11 +183,14 @@ class Query:
         # Null for "no such idea", "another tenant's idea" and "not shared
         # with you" alike - see `ideas/selectors.get_idea`.
         idea = selectors.get_idea(info.context.user, id)
-        return IdeaType.from_model(idea) if idea else None
+        return IdeaType.from_model(idea, info.context.user) if idea else None
 
     @strawberry.field(description='Ideas visible to the current user, newest first.')
     def ideas(self, info: strawberry.Info) -> list[IdeaType]:
-        return [IdeaType.from_model(idea) for idea in selectors.list_ideas(info.context.user)]
+        return [
+            IdeaType.from_model(idea, info.context.user)
+            for idea in selectors.list_ideas(info.context.user)
+        ]
 
     @strawberry.field(
         description="One organization's ideas visible to the current user, newest first."
@@ -175,7 +199,7 @@ class Query:
         self, info: strawberry.Info, organization_id: strawberry.ID
     ) -> list[IdeaType]:
         return [
-            IdeaType.from_model(idea)
+            IdeaType.from_model(idea, info.context.user)
             for idea in selectors.list_organization_ideas(info.context.user, organization_id)
         ]
 
@@ -235,6 +259,31 @@ class Mutation:
             success=True,
             message='Draft updated.',
             idea=IdeaType.from_model(idea),
+        )
+
+    @strawberry.mutation(
+        description=(
+            'Move an idea to another state in its lifecycle. The only way a '
+            'status can change: there is no mutation that sets one, so a client '
+            'cannot mark its own idea reviewed or approved. The permitted pairs '
+            'and the actor each one requires are in ideas/lifecycle.py, and '
+            '`IdeaType.availableTransitions` reports what this viewer may do '
+            'with this idea right now.'
+        )
+    )
+    def transition_idea(
+        self, info: strawberry.Info, id: strawberry.ID, to: IdeaStatus
+    ) -> TransitionIdeaPayload:
+        try:
+            idea = lifecycle.transition_idea(info.context.user, id, to.value)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return TransitionIdeaPayload(success=False, message=message, field=field)
+
+        return TransitionIdeaPayload(
+            success=True,
+            message=f'Idea moved to {Idea.Status(idea.status).label}.',
+            idea=IdeaType.from_model(idea, info.context.user),
         )
 
     @strawberry.mutation(description="Submit the current user's own draft for review.")

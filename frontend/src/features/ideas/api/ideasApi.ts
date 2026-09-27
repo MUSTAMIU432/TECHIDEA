@@ -99,6 +99,17 @@ export interface Idea {
   authorId: string
   organizationId: string
   category: IdeaCategory | null
+  /**
+   * The statuses *this viewer* may move this idea to right now, computed by the
+   * backend from the same transition matrix that enforces the change.
+   *
+   * It exists so this client does not carry its own copy of the lifecycle,
+   * which would be a second place for the rules to drift. It is a
+   * convenience and never a control: `transitionIdea` asks the matrix again,
+   * and a request for a status not in this list is refused by the server
+   * exactly as if the list had been honoured.
+   */
+  availableTransitions: IdeaStatus[]
 }
 
 /** The writable content of an idea. Mirrors the backend's `IdeaInput`. */
@@ -135,6 +146,7 @@ const IDEA_FIELDS = `
   updatedAt
   authorId
   organizationId
+  availableTransitions
   category { ${CATEGORY_FIELDS} }
 `
 
@@ -186,6 +198,17 @@ const IDEAS_QUERY = `
 const ORGANIZATION_IDEAS_QUERY = `
   query OrganizationIdeas($organizationId: ID!) {
     organizationIdeas(organizationId: $organizationId) { ${IDEA_FIELDS} }
+  }
+`
+
+const TRANSITION_IDEA_MUTATION = `
+  mutation TransitionIdea($id: ID!, $to: IdeaStatus!) {
+    transitionIdea(id: $id, to: $to) {
+      success
+      message
+      field
+      idea { ${IDEA_FIELDS} }
+    }
   }
 `
 
@@ -256,6 +279,26 @@ export async function submitIdeaRequest(id: string): Promise<IdeaMutationResult>
     { id },
   )
   return data.submitIdea
+}
+
+/**
+ * Move an idea to another state in its lifecycle (S2-003).
+ *
+ * The only way a status changes: there is no mutation that sets one, so a
+ * client cannot mark its own idea reviewed or approved. The target is an enum
+ * value, so a state the domain does not have cannot even be sent; whether the
+ * move is legal *from where the idea is now* is the server's answer, not this
+ * client's.
+ */
+export async function transitionIdeaRequest(
+  id: string,
+  to: IdeaStatus,
+): Promise<IdeaMutationResult> {
+  const data = await graphqlClient.request<{ transitionIdea: IdeaMutationResult }>(
+    TRANSITION_IDEA_MUTATION,
+    { id, to },
+  )
+  return data.transitionIdea
 }
 
 /** One idea, or `null` for anything the signed-in user may not read. */

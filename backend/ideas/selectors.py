@@ -116,6 +116,42 @@ def get_idea(user: User | None, idea_id: object) -> Idea | None:
     return _base_queryset().filter(_visibility_filter(user), pk=normalized_id).first()
 
 
+def get_idea_for_update(user: User | None, idea_id: object) -> Idea | None:
+    """
+    One idea the reader may see, locked for update. Caller must be in a transaction.
+
+    Exists for exactly one caller - `ideas.lifecycle.transition_idea` - and
+    deliberately a *selector* rather than a query inside the lifecycle, so that
+    a transition is refused for precisely the ideas a read would have hidden.
+    Two implementations of the visibility rule, one in the filter and one in
+    the write path, is how "you may not see it but you may approve it" happens.
+
+    `select_for_update` is what makes two concurrent transitions of the same
+    idea safe: the second waits for the first to commit and then re-reads the
+    *new* status, rather than both having read the old one.
+    """
+    if user is None or not user.is_active:
+        return None
+
+    try:
+        normalized_id = int(str(idea_id))
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        _base_queryset()
+        .filter(_visibility_filter(user), pk=normalized_id)
+        # `of=('self',)`, and not a bare `select_for_update()`: the queryset
+        # select-relates `category`, which is nullable, so PostgreSQL builds a
+        # LEFT OUTER JOIN and refuses `FOR UPDATE` on the nullable side of one.
+        # Naming the table restricts the lock to the idea row, which is the
+        # only row whose state the transition is about - the joined rows are
+        # read-only context and are not being changed here.
+        .select_for_update(of=('self',))
+        .first()
+    )
+
+
 def list_ideas(user: User | None) -> QuerySet[Idea]:
     """
     Every idea `user` may read, across all their organizations, newest first.

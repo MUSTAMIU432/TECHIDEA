@@ -11,18 +11,18 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
   categoriesRequest: vi.fn(async () => []),
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
-  submitIdeaRequest: vi.fn(),
+  transitionIdeaRequest: vi.fn(),
   organizationIdeasRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
 
-const { createIdeaRequest, organizationIdeasRequest, submitIdeaRequest } =
+const { createIdeaRequest, organizationIdeasRequest, transitionIdeaRequest } =
   await import('../api/ideasApi')
 const createMock = vi.mocked(createIdeaRequest)
 const listMock = vi.mocked(organizationIdeasRequest)
-const submitMock = vi.mocked(submitIdeaRequest)
+const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 
@@ -38,6 +38,12 @@ const DRAFT: Awaited<ReturnType<typeof organizationIdeasRequest>>[number] = {
   authorId: '7',
   organizationId: '3',
   category: null,
+  // What the *server* says this viewer may do with it. S2-003 moved the offer
+  // from a hard-coded rule in this file to the backend's transition matrix, so
+  // these fixtures now state it explicitly - which is the stronger assertion:
+  // a button appears here because the server listed the move, not because the
+  // component decided to draw one.
+  availableTransitions: ['SUBMITTED'],
 }
 
 const SOMEONE_ELSES: typeof DRAFT = {
@@ -46,6 +52,8 @@ const SOMEONE_ELSES: typeof DRAFT = {
   title: 'Their idea',
   authorId: '9',
   visibility: 'ORGANIZATION',
+  // An ordinary reader, and not the author: the server offers them nothing.
+  availableTransitions: [],
 }
 
 function mockContext(
@@ -122,12 +130,20 @@ describe('IdeasWorkspace', () => {
   it('labels a draft and a submitted idea differently', async () => {
     mockContext([
       DRAFT,
-      { ...SOMEONE_ELSES, status: 'SUBMITTED', submittedAt: '2026-02-01T00:00:00.000Z' },
+      {
+        ...SOMEONE_ELSES,
+        status: 'SUBMITTED',
+        submittedAt: '2026-02-01T00:00:00.000Z',
+        availableTransitions: [],
+      },
     ])
     render(<IdeasWorkspace />)
 
-    expect(await screen.findByText('Draft')).toBeInTheDocument()
-    expect(screen.getByText('Submitted')).toBeInTheDocument()
+    // Each state appears as its badge *and* in the details row, so the count
+    // is asserted rather than assumed: one badge plus one row per idea.
+    await screen.findByText('Their idea')
+    expect(screen.getAllByText('Draft')).toHaveLength(2)
+    expect(screen.getAllByText('Submitted')).toHaveLength(2)
   })
 
   it('shows who each idea is shared with', async () => {
@@ -160,7 +176,17 @@ describe('IdeasWorkspace', () => {
   })
 
   it('offers no edit or submit once an idea is submitted', async () => {
-    mockContext([{ ...DRAFT, status: 'SUBMITTED', submittedAt: '2026-02-01T00:00:00.000Z' }])
+    // A submitted idea has no further move available to its author, so the
+    // server reports none - which is why the fixture says so rather than
+    // inheriting the draft's `['SUBMITTED']`.
+    mockContext([
+      {
+        ...DRAFT,
+        status: 'SUBMITTED',
+        submittedAt: '2026-02-01T00:00:00.000Z',
+        availableTransitions: [],
+      },
+    ])
     render(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
@@ -239,10 +265,10 @@ describe('IdeasWorkspace', () => {
 
   // --- submitting ---------------------------------------------------------
 
-  it('submits a draft and says it can no longer be edited', async () => {
-    submitMock.mockResolvedValue({
+  it('submits a draft and reports what the backend said happened', async () => {
+    transitionMock.mockResolvedValue({
       success: true,
-      message: 'ok',
+      message: 'Idea moved to Submitted.',
       field: null,
       idea: { ...DRAFT, status: 'SUBMITTED', submittedAt: '2026-02-01T00:00:00.000Z' },
     })
@@ -251,12 +277,14 @@ describe('IdeasWorkspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
 
-    expect(await screen.findByText(/Submitted for review/)).toBeInTheDocument()
-    expect(submitMock).toHaveBeenCalledWith('1')
+    // The backend's wording, not a local string: it is the layer that knows
+    // what the transition actually did.
+    expect(await screen.findByText('Idea moved to Submitted.')).toBeInTheDocument()
+    expect(transitionMock).toHaveBeenCalledWith('1', 'SUBMITTED')
   })
 
   it('shows a business refusal from a submission as the backend worded it', async () => {
-    submitMock.mockResolvedValue({
+    transitionMock.mockResolvedValue({
       success: false,
       message: 'Choose a category before submitting this idea.',
       field: null,
@@ -272,7 +300,7 @@ describe('IdeasWorkspace', () => {
   })
 
   it('reports a submission transport failure without claiming it went through', async () => {
-    submitMock.mockRejectedValue(new Error('Failed to fetch'))
+    transitionMock.mockRejectedValue(new Error('Failed to fetch'))
     render(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
@@ -280,12 +308,12 @@ describe('IdeasWorkspace', () => {
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('We could not reach the server. Please try again.')
-    expect(screen.queryByText(/Submitted for review/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Idea moved to/)).not.toBeInTheDocument()
   })
 
   it('spins only on the idea being submitted', async () => {
     let release: (value: IdeaMutationResult) => void = () => {}
-    submitMock.mockReturnValue(
+    transitionMock.mockReturnValue(
       new Promise((resolve) => {
         release = resolve
       }),

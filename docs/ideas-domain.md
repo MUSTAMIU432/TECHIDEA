@@ -64,22 +64,74 @@ Reverse accessors are named for what they are, not for symmetry:
 | Status | Meaning | Sprint |
 | ------ | ------- | ------ |
 | `DRAFT` | Being written. May be incomplete. Visible per `visibility`. | S2-002 |
-| `SUBMITTED` | Put forward for review. The only transition Sprint 2 owns. | S2-002 |
-| `UNDER_REVIEW` | A reviewer is looking at it. | S3 |
-| `CHANGES_REQUESTED` | Sent back to the author with reasons. | S3 |
-| `REJECTED` | Not going forward. | S3 |
-| `APPROVED` | Accepted as worth automating. | S3 |
-| `AUTOMATION_PROPOSAL` | Handed off to the opportunity/proposal track. | S3+ |
+| `SUBMITTED` | Put forward for review. | S2-002 |
+| `UNDER_REVIEW` | A reviewer is looking at it. | S2-003 |
+| `CHANGES_REQUESTED` | Sent back to the author with reasons. | S2-003 |
+| `REJECTED` | Not going forward. | S2-003 |
+| `APPROVED` | Accepted as worth automating. | S2-003 |
+| `AUTOMATION_PROPOSAL` | Handed off to the opportunity/proposal track. | S2-003 |
 
-Only the *vocabulary* exists today. The statuses are named now so that
-implementing the review workflow in Sprint 3 is a change of behaviour, not a
-migration.
+The vocabulary was established in S2-001 and every transition above is
+implemented in S2-003, so the review workflow is behaviour rather than a
+migration. What is *not* implemented is the management of it: there is no
+review queue, no reviewer assignment, no reason text on a changes-requested
+idea, and nothing acts on an idea once it reaches `AUTOMATION_PROPOSAL`.
 
-`submitted_at` is set once, by the `DRAFT → SUBMITTED` transition, and never
+### Transition matrix (implemented, S2-003)
+
+The table is `ideas.lifecycle.TRANSITIONS`: `(from, to) -> required actor`.
+It is the whole lifecycle — anything not listed is not a transition, and
+`transition_idea` refuses it.
+
+| From | To | Actor |
+| ---- | -- | ----- |
+| `DRAFT` | `SUBMITTED` | author |
+| `SUBMITTED` | `UNDER_REVIEW` | reviewer |
+| `UNDER_REVIEW` | `CHANGES_REQUESTED` | reviewer |
+| `UNDER_REVIEW` | `APPROVED` | reviewer |
+| `UNDER_REVIEW` | `REJECTED` | reviewer |
+| `CHANGES_REQUESTED` | `SUBMITTED` | author |
+| `APPROVED` | `AUTOMATION_PROPOSAL` | reviewer |
+
+`SUBMITTED → REJECTED` is deliberately absent: a submission has to be picked
+up before it can be resolved, which is what the `UNDER_REVIEW` state records.
+
+**Nothing returns to `DRAFT`.** A draft is by definition an idea with no
+`submitted_at`, so moving back to it would have to either erase an audit fact
+or contradict the model's own invariant. The route back is
+`CHANGES_REQUESTED`, which the author edits as a draft in spirit without
+pretending it was never submitted.
+
+**The two actors.** Before review begins the lifecycle belongs to the author,
+who must still hold an active membership; from `SUBMITTED` onward it belongs
+to a *reviewer* — an active member holding a **system** role in the idea's own
+organization, who is **not** the author. The self-review exclusion is
+structural rather than a matter of hoping two roles go to different people:
+bootstrap makes everybody's own organization theirs, so an author who also
+holds the `Owner` role genuinely holds it, and no role check would catch them.
+
+**Why a system role rather than a new permission code.** A dedicated
+`idea.review` code would be more precise, and is the shape to adopt if the
+platform grows a custom Reviewer role that should be grantable without full
+ownership. It is not added because nothing else needs a second capability
+code, and a permission that only ever means "is an Owner" duplicates
+`Role.is_system` and would have to be granted by hand in every organization
+created before it existed. `organizations.authorization.membership_holds_system_role`
+is the single function to replace if that trade changes.
+
+`submitted_at` is set once, by the first `DRAFT → SUBMITTED`, and never
 rewritten: it is an audit fact, and `created_at` (the row was written) and
 `submitted_at` (somebody deliberately put it forward) are genuinely different
-moments. The model enforces that a draft has no `submitted_at` and anything
-else has one.
+moments. A re-submission after `CHANGES_REQUESTED` keeps the original stamp.
+The model enforces that a draft has no `submitted_at` and anything else has one,
+which is why a transition writes the two together.
+
+**Concurrency.** Every transition reads its row with `SELECT … FOR UPDATE`
+inside the transaction, so two transitions of the same idea cannot both read
+the same starting status and both succeed: the second waits, then re-reads a
+status that no longer permits its move. Without the lock, "approve" and
+"reject" fired together would both apply and the last write would silently
+win.
 
 ### Why the free-text fields are blank-able
 
@@ -95,8 +147,24 @@ constrain review states this domain does not own.
 | ---------- | -------------------- | ----------------- |
 | `PUBLIC` | Any authenticated platform user, in any organization. | Yes |
 | `ORGANIZATION` | Any active member of the idea's organization. | Yes |
-| `DEPARTMENT` | Active members of the idea's organization who are also in the author's department. | **No** |
+| `DEPARTMENT` | Active members of the idea's organization who are also in the author's department. | **No — fails closed** |
 | `PRIVATE` | The author only. | Yes |
+
+`DEPARTMENT` fails closed in both directions. The service **refuses it as a
+choice** (`ideas.services.SELECTABLE_VISIBILITIES` omits it, so the picker
+cannot offer it and the API cannot store it), and the selectors **treat it as
+author-only** rather than as `ORGANIZATION`. Honouring it as the nearest thing
+available would mean an idea an author deliberately narrowed to their
+department was readable by their whole team — the exact outcome a reserved
+value exists to prevent. `ideas/selectors.py` is the one function to change
+when the department tier arrives.
+
+**One policy, two call sites, and they must agree.** `can_view_idea` is the
+predicate and `_visibility_filter` is the queryset form of the same rule; both
+are in `ideas/selectors.py` and a test asserts they agree for every
+(actor, visibility) pair. The write path reads through
+`selectors.get_idea_for_update`, the same filter with `FOR UPDATE` added, so
+"you may not see it" and "you may not act on it" cannot come apart.
 
 `visibility` defaults to `PRIVATE`, so a new submission is visible to nobody
 but its author until somebody deliberately widens it. Code that forgets to
@@ -338,7 +406,7 @@ frontend/src/features/ideas/
     components/   IdeaForm, IdeaList, IdeasWorkspace
 ```
 
-As implemented (S2-002), the data loading is held in the components rather
+As implemented (S2-002/S2-003), the data loading is held in the components rather
 than in the `hooks/` layer sketched above: the workspace owns the mutations
 and the list owns its one fetch, and neither needs a shared cache yet — the
 app has no React Query and S2-002 has one screen and one list. The `pages/`,

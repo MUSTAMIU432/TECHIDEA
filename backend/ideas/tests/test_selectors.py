@@ -24,6 +24,7 @@ would mean the list and the "may I open this?" answer disagree.
 """
 
 import pytest
+from django.db import transaction
 
 from ideas import selectors
 from ideas.models import Category, Idea
@@ -397,3 +398,85 @@ def test_an_organization_with_no_ideas_lists_none():
     organization = Organization.objects.create(name='Empty Co', slug='empty-co')
 
     assert list(selectors.list_organization_ideas(make_user(), organization.pk)) == []
+
+
+@pytest.mark.django_db
+class TestGetIdeaForUpdate:
+    """
+    The write path's read.
+
+    `get_idea_for_update` exists so a lifecycle transition is refused for
+    precisely the ideas a read would have hidden. Two implementations of the
+    visibility rule - one in the filter, one in the write path - is how "you may
+    not see it but you may approve it" happens, so the property tested here is
+    not that the function works but that it *agrees* with `get_idea`.
+    """
+
+    def test_it_answers_exactly_as_get_idea_does(self):
+        author = make_user()
+        organization, _ = make_organization(owner=author)
+        colleague = make_user('colleague@example.com')
+        add_active_member(organization, colleague)
+        outsider = make_user('outsider@example.com')
+        make_organization(name='Other Co', owner=outsider)
+
+        ideas = [
+            make_idea(organization, author, visibility=Idea.Visibility.PRIVATE),
+            make_idea(organization, author, visibility=Idea.Visibility.ORGANIZATION),
+            make_idea(organization, author, visibility=Idea.Visibility.PUBLIC),
+            make_idea(organization, author, visibility=Idea.Visibility.DEPARTMENT),
+            make_idea(organization, colleague, visibility=Idea.Visibility.PRIVATE),
+        ]
+
+        for reader in (author, colleague, outsider, None):
+            for idea in ideas:
+                with transaction.atomic():
+                    locked = selectors.get_idea_for_update(reader, idea.pk)
+                assert (locked is not None) == (selectors.get_idea(reader, idea.pk) is not None), (
+                    getattr(reader, 'email', None),
+                    idea.visibility,
+                )
+
+    def test_it_hides_another_tenants_idea(self):
+        author = make_user()
+        organization, _ = make_organization(owner=author)
+        outsider = make_user('outsider@example.com')
+        make_organization(name='Other Co', owner=outsider)
+        idea = make_idea(organization, author)
+
+        with transaction.atomic():
+            assert selectors.get_idea_for_update(outsider, idea.pk) is None
+
+    @pytest.mark.parametrize('bad_id', ['nope', '', None, 999999])
+    def test_a_malformed_or_unknown_id_answers_none(self, bad_id):
+        user = make_user()
+
+        with transaction.atomic():
+            assert selectors.get_idea_for_update(user, bad_id) is None
+
+    def test_it_really_locks_the_idea_row_and_nothing_else(self):
+        """
+        That the lock is in the SQL, and that it is scoped to the idea table.
+
+        The scoping is not incidental: the queryset select-relates `category`,
+        which is nullable, so a bare `FOR UPDATE` makes PostgreSQL refuse the
+        whole query ("cannot be applied to the nullable side of an outer join").
+        The `OF "ideas_idea"` clause is what keeps the read working *and* keeps
+        the lock on the one row whose state the transition is about, rather
+        than on the joined category. Asserted on the generated SQL because the
+        concurrency behaviour it protects is timing-dependent and would not
+        fail reliably without it.
+        """
+        from django.db import connections
+        from django.test.utils import CaptureQueriesContext
+
+        user = make_user()
+        organization, _ = make_organization(owner=user)
+        idea = make_idea(organization, user)
+
+        with transaction.atomic(), CaptureQueriesContext(connections['default']) as captured:
+            assert selectors.get_idea_for_update(user, idea.pk) == idea
+
+        locking = [q['sql'] for q in captured.captured_queries if 'FOR UPDATE' in q['sql']]
+        assert len(locking) == 1, [q['sql'] for q in captured.captured_queries]
+        assert 'FOR UPDATE OF "ideas_idea"' in locking[0]

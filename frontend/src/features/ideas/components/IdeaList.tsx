@@ -2,8 +2,15 @@ import { useEffect, useState } from 'react'
 
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
-import { organizationIdeasRequest, type Idea } from '../api/ideasApi'
+import { organizationIdeasRequest, type Idea, type IdeaStatus } from '../api/ideasApi'
 import { SpinnerIcon } from '../../identity/components/icons'
+import {
+  statusClasses,
+  statusDescription,
+  statusLabel,
+  transitionLabel,
+  visibilityLabel as visibilityLabelFor,
+} from '../utils/lifecycle'
 
 /**
  * The organization's ideas, and what can be done with them.
@@ -23,11 +30,17 @@ import { SpinnerIcon } from '../../identity/components/icons'
  */
 export function IdeaList({
   onEdit,
-  onSubmit,
+  onTransition,
   submittingIdeaId = null,
+  submittingTarget = null,
 }: {
   onEdit: (idea: Idea) => void
-  onSubmit: (idea: Idea) => void
+  /**
+   * Perform a lifecycle move. The list decides nothing about whether the move
+   * is allowed - it was handed `availableTransitions` by the backend - and it
+   * has no opinion about the outcome either; the workspace reports that.
+   */
+  onTransition: (idea: Idea, target: IdeaStatus) => void
   /**
    * Which idea's submission is in flight, so exactly one row shows a spinner.
    * Owned by the workspace rather than by this component: the mutation lives
@@ -35,6 +48,8 @@ export function IdeaList({
    * to learn that the request had come back.
    */
   submittingIdeaId?: string | null
+  /** Which move is in flight, so only its own button shows a spinner. */
+  submittingTarget?: IdeaStatus | null
 }) {
   const { user } = useAuth()
   const { activeOrganization, status: organizationStatus } = useOrganization()
@@ -126,15 +141,31 @@ export function IdeaList({
                   {idea.description || 'No description yet.'}
                 </p>
               </div>
-              <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-700">
-                {idea.status === 'DRAFT' ? 'Draft' : 'Submitted'}
+              <span
+                className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(idea.status)}`}
+              >
+                {statusLabel(idea.status)}
               </span>
             </div>
+
+            {/*
+              What the state *means*, not just which state it is. Worth the
+              extra line for the two states where the next step is the author's
+              to take: a changes-requested idea says so here, rather than the
+              author having to infer it from a badge colour.
+            */}
+            {idea.status !== 'DRAFT' && (
+              <p className="mt-2 text-xs text-gray-500">{statusDescription(idea.status)}</p>
+            )}
 
             <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
               <div className="flex items-center gap-1">
                 <dt>Visibility</dt>
                 <dd className="font-medium text-gray-700">{visibilityLabel(idea)}</dd>
+              </div>
+              <div className="flex items-center gap-1">
+                <dt>Status</dt>
+                <dd className="font-medium text-gray-700">{statusLabel(idea.status)}</dd>
               </div>
               <div className="flex items-center gap-1">
                 <dt>Category</dt>
@@ -150,9 +181,21 @@ export function IdeaList({
               )}
             </dl>
 
-            {isMine && (
+            {/*
+                Actions are rendered from `availableTransitions`, which the
+                backend computed for *this* viewer. So there is no client-side
+                rule saying "the author may submit" or "a reviewer may approve"
+                that could disagree with the server's, and an author who also
+                holds the Owner role is offered nothing on their own submitted
+                idea — because the server declined to allow it.
+
+                Rendering nothing when the list is empty is a courtesy, not a
+                control: the server refuses an unlisted move whether or not a
+                button was drawn.
+              */}
+            {(isMine && isDraft) || idea.availableTransitions.length > 0 ? (
               <div className="mt-4 flex flex-wrap gap-2">
-                {isDraft && (
+                {isMine && isDraft && (
                   <button
                     type="button"
                     onClick={() => onEdit(idea)}
@@ -161,21 +204,26 @@ export function IdeaList({
                     Edit draft
                   </button>
                 )}
-                {isDraft && (
-                  <button
-                    type="button"
-                    disabled={submittingIdeaId === idea.id}
-                    onClick={() => onSubmit(idea)}
-                    className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:bg-brand-300"
-                  >
-                    {submittingIdeaId === idea.id && (
-                      <SpinnerIcon className="h-3.5 w-3.5 motion-safe:animate-spin" />
-                    )}
-                    Submit for review
-                  </button>
-                )}
+                {idea.availableTransitions.map((target) => {
+                  const label = transitionLabel(target)
+                  if (label === null) return null
+                  return (
+                    <button
+                      key={target}
+                      type="button"
+                      disabled={submittingIdeaId === idea.id}
+                      onClick={() => onTransition(idea, target)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {submittingIdeaId === idea.id && submittingTarget === target && (
+                        <SpinnerIcon className="h-3.5 w-3.5 motion-safe:animate-spin" />
+                      )}
+                      {label}
+                    </button>
+                  )
+                })}
               </div>
-            )}
+            ) : null}
           </li>
         )
       })}
@@ -194,14 +242,5 @@ function LoadingPanel() {
 }
 
 function visibilityLabel(idea: Idea): string {
-  switch (idea.visibility) {
-    case 'PUBLIC':
-      return 'Everyone on the platform'
-    case 'ORGANIZATION':
-      return 'This organization'
-    case 'DEPARTMENT':
-      return 'A department'
-    default:
-      return 'Only you'
-  }
+  return visibilityLabelFor(idea.visibility)
 }

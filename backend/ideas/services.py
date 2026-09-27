@@ -37,7 +37,9 @@ supplied, overridden, or "corrected" by a caller - which is why neither
 appears in any input dataclass here. `update_idea`'s input likewise has no
 `organization`, `author` or `status` field, so "change the tenant", "become
 somebody else" and "mark this submitted by hand" are not operations this
-module has; they are operations it does not have the vocabulary for.
+module has; they are operations it does not have the vocabulary for. Status
+changes in general belong to `ideas.lifecycle`, which `submit_idea` below
+delegates to rather than reimplementing.
 
 Refusal never confirms existence
 --------------------------------
@@ -48,9 +50,6 @@ three operations into a probe for which idea ids are real.
 """
 
 from dataclasses import dataclass
-
-from django.db import transaction
-from django.utils import timezone
 
 from ideas import selectors
 from ideas.models import Category, Idea
@@ -329,23 +328,24 @@ def update_idea(user: User | None, idea_id: object, data: IdeaInput) -> Idea:
 
 def submit_idea(user: User | None, idea_id: object) -> Idea:
     """
-    DRAFT -> SUBMITTED, once, by its author.
+    DRAFT -> SUBMITTED, by its author.
 
-    Stamps `submitted_at` in the same transaction as the status change, so
-    there is no window in which an idea is `SUBMITTED` with no timestamp -
-    which the model itself treats as an inconsistent row. The transition is
-    not reversible here and nothing else advances the lifecycle: review
-    (`UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED`) and
-    `AUTOMATION_PROPOSAL` are Sprint 3's.
+    A thin delegation to `ideas.lifecycle.transition_idea` rather than a second
+    implementation of the same move. S2-002 owned this transition outright;
+    S2-003 made it one entry in a seven-pair matrix, and leaving the original
+    body in place would have given the domain two answers to "may this idea be
+    submitted?" - free to drift, and free to disagree about who may ask. The
+    name is kept because it is what the `submitIdea` mutation and the S2-002
+    tests call, and because "submit my idea" is the operation's name in the
+    product regardless of which module implements it.
+
+    `CHANGES_REQUESTED -> SUBMITTED` now goes through the same call, so a
+    re-submission after review feedback is the same validated move rather than a
+    second, slightly different one.
     """
-    active_user = _require_active_user(user)
-    idea = _load_owned_draft(active_user, idea_id)
+    # Imported here rather than at module scope: `ideas.lifecycle` imports the
+    # validators above from this module, so a top-level import in both
+    # directions would be a cycle. One direction at import time is enough.
+    from ideas import lifecycle
 
-    _validate_for_submission(idea)
-
-    with transaction.atomic():
-        idea.status = Idea.Status.SUBMITTED
-        idea.submitted_at = timezone.now()
-        idea.save()
-
-    return idea
+    return lifecycle.transition_idea(user, idea_id, Idea.Status.SUBMITTED)

@@ -8,6 +8,7 @@ import {
   ideasRequest,
   organizationIdeasRequest,
   submitIdeaRequest,
+  transitionIdeaRequest,
   updateIdeaRequest,
 } from './ideasApi'
 
@@ -41,6 +42,7 @@ describe('ideasApi', () => {
     authorId: '7',
     organizationId: '3',
     category: null,
+    availableTransitions: ['SUBMITTED'],
   }
 
   function stubFetch(data: unknown) {
@@ -192,6 +194,85 @@ describe('ideasApi', () => {
 
     const [request] = sentRequests(fetchMock)
     expect(request.query).not.toContain('accessToken')
+  })
+
+  // --- transitionIdea -----------------------------------------------------
+
+  it('sends transitionIdea with the id and the target status', async () => {
+    const fetchMock = stubFetch({
+      transitionIdea: {
+        success: true,
+        message: 'Idea moved to Under review.',
+        field: null,
+        idea: IDEA,
+      },
+    })
+
+    await transitionIdeaRequest('1', 'UNDER_REVIEW')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('TransitionIdea')
+    expect(request.variables).toEqual({ id: '1', to: 'UNDER_REVIEW' })
+  })
+
+  it('asks for the transitions the viewer may make', async () => {
+    const fetchMock = stubFetch({ ideas: [] })
+
+    await ideasRequest()
+
+    const [request] = sentRequests(fetchMock)
+    // The client does not carry its own copy of the lifecycle: the server says
+    // what this viewer may do with each idea, so the rules cannot drift.
+    expect(request.query).toContain('availableTransitions')
+  })
+
+  it('sends no author and no permission anywhere in a transition', async () => {
+    const fetchMock = stubFetch({
+      transitionIdea: { success: true, message: 'ok', field: null, idea: IDEA },
+    })
+
+    await transitionIdeaRequest('1', 'APPROVED')
+
+    const [request] = sentRequests(fetchMock)
+    // Who is allowed to make the move is the server's decision, derived from
+    // the caller's membership and role. Anything a client could assert about
+    // that would be an invitation.
+    const serialized = JSON.stringify(request.variables)
+    expect(serialized).not.toContain('author')
+    expect(serialized).not.toContain('role')
+    expect(serialized).not.toContain('permission')
+  })
+
+  it('passes a refused transition through as a payload', async () => {
+    stubFetch({
+      transitionIdea: {
+        success: false,
+        message: 'You are not allowed to make that change to this idea.',
+        field: null,
+        idea: null,
+      },
+    })
+
+    const result = await transitionIdeaRequest('1', 'APPROVED')
+
+    // A refusal is the operation's own answer, not a crash: the UI has to be
+    // able to show it to the user.
+    expect(result).toMatchObject({
+      success: false,
+      field: null,
+      message: 'You are not allowed to make that change to this idea.',
+    })
+  })
+
+  it('sends the target as an enum value, not a free string', async () => {
+    const fetchMock = stubFetch({
+      transitionIdea: { success: true, message: 'ok', field: null, idea: IDEA },
+    })
+
+    await transitionIdeaRequest('1', 'CHANGES_REQUESTED')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.variables).toMatchObject({ to: 'CHANGES_REQUESTED' })
   })
 
   // --- reads --------------------------------------------------------------

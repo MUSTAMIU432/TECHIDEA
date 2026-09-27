@@ -136,6 +136,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     says so.
 
 
+- S2-003: Idea lifecycle and visibility — the transition rules, and the
+  server-side read policy they run inside. `ideas/lifecycle.py` (the matrix),
+  `ideas/selectors.get_idea_for_update` (the locked read), the
+  `transitionIdea` mutation, `IdeaType.availableTransitions`, and the
+  review actions in the Ideas UI. No migration: this is behaviour over the
+  S2-001 schema.
+  - **The lifecycle is a table, not a chain of conditionals.** Seven
+    `(from, to) -> actor` pairs, asserted as a set so a pair added to the code
+    without being decided fails the test. The same table is what
+    `availableTransitions` renders to the client, so what the UI offers and
+    what the server accepts cannot come from two copies of the rules.
+  - **A status cannot be set directly.** There is no mutation that takes one
+    and no write input with a `status` field, so "promote my own idea to
+    Approved" is not an operation the API expresses. A test sends such a
+    request and requires the schema to reject it, and another enumerates every
+    root mutation to confirm `transitionIdea` is the only place a status may
+    be named.
+  - **Two actors, and the self-review rule is structural.** The author owns
+    `DRAFT → SUBMITTED` and `CHANGES_REQUESTED → SUBMITTED`; a reviewer owns
+    everything from `SUBMITTED` on. A reviewer is an active member holding a
+    **system role** in the idea's own organization who is **not** the author
+    — the exclusion matters because bootstrap makes everybody's own
+    organization theirs, so an author who also holds `Owner` genuinely holds
+    it and no role check would catch them.
+  - **No new permission code, and no `ideas/permissions.py`.** A dedicated
+    `idea.review` code is the shape to adopt if a custom Reviewer role is ever
+    needed; it is not added now because nothing else needs a second capability
+    code, and a code that only ever means "is an Owner" would duplicate
+    `Role.is_system` and have to be granted by hand in every organization
+    created before it existed.
+    `organizations.authorization.membership_holds_system_role` is the single
+    function to replace if that trade changes.
+  - **Refusals never confirm existence.** An unknown id, another tenant's
+    idea, somebody else's `PRIVATE` idea, and one a departed reviewer can no
+    longer see are all answered identically at the service, the selector and
+    the GraphQL layer.
+  - **Visibility and lifecycle agree.** A transition reads through the same
+    filter every other read uses, so a reviewer cannot act on a `PRIVATE`
+    idea they were never shown — being a reviewer is not a bypass of
+    visibility. `DEPARTMENT` continues to fail closed in both directions: the
+    service refuses it as a choice and the selectors treat it as author-only.
+  - **Transitions are serialized per idea.** The row is read with
+    `SELECT … FOR UPDATE` inside the transaction, so "approve" and "reject"
+    fired together cannot both apply — the second waits and finds a status
+    that no longer permits its move. Tested with two real connections and
+    threads, which is the only way the property is actually exercised; and
+    `of=('self',)` is what keeps the lock off the nullable `category` join,
+    without which PostgreSQL refuses the whole query.
+  - **`submitted_at` is written once and never rewritten**, on the first
+    `DRAFT → SUBMITTED` only, so a re-submission after review feedback keeps
+    the original stamp — which the model requires, since anything past
+    `DRAFT` must have one.
+  - **Refusals are distinguishable without leaking.** An actor who could not
+    have made the move is told they may not; somebody who could is told the
+    move does not exist. `submitIdea` keeps S2-002's exact wording ("Only a
+    draft can be edited.") for the case it shipped, because the frontend
+    shows the backend's message verbatim and a status-pair sentence would be
+    worse copy for somebody who has just clicked Submit twice.
+  - **Frontend:** status and visibility are rendered from one vocabulary
+    table, and the actions on each idea are rendered from
+    `availableTransitions` — so there is no client-side rule saying who may do
+    what, and an author holding the Owner role is offered nothing on their own
+    submitted idea. The `AUTOMATION_PROPOSAL` hand-off is deliberately not
+    offered: the transition exists so the lifecycle is complete, and a button
+    that leads nowhere would be worse than none.
+  - Not implemented, and deliberately: review queues, reviewer assignment,
+    reasons against a `CHANGES_REQUESTED` idea, dashboards, comments, voting,
+    attachment uploads, discovery, the `DEPARTMENT` tier, proposals,
+    developer matching, AI, payments and subscriptions.
+
 ### Added — Sprint 1: Identity & Access
 
 - S1-002: User registration — the `identity` app's `User` model (email as

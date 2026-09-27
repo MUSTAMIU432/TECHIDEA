@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { submitIdeaRequest, type Idea } from '../api/ideasApi'
+import { transitionIdeaRequest, type Idea, type IdeaStatus } from '../api/ideasApi'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeaForm } from './IdeaForm'
 import { IdeaList } from './IdeaList'
@@ -18,8 +18,8 @@ import { IdeaList } from './IdeaList'
  * The three outcomes of a submission are kept apart, because conflating them
  * misleads somebody about something that matters:
  *
- * - success: the idea is `SUBMITTED` and the list reloads, because the card
- *   it was on no longer offers Edit or Submit;
+ * - success: the list reloads, because the card the move was made from no
+ *   longer offers it;
  * - a business refusal (an incomplete draft, somebody else's idea, an idea
  *   that is already submitted): shown as the backend's message, list
  *   unchanged, nothing submitted;
@@ -31,6 +31,7 @@ export function IdeasWorkspace() {
   const [editing, setEditing] = useState<Idea | null>(null)
   const [isCreating, setIsCreating] = useState(false)
   const [submittingIdeaId, setSubmittingIdeaId] = useState<string | null>(null)
+  const [submittingTarget, setSubmittingTarget] = useState<IdeaStatus | null>(null)
   const [listVersion, setListVersion] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -50,14 +51,15 @@ export function IdeasWorkspace() {
     reloadList()
   }
 
-  async function handleSubmit(idea: Idea) {
+  async function handleTransition(idea: Idea, target: IdeaStatus) {
     setSubmitError(null)
     setNotice(null)
     setSubmittingIdeaId(idea.id)
+    setSubmittingTarget(target)
     try {
-      const result = await submitIdeaRequest(idea.id)
+      const result = await transitionIdeaRequest(idea.id, target)
       if (result.success) {
-        setNotice('Submitted for review. It can no longer be edited.')
+        setNotice(result.message)
         reloadList()
         return
       }
@@ -66,6 +68,7 @@ export function IdeasWorkspace() {
       setSubmitError('We could not reach the server. Please try again.')
     } finally {
       setSubmittingIdeaId(null)
+      setSubmittingTarget(null)
     }
   }
 
@@ -112,8 +115,9 @@ export function IdeasWorkspace() {
               setIsCreating(false)
               setEditing(idea)
             }}
-            onSubmit={handleSubmit}
+            onTransition={handleTransition}
             submittingIdeaId={submittingIdeaId}
+            submittingTarget={submittingTarget}
           />
           {!showForm && activeOrganization && (
             <button

@@ -33,6 +33,7 @@ const DRAFT: Idea = {
   authorId: '7',
   organizationId: '3',
   category: CATEGORIES[0],
+  availableTransitions: [],
 }
 
 function renderForm(props: Partial<React.ComponentProps<typeof IdeaForm>> = {}) {

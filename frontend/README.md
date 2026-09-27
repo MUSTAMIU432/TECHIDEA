@@ -277,7 +277,8 @@ Future business domains each get their own route module under
 What exists is Identity (sign in, sign up, Google sign-in, session lifecycle,
 password reset and email confirmation), the organizations tier (create an
 organization, switch between them, see members and roles), and the first
-Ideas slice (file an idea, edit your own draft, submit it for review).
+Ideas slice (file an idea, edit your own draft, submit it for review, and
+move it through review).
 Reviews, projects, notifications, comments, voting and everything else in that
 direction do not exist yet. Within Identity, what is still missing is an
 authenticated Google-account-linking flow: Google sign-in authenticates or
@@ -304,11 +305,19 @@ Two things the Ideas area deliberately does **not** do on this side:
   ideas would be a client-side control over what somebody may read, which is
   the one thing a browser cannot be trusted with. The frontend narrows what it
   *shows* (a "Your drafts" heading, a sort) and never what it is *given*.
-- It does not decide who may edit. `idea.authorId` compared with the signed-in
-  user's id decides what to *offer* — an Edit or Submit button, or none — and
-  offering is presentation. The server refuses an edit or a submission it
-  should refuse whether or not the buttons were rendered, so hiding them is
-  a courtesy to the reader, not a control.
+- It does not decide who may edit, submit, review or approve. The buttons on
+  an idea are rendered from `idea.availableTransitions`, which the backend
+  computed *for this viewer* from the same transition matrix that enforces the
+  change — so there is no client-side rule saying "the author may submit" or
+  "a reviewer may approve" that could disagree with the server's. Editing a
+  draft is the one exception, and it is `idea.authorId` compared with the
+  signed-in user: still only a question of what to *offer*. The server refuses
+  whatever it should refuse whether or not a button was drawn, so hiding them
+  is a courtesy to the reader, not a control.
+- It does not carry a copy of the lifecycle. Status names and the button for
+  each transition come from one vocabulary table in
+  `features/ideas/utils/lifecycle.ts`, and a state the backend reports that
+  table has never heard of renders as its raw name rather than being hidden.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no

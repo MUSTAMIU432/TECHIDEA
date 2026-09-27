@@ -470,12 +470,36 @@ idea unsavable. A successful submission stamps `submitted_at` in the same
 transaction as the status change, because the model treats the two as
 inconsistent apart.
 
+**The lifecycle is a table, and it is the only way a status changes.**
+`ideas.lifecycle.TRANSITIONS` maps `(from, to)` to the actor that may make
+that move — seven pairs, `DRAFT → SUBMITTED` and `CHANGES_REQUESTED →
+SUBMITTED` for the author, the five review moves for a reviewer. `transitionIdea`
+is the only mutation that changes a status, no write input has a `status`
+field, and `updateIdea` refuses anything past `DRAFT`, so a client cannot mark
+its own idea reviewed or approved by any request shape. `IdeaType.availableTransitions`
+reports the viewer's own moves *from the same table that enforces them*, so
+the UI cannot offer something the server would refuse — or drift from it.
+
+**A reviewer is an active member holding a system role, and never the
+author.** A dedicated `idea.review` permission code would be more precise, and
+is the shape to adopt if a custom Reviewer role is ever needed; it is not added
+because nothing else needs a second capability code and a code that only ever
+means "is an Owner" would duplicate `Role.is_system` and need granting by hand
+in every existing organization. The self-review exclusion is structural: an
+author who also holds the `Owner` role genuinely holds it, so the refusal
+comes from the authorship check rather than from the role.
+
+**Transitions are serialized per idea.** The row is read with
+`SELECT … FOR UPDATE` inside the transaction, so "approve" and "reject" fired
+together cannot both apply — the second waits and then finds a status that no
+longer permits its move.
+
 **Submitting ends editability, not the author's access.** A submitted idea is
 refused by `updateIdea` - by its own author, in its own organization - until
-Sprint 3 introduces the `CHANGES_REQUESTED` route back to a draft. That is the
-whole of what `SUBMITTED` changes in S2-002; it grants nothing and revokes
-nothing else, and no part of the review workflow is reachable from any
-mutation.
+the review workflow introduces the `CHANGES_REQUESTED` route back to a draft.
+No part of the review *management* is implemented: there is no review queue, no
+reviewer assignment, no reason text, and nothing acts on an idea once it
+reaches `AUTOMATION_PROPOSAL`.
 
 See [`ideas-domain.md`](ideas-domain.md) for the entity design and the
 reasoning behind each decision above.
@@ -510,7 +534,8 @@ business domain is not started.
 | ---- | ----------- | ---- |
 | Ideas domain | `ideas` app: `Category`, `Idea`, `Comment`, `Vote`, `Attachment`, and their migration/admin | S2-001 |
 | Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices` | S2-001 |
-| Idea creation and submission | `createIdea`/`updateIdea`/`submitIdea`, `idea`/`ideas`/`organizationIdeas`/`categories` queries, tenant- and visibility-filtered selectors, and the `/app/ideas` UI. `DRAFT → SUBMITTED` only; the review transitions are Sprint 3 | S2-002 |
+| Idea creation and submission | `createIdea`/`updateIdea`/`submitIdea`, `idea`/`ideas`/`organizationIdeas`/`categories` queries, tenant- and visibility-filtered selectors, and the `/app/ideas` UI | S2-002 |
+| Idea lifecycle | The seven-pair transition matrix in `ideas/lifecycle.py` behind a single `transitionIdea` mutation, with the per-viewer `availableTransitions` field. No mutation and no write input can set a status | S2-003 |
 | Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
 | Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
 | Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
@@ -563,13 +588,15 @@ How these are used day to day: [`development.md`](development.md),
 - Business domain apps other than `identity`, `organizations` and `ideas`:
   reviews, opportunities, proposals, developers, projects, tasks,
   notifications, impact, files, audit
-- The Ideas operations beyond creation and submission: comments, voting,
-  attachments (their *bytes* and upload flow), and the whole review workflow -
-  `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` and
-  `AUTOMATION_PROPOSAL` are named in the schema and reachable in no mutation.
-  S2-002 implements `DRAFT → SUBMITTED` and nothing past it
+- Review *management*: the lifecycle transitions exist and work, but there is
+  no review queue, no reviewer assignment, no reasons recorded against a
+  `CHANGES_REQUESTED` idea, and no dashboard of any kind
+- The Ideas operations beyond creation, submission and lifecycle: comments,
+  voting, and attachments (their *bytes* and upload flow)
 - Discovery: there is no cross-organization idea search, no category browsing
   page, and no feed beyond the one organization's ideas a reader is already in
+- The `DEPARTMENT` visibility tier, and the `idea.review` permission code that
+  would let a non-owner review
 - An authenticated Google-account-linking flow (today's Google sign-in only
   ever authenticates or provisions a *new* account - it never links to an
   existing one, by verified email or otherwise)
