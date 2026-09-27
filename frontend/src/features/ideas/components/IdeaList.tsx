@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { SpinnerIcon } from '../../identity/components/icons'
@@ -11,6 +13,7 @@ import {
   transitionLabel,
   visibilityLabel as visibilityLabelFor,
 } from '../utils/lifecycle'
+import { IdeaDiscussion } from './IdeaDiscussion'
 import { IdeaFiltersBar } from './IdeaFiltersBar'
 import { IdeaPagination } from './IdeaPagination'
 
@@ -83,6 +86,15 @@ export function IdeaList({
 }) {
   const { user } = useAuth()
   const { activeOrganization, status: organizationStatus } = useOrganization()
+  // Which idea's discussion is open, at most one.
+  //
+  // Held here rather than inside `IdeaDiscussion` for two reasons. The hook
+  // that fetches the thread is keyed on whether the thread is open, so its
+  // position decides when a fetch happens - and `IdeaList` is the component
+  // that already re-renders wholesale on a filter change, so an open
+  // discussion cannot outlive the results it belongs to. And one at a time
+  // keeps a page from accumulating twenty open threads.
+  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null)
   const { categories } = useCategories()
   const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
     activeOrganization?.id ?? null,
@@ -259,6 +271,17 @@ export function IdeaList({
                         })}
                       </div>
                     ) : null}
+                    {/*
+                        The discussion, collapsed. Fetched when it is opened
+                        and not before - see `IdeaDiscussion`.
+                      */}
+                    <IdeaDiscussion
+                      idea={idea}
+                      open={openDiscussionId === idea.id}
+                      onToggle={() =>
+                        setOpenDiscussionId((current) => (current === idea.id ? null : idea.id))
+                      }
+                    />
                   </li>
                 )
               })}

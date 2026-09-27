@@ -3,12 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { graphqlClient } from '../../../graphql/client'
 import {
   categoriesRequest,
+  commentsRequest,
+  createCommentRequest,
   createIdeaRequest,
+  deleteCommentRequest,
   ideaRequest,
   ideasRequest,
   organizationIdeasRequest,
   submitIdeaRequest,
   transitionIdeaRequest,
+  updateCommentRequest,
   updateIdeaRequest,
 } from './ideasApi'
 
@@ -52,6 +56,15 @@ describe('ideasApi', () => {
     totalCount: 1,
     hasNextPage: false,
     hasPreviousPage: false,
+  }
+
+  const COMMENT = {
+    id: 'c1',
+    ideaId: '1',
+    authorId: '7',
+    content: 'We do this by hand every month.',
+    createdAt: '2026-02-01T09:00:00.000Z',
+    updatedAt: '2026-02-01T09:00:00.000Z',
   }
 
   function stubFetch(data: unknown) {
@@ -409,5 +422,133 @@ describe('ideasApi', () => {
     const [, init] = fetchMock.mock.calls[0] as unknown as [URL | string, RequestInit]
     expect(init.credentials).toBe('include')
     expect(graphqlClient).toBeDefined()
+  })
+  // --- comments (S2-005) ---------------------------------------------------
+
+  it('reads one page of a discussion, naming the idea', async () => {
+    const fetchMock = stubFetch({ comments: { items: [COMMENT], pageInfo: PAGE_INFO } })
+
+    const result = await commentsRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('Comments')
+    expect(request.variables).toEqual({ ideaId: '1' })
+    expect(result.items).toHaveLength(1)
+    expect(result.pageInfo).toEqual(PAGE_INFO)
+  })
+
+  it('sends paging arguments only when they were set', async () => {
+    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+
+    await commentsRequest('1', { offset: 20, limit: 10 })
+
+    const [request] = sentRequests(fetchMock)
+    // Absent rather than null: an explicit null is a different request from an
+    // omitted field, and the client has no business asserting paging defaults
+    // the server already applies.
+    expect(request.variables).toEqual({ ideaId: '1', offset: 20, limit: 10 })
+  })
+
+  it('posts a comment with the idea and the content, and no author', async () => {
+    const fetchMock = stubFetch({
+      createComment: { success: true, message: 'Comment posted.', field: null, comment: COMMENT },
+    })
+
+    const result = await createCommentRequest('1', 'A comment.')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('CreateComment')
+    expect(request.variables).toEqual({
+      input: { ideaId: '1', comment: { content: 'A comment.' } },
+    })
+    // The author is the signed-in user and the idea is authorized server-side,
+    // so neither can be supplied. Asserted on the variables rather than the
+    // document, because `authorId` legitimately appears in the selection set -
+    // the client reads it to decide what to offer - and only its *absence from
+    // the request* is the property.
+    expect(JSON.stringify(request.variables)).not.toContain('authorId')
+    expect(result.success).toBe(true)
+  })
+
+  it('edits a comment by id', async () => {
+    const fetchMock = stubFetch({
+      updateComment: {
+        success: true,
+        message: 'Comment updated.',
+        field: null,
+        comment: { ...COMMENT, content: 'Edited.' },
+      },
+    })
+
+    const result = await updateCommentRequest('c1', 'Edited.')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('UpdateComment')
+    expect(request.variables).toEqual({
+      input: { id: 'c1', comment: { content: 'Edited.' } },
+    })
+    expect(result.comment?.content).toBe('Edited.')
+  })
+
+  it('deletes a comment by id, and asks for no entity back', async () => {
+    const fetchMock = stubFetch({
+      deleteComment: { success: true, message: 'Comment deleted.', field: null, comment: null },
+    })
+
+    const result = await deleteCommentRequest('c1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('DeleteComment')
+    expect(request.variables).toEqual({ id: 'c1' })
+    // A deleted row has no shape to return, and the client refreshes on
+    // `success` rather than on the payload's contents.
+    expect(request.query).not.toMatch(/\bcomment\s*\{/)
+    expect(result.comment).toBeNull()
+  })
+
+  it('returns a refused comment as the payload it is', async () => {
+    stubFetch({
+      createComment: {
+        success: false,
+        message: 'This idea is no longer open for discussion.',
+        field: null,
+        comment: null,
+      },
+    })
+
+    const result = await createCommentRequest('1', 'One more thought')
+
+    // A business refusal, not a thrown error: the request got a decision, and
+    // the frontend reports the two differently.
+    expect(result.success).toBe(false)
+    expect(result.message).toBe('This idea is no longer open for discussion.')
+    expect(result.field).toBeNull()
+  })
+
+  it('selects the fields the discussion renders and no user object', async () => {
+    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+
+    await commentsRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    // Ids rather than nested users, for the same reason ideas carry no author:
+    // a PUBLIC idea is readable platform-wide, so an embedded user would publish
+    // a member's email address alongside the comment.
+    expect(request.query).toContain('authorId')
+    expect(request.query).not.toMatch(/\bemail\b/)
+    expect(request.query).toContain('content')
+    expect(request.query).toContain('createdAt')
+    expect(request.query).toContain('totalCount')
+  })
+
+  it('sends no voting or attachment argument', async () => {
+    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+
+    await commentsRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    // S2-006 and S2-007 are not implemented, and this client cannot ask for
+    // either even by accident.
+    expect(request.query).not.toMatch(/vote|attachment|upload/i)
   })
 })

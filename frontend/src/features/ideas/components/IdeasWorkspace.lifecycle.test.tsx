@@ -42,6 +42,7 @@ function idea(overrides: Partial<Idea> = {}): Idea {
     organizationId: '3',
     category: null,
     availableTransitions: [],
+    discussionOpen: true,
     ...overrides,
   }
 }
@@ -429,7 +430,23 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     // is fetched on mount.
     const card = (await screen.findByText('Automate the invoice run')).closest('li')
     expect(card).not.toBeNull()
-    expect(card?.querySelectorAll('button')).toHaveLength(0)
+
+    // Asserted against the transition labels rather than as "no buttons at
+    // all", which is how this was first written. That phrasing was true until
+    // S2-005 added a discussion toggle to every card, and it was narrower than
+    // the test meant: what must be absent is a *lifecycle* offer. The server
+    // computed an empty `availableTransitions` for this viewer, so the UI has
+    // nothing to draw and no client-side rule to fall back on.
+    for (const label of [
+      'Submit for review',
+      'Start review',
+      'Send back',
+      'Approve',
+      'Reject',
+      'Hand off for automation',
+    ]) {
+      expect(within(card as HTMLElement).queryByRole('button', { name: label })).toBeNull()
+    }
   })
 
   // --- the form still works alongside ---------------------------------------

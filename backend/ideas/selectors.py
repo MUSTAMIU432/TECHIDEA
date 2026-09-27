@@ -40,7 +40,7 @@ from dataclasses import dataclass
 
 from django.db.models import Q, QuerySet
 
-from ideas.models import Category, Idea
+from ideas.models import Category, Comment, Idea
 from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
@@ -371,3 +371,90 @@ def list_active_categories() -> QuerySet[Category]:
     makes ideas comparable across organizations.
     """
     return Category.objects.filter(is_active=True).order_by('name')
+
+
+# --- comments (S2-005) -------------------------------------------------------------
+
+
+def _visible_idea_ids(user: User) -> QuerySet[Idea]:
+    """
+    The ids of every idea `user` may read, as a queryset.
+
+    A helper rather than an inline filter because comments are authorized
+    through their idea and nothing else: a comment has no tenant of its own, no
+    visibility of its own, and no membership check that would answer the
+    question on its own. Deriving it from `_visibility_filter` is what makes
+    "you may read a comment" and "you may read the idea it is on" the same
+    statement by construction - a second, comment-specific version of the rule
+    is exactly the drift this module exists to prevent.
+    """
+    return _base_queryset().filter(_visibility_filter(user)).values('pk')
+
+
+def get_comment(user: User | None, comment_id: object) -> Comment | None:
+    """
+    One comment `user` may read, or `None`.
+
+    `None` covers no such id, an id belonging to an idea in another tenant, and
+    a comment on an idea that is not shared with this reader - identically, so
+    a comment id cannot be used to find out which ideas exist.
+
+    Read through the idea rather than through the comment, which is the whole
+    authorization story for this model: `idea__in=_visible_idea_ids(user)` is
+    `can_view_idea` applied to the parent, so a comment can never be readable
+    on an idea that is not.
+    """
+    if user is None or not user.is_active:
+        return None
+
+    try:
+        normalized_id = int(str(comment_id))
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        Comment.objects.select_related('author', 'idea')
+        .filter(pk=normalized_id, idea__in=_visible_idea_ids(user))
+        .first()
+    )
+
+
+def list_comments(
+    user: User | None,
+    idea_id: object,
+    *,
+    offset: object = 0,
+    limit: object = None,
+) -> Page[Comment]:
+    """
+    One page of an idea's discussion, oldest first.
+
+    Discussion order is chronological, which is the order a conversation is
+    read in, and the tie-breaker is the primary key for the same reason ideas
+    order by `-created_at, -pk`: `created_at` is microsecond-resolution, so two
+    comments written in the same instant would otherwise come back in an
+    arbitrary order, and a page boundary could then show one of them twice and
+    skip the other. `Meta.ordering` is `['created_at']` alone, so the tie-break
+    is stated here rather than inherited.
+
+    An idea the caller may not read is an **empty page**, not an error and not a
+    refusal: the same answer as for an idea that does not exist, and the same
+    answer this module already gives for an organization the caller does not
+    belong to. A discussion is a corollary of an idea being readable, so it
+    cannot be a better oracle than the idea itself.
+    """
+    if user is None or not user.is_active:
+        return empty_page(offset, limit)
+
+    # Resolved through `get_idea`, so the visibility rule is not restated. A
+    # null idea here means "not readable", and the queryset below is then
+    # filtered on a null pk, which matches nothing.
+    idea = get_idea(user, idea_id)
+
+    queryset = (
+        Comment.objects.select_related('author', 'idea')
+        .filter(idea_id=idea.pk if idea is not None else None)
+        .order_by('created_at', 'pk')
+    )
+
+    return paginate(queryset, offset=offset, limit=limit)

@@ -157,6 +157,17 @@ export interface Idea {
    * exactly as if the list had been honoured.
    */
   availableTransitions: IdeaStatus[]
+  /**
+   * Whether this idea accepts a new comment right now, reported by the server
+   * from the same rule `createComment` enforces.
+   *
+   * Present so this client does not carry a second copy of a lifecycle rule
+   * that could disagree with the server's - the same reason
+   * `availableTransitions` exists. It decides what to *offer*: the composer is
+   * not drawn on a closed idea, and a client that sends the request anyway is
+   * refused by the server.
+   */
+  discussionOpen: boolean
 }
 
 /** The writable content of an idea. Mirrors the backend's `IdeaInput`. */
@@ -194,6 +205,7 @@ const IDEA_FIELDS = `
   authorId
   organizationId
   availableTransitions
+  discussionOpen
   category { ${CATEGORY_FIELDS} }
 `
 
@@ -421,4 +433,172 @@ export async function organizationIdeasRequest(
 export async function categoriesRequest(): Promise<IdeaCategory[]> {
   const data = await graphqlClient.request<{ categories: IdeaCategory[] }>(CATEGORIES_QUERY)
   return data.categories
+}
+
+/**
+ * Comments & discussion (S2-005).
+ *
+ * A comment has no tenancy, no visibility and no state of its own, so every
+ * question about one is a question about the idea it hangs from - and the three
+ * rules that follow are the client half of decisions the backend already made:
+ *
+ * - **Reading is reading the idea.** `comments(ideaId)` is already filtered by
+ *   the idea's visibility, and it answers an *empty page* for an idea the
+ *   caller may not read - the same answer as for an idea that does not exist.
+ *   So this client has no way to distinguish "no discussion" from "not yours
+ *   to read", and must not try to.
+ * - **`authorId` is an id, not a person.** `CommentType` carries no member
+ *   object, for the same reason `IdeaType` does not: a `PUBLIC` idea is
+ *   readable platform-wide, so an embedded author would publish their email to
+ *   everybody. Comparing `authorId` with the signed-in user is how this client
+ *   decides what to *offer* - Edit, Delete - and offering is never a control.
+ *   The server checks authorship itself, and would refuse regardless of whether
+ *   a button was drawn.
+ * - **There is no elevated path.** No argument here can say "as a moderator",
+ *   because no such capability exists to check. Edit and Delete are refused for
+ *   anybody who is not the author, including the idea's own author and including
+ *   an organization Owner.
+ */
+
+/**
+ * One comment, as the server stores it.
+ *
+ * `content` is plain text and must be rendered as text. The backend stores and
+ * returns it verbatim - it does not escape and does not strip markup - because
+ * escaping belongs at render time; a client that renders this with
+ * `dangerouslySetInnerHTML` would be introducing the injection the backend
+ * deliberately did not.
+ */
+export interface IdeaComment {
+  id: string
+  ideaId: string
+  authorId: string
+  content: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** One page of a discussion. Reuses the S2-004 `PageInfo` type on purpose. */
+export interface IdeaCommentPage {
+  items: IdeaComment[]
+  pageInfo: IdeaPageInfo
+}
+
+/** Every comment payload carries this shape; `field` names the input at fault. */
+export interface CommentMutationResult {
+  success: boolean
+  message: string
+  field: string | null
+  comment: IdeaComment | null
+}
+
+const COMMENT_FIELDS = `
+  id
+  ideaId
+  authorId
+  content
+  createdAt
+  updatedAt
+`
+
+const COMMENTS_QUERY = `
+  query Comments($ideaId: ID!, $offset: Int, $limit: Int) {
+    comments(ideaId: $ideaId, offset: $offset, limit: $limit) {
+      items { ${COMMENT_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const CREATE_COMMENT_MUTATION = `
+  mutation CreateComment($input: CreateCommentInput!) {
+    createComment(input: $input) {
+      success
+      message
+      field
+      comment { ${COMMENT_FIELDS} }
+    }
+  }
+`
+
+const UPDATE_COMMENT_MUTATION = `
+  mutation UpdateComment($input: UpdateCommentInput!) {
+    updateComment(input: $input) {
+      success
+      message
+      field
+      comment { ${COMMENT_FIELDS} }
+    }
+  }
+`
+
+const DELETE_COMMENT_MUTATION = `
+  mutation DeleteComment($id: ID!) {
+    deleteComment(id: $id) { success message field }
+  }
+`
+
+/**
+ * One page of an idea's discussion, oldest first.
+ *
+ * An unreadable idea is an empty page rather than an error, so a client cannot
+ * tell "you may not read this" from "there is nothing here" - which is the
+ * point.
+ */
+export async function commentsRequest(
+  ideaId: string,
+  filters: { offset?: number; limit?: number } = {},
+): Promise<IdeaCommentPage> {
+  // Only the arguments that were set are sent, for the same reason the
+  // discovery filters are: an explicit `null` is a different request from an
+  // absent field, and this client has no business asserting paging defaults the
+  // server already applies.
+  const data = await graphqlClient.request<{ comments: IdeaCommentPage }>(COMMENTS_QUERY, {
+    ideaId,
+    ...(filters.offset !== undefined ? { offset: filters.offset } : {}),
+    ...(filters.limit !== undefined ? { limit: filters.limit } : {}),
+  })
+  return data.comments
+}
+
+/**
+ * Post a comment. The author is the signed-in user and the idea is authorized
+ * by the server, so neither is an argument here.
+ */
+export async function createCommentRequest(
+  ideaId: string,
+  content: string,
+): Promise<CommentMutationResult> {
+  const data = await graphqlClient.request<{ createComment: CommentMutationResult }>(
+    CREATE_COMMENT_MUTATION,
+    { input: { ideaId, comment: { content } } },
+  )
+  return data.createComment
+}
+
+/**
+ * Edit a comment. Only the comment's own author may do this, and the server
+ * says so - this function asks.
+ */
+export async function updateCommentRequest(
+  id: string,
+  content: string,
+): Promise<CommentMutationResult> {
+  const data = await graphqlClient.request<{ updateComment: CommentMutationResult }>(
+    UPDATE_COMMENT_MUTATION,
+    { input: { id, comment: { content } } },
+  )
+  return data.updateComment
+}
+
+/**
+ * Delete a comment. `comment` is always null on success - a deleted row has no
+ * shape to return - so the caller refreshes on `success`, not on the payload.
+ */
+export async function deleteCommentRequest(id: string): Promise<CommentMutationResult> {
+  const data = await graphqlClient.request<{ deleteComment: CommentMutationResult }>(
+    DELETE_COMMENT_MUTATION,
+    { id },
+  )
+  return data.deleteComment
 }

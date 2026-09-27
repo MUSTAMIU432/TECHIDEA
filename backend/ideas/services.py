@@ -1,10 +1,9 @@
 """
-Writing ideas: create, edit, submit (S2-002).
+Writing ideas: create, edit, submit (S2-002), and commenting on them (S2-005).
 
-The three operations that make up the first vertical slice of the Ideas
-domain, and nothing else. `add_comment`, `vote_for_idea` and the review
-transitions are later sprints; this module does not stub them, does not
-half-implement them, and does not define the vocabulary they would use.
+`vote_for_idea` and the review workflow's queue are later sprints; this
+module does not stub them, does not half-implement them, and does not define
+the vocabulary they would use.
 
 Who may do what
 ---------------
@@ -27,6 +26,34 @@ Ideas-specific question - *who may read this?* - is a read filter in
 `ideas/selectors.py` built on the same membership. Adding a parallel
 `idea.create` code here would have been a second answer to a question the
 platform already answers.
+
+Commenting (S2-005)
+--------------------
+- **add_comment** requires an authenticated, active user who may **read** the
+  idea, and an idea whose discussion is open (`lifecycle.discussion_is_open`).
+  Deliberately *read*, not *member*: participation follows readability, which
+  is the same rule `docs/ideas-domain.md` set for voting, and it is what lets
+  anybody in the platform discuss a `PUBLIC` idea without being made a member
+  of someone else's organization first. An idea is `PUBLIC` precisely because
+  it is meant to be read and answered across tenants.
+- **update_comment** and **delete_comment** require the caller to be **the
+  author**, and the comment's idea to still be readable to them. There is no
+  elevated path: no administrator, moderator or Owner may edit or delete
+  somebody else's comment, because no such capability exists in
+  `organizations.authorization` to draw it from, and inventing one here would
+  be a second authorization system (see below).
+- Retraction stays available in a closed discussion. Being able to take back
+  what you wrote is not participating in the discussion, and a state change
+  must not be able to strand a comment nobody may ever remove.
+
+Every refusal below is one message per kind, because each is one answer. An
+unknown comment id, another author's comment, and a comment on an idea the
+caller may not read are all `"Comment is unavailable."`; an unknown idea and
+an unreadable one are both `"Idea is unavailable."` So a comment id is not an
+oracle for which ideas or people exist, and an idea id is not an oracle for
+which comments exist. The one refusal that names itself is a closed
+discussion, because the caller can already see the idea and its status - see
+`_load_discussable_idea`.
 
 What the client is never trusted with
 -------------------------------------
@@ -52,7 +79,7 @@ three operations into a probe for which idea ids are real.
 from dataclasses import dataclass
 
 from ideas import selectors
-from ideas.models import Category, Idea
+from ideas.models import Category, Comment, Idea
 from identity.models import User
 from organizations import authorization
 from organizations.authorization import AuthorizationError
@@ -102,6 +129,21 @@ class IdeaInput:
 # not of the schema. See that module's docstring.
 MIN_DESCRIPTION_LENGTH = 20
 MAX_TITLE_LENGTH = Idea._meta.get_field('title').max_length
+
+# A comment has a maximum, and it is a judgement call of the same kind as
+# MIN_DESCRIPTION_LENGTH: `Comment.content` is a `TextField`, so the database
+# will happily store a novel. The number is generous because a discussion reply
+# is a paragraph rather than a sentence - someone answering a question with
+# detail is the point - and bounded because an unbounded write on a table every
+# member can read is a storage and rendering hazard, and because the frontend
+# renders the content into a card that has to stay legible.
+#
+# Enforced by the service, not by a `MaxLengthValidator`, for the same reason
+# the other content rules are: the rule is a product decision rather than a
+# schema fact, and it is refused rather than truncated. Silently shortening
+# somebody's comment would store text they did not write and return success -
+# the caller would have no way to know the last line was lost.
+MAX_COMMENT_LENGTH = 2000
 
 # `DEPARTMENT` is reserved vocabulary (see `Idea.Visibility`) with no
 # Department model behind it, so nothing could honour it. Accepting it would
@@ -349,3 +391,155 @@ def submit_idea(user: User | None, idea_id: object) -> Idea:
     from ideas import lifecycle
 
     return lifecycle.transition_idea(user, idea_id, Idea.Status.SUBMITTED)
+
+
+# --- comments (S2-005) -------------------------------------------------------------
+
+
+def _validate_comment_content(content: str | None) -> str:
+    """
+    The content to store, or a refusal.
+
+    Normalized by stripping the ends and folding CRLF to LF, and nothing else.
+    The strip is the same normalization every other content field gets, and it
+    is what makes a whitespace-only comment detectable at all - `"   "` is
+    truthy, so a blank check on the raw value would accept it. The newline fold
+    is because the frontend's control is a `<textarea>`, and a browser on
+    Windows submits `\\r\\n`; storing that unchanged means the same comment
+    renders with stray carriage returns everywhere else.
+
+    Internal whitespace is **not** touched. Collapsing runs of spaces would
+    destroy the indentation of a pasted code block or a bulleted list, and
+    rewriting somebody's comment into tidier prose is not this module's
+    decision to make.
+
+    No truncation, ever - see `MAX_COMMENT_LENGTH`.
+    """
+    normalized = (content or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
+    if not normalized:
+        raise IdeaError('Write something before posting.', field='content')
+    if len(normalized) > MAX_COMMENT_LENGTH:
+        raise IdeaError(
+            f'A comment must be {MAX_COMMENT_LENGTH} characters or fewer.',
+            field='content',
+        )
+    return normalized
+
+
+def _discussion_is_open(idea: Idea) -> bool:
+    """
+    Whether `idea` accepts a new comment, asked of `ideas.lifecycle`.
+
+    A one-line forwarder, and it exists only because of the import direction:
+    `ideas.lifecycle` imports this module's validators, so importing it back at
+    module scope would be a cycle. Same pattern and same reasoning as
+    `submit_idea` below, and the rule itself stays in the lifecycle next to the
+    transition matrix it is derived from - this is a bridge, not a second
+    answer to "is this discussion open?".
+    """
+    from ideas import lifecycle
+
+    return lifecycle.discussion_is_open(idea)
+
+
+def _load_discussable_idea(user: User, idea_id: object) -> Idea:
+    """
+    The idea to comment on, or a refusal.
+
+    Two gates, in this order, and the order is the security property: the
+    caller must be able to **read** the idea (so a comment can never be attached
+    to an idea the author of the comment was never shown), and only then may
+    the idea's discussion state be consulted.
+
+    Every refusal is "Idea is unavailable." for the same reason the idea
+    operations use one message: no such id, another tenant's idea and a
+    private idea are one answer, so the argument is not a probe for which idea
+    ids exist.
+    """
+    # Through the public selector, not a raw lookup: this operation must not be
+    # able to comment on an idea `get_idea` would not return.
+    idea = selectors.get_idea(user, idea_id)
+    if idea is None:
+        raise IdeaError('Idea is unavailable.', reason='forbidden')
+
+    if not _discussion_is_open(idea):
+        # Named plainly rather than as "unavailable": the reader can already
+        # see the idea, so a generic refusal would tell somebody they already
+        # know less than the truth, and the state that closed the discussion is
+        # public information carried by the idea itself.
+        raise IdeaError(
+            'This idea is no longer open for discussion.',
+            reason='discussion_closed',
+        )
+
+    return idea
+
+
+def _load_owned_comment(user: User, comment_id: object) -> Comment:
+    """
+    The comment identified by `comment_id`, if `user` may change it right now.
+
+    Covered by one refusal message: no such id, a comment on an idea the caller
+    may not read, and somebody else's comment. Authorship is the only way past.
+
+    No membership re-check, unlike `_load_owned_draft`, and the difference is
+    deliberate rather than an oversight. Editing an *idea* is writing into a
+    tenant, so leaving that tenant has to end it. A comment was never a write
+    into a tenant in the first place - it follows the idea's own visibility -
+    so the same gate would be inventing a rule and would strand a comment on a
+    `PUBLIC` idea that its author may still read after leaving an organization.
+    """
+    comment = selectors.get_comment(user, comment_id)
+    if comment is None or comment.author_id != user.pk:
+        raise IdeaError('Comment is unavailable.', reason='forbidden')
+    return comment
+
+
+def add_comment(user: User | None, idea_id: object, content: str) -> Comment:
+    """
+    Post a comment on an idea the caller may read.
+
+    The author is `user` and the idea is resolved, authorized and used by this
+    module - neither is an input, so no caller can post as somebody else or
+    attach a comment to an idea it was not allowed to name. The status is not
+    touched: a comment does not move the idea it is on.
+    """
+    active_user = _require_active_user(user)
+    idea = _load_discussable_idea(active_user, idea_id)
+    normalized = _validate_comment_content(content)
+
+    return Comment.objects.create(idea=idea, author=active_user, content=normalized)
+
+
+def update_comment(user: User | None, comment_id: object, content: str) -> Comment:
+    """
+    Edit the caller's own comment.
+
+    The idea, the author and `created_at` are not inputs and are not assigned,
+    so an edit cannot move a comment between ideas, reattribute it, or rewrite
+    when it was posted. The visible edit time moves, and `updated_at` records
+    it.
+    """
+    active_user = _require_active_user(user)
+    comment = _load_owned_comment(active_user, comment_id)
+    comment.content = _validate_comment_content(content)
+
+    # `save()` runs `full_clean()`, so the model's own rule - no contentless
+    # row - holds on this write path as well as on create.
+    comment.save()
+    return comment
+
+
+def delete_comment(user: User | None, comment_id: object) -> None:
+    """
+    Remove the caller's own comment.
+
+    A hard delete. There is no soft delete and no moderation state on the model
+    (S2-001 declined to model a policy that does not exist), and a `CASCADE`
+    from the idea takes the discussion with it. If moderation arrives it will
+    arrive as a state, not as a repair of this row.
+    """
+    active_user = _require_active_user(user)
+    comment = _load_owned_comment(active_user, comment_id)
+    comment.delete()

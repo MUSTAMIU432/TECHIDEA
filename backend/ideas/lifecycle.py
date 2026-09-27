@@ -101,6 +101,48 @@ TRANSITIONS: dict[tuple[str, str], str] = {
 # that exist.
 TARGET_STATUSES = tuple(Idea.Status.values)
 
+# The states in which an idea's discussion is closed (S2-005).
+#
+# One entry, and it is here because of what the table above already says:
+# `REJECTED` has no outgoing transition, so it is a state the lifecycle cannot
+# leave. A comment on a rejected idea has no future move to inform - the idea
+# will not be reviewed again and nothing in the domain can put it back - so
+# accepting one is accepting discussion of a decision that is already final.
+#
+# The invariant, asserted in
+# `test_every_closed_state_is_a_terminal_one`, is that a state the lifecycle
+# can still leave is never closed. The converse deliberately does not hold:
+# `AUTOMATION_PROPOSAL` is terminal here too, and stays **open**, because being
+# terminal within this app is not the same as being finished with - that idea
+# was handed to the automation-opportunity track, where it is very much alive,
+# and closing its discussion would cut off exactly the conversation a handoff
+# invites. `REJECTED` is closed because it is a verdict, not because it is
+# terminal; the two are related here but they are not the same claim.
+#
+# Every other state is open, deliberately including `DRAFT`. A draft is the
+# author's working copy and participation in it is participation in writing it,
+# not in reviewing it; refusing comments there would be inventing a policy this
+# domain has never stated, and would break the ordinary case of a colleague
+# asking a question while an idea is still being written. The gate that always
+# exists is the one that always has: the caller must be able to *read* the
+# idea.
+#
+# This is a set rather than a flag on the idea, so "which states are open" has
+# exactly one answer in the codebase.
+DISCUSSION_CLOSED_STATUSES = frozenset({Idea.Status.REJECTED})
+
+
+def discussion_is_open(idea: Idea) -> bool:
+    """
+    Whether `idea`'s discussion accepts a new comment right now.
+
+    The rule for *adding* to a discussion, and nothing else. Retracting or
+    editing a comment somebody already wrote stays available in a closed
+    discussion: taking something back is not participating in the discussion,
+    and a reader must never be able to lock a colleague out of their own words.
+    """
+    return idea.status not in DISCUSSION_CLOSED_STATUSES
+
 
 def _status_label(status: str) -> str:
     return Idea.Status(status).label

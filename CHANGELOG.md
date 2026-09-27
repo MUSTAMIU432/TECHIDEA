@@ -205,6 +205,92 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     reasons against a `CHANGES_REQUESTED` idea, dashboards, comments, voting,
     attachment uploads, the `DEPARTMENT` tier, proposals, developer matching,
     AI, payments and subscriptions. (Discovery arrives in S2-004.)
+- S2-005: Comments and discussion — the `Comment` model S2-001 designed,
+  implemented as a discussion attached to an idea:
+  `add_comment`/`update_comment`/`delete_comment` in `ideas/services.py`,
+  `list_comments`/`get_comment` in `ideas/selectors.py`, the
+  `comments`/`createComment`/`updateComment`/`deleteComment` operations, and
+  the discussion UI on the `/app/ideas` cards. No migration: the S2-001
+  `Comment` model is used as designed.
+  - **Reading a comment is reading the idea.** A comment has no tenancy, no
+    visibility and no state of its own, so `list_comments` resolves the idea
+    through `get_idea` and filters comments by the *same* `_visibility_filter`
+    every other read uses. There is no comment-shaped version of the rule that
+    could be more permissive than the idea's, and an unreadable idea is an
+    **empty page** rather than an error — a discussion must not be a better
+    oracle than the idea it hangs from.
+  - **Commenting follows readability, not membership**, which is the rule
+    `docs/ideas-domain.md` already set for voting. It is what lets anybody on
+    the platform answer a `PUBLIC` idea without first becoming a member of
+    someone else's organization; `PUBLIC` means platform-readable, and making
+    it read-only to outsiders would be a different visibility tier.
+  - **No elevated path, and no new authorization code.** Edit and delete are
+    the comment's author and nobody else — not an administrator, not an
+    organization Owner, and not the idea's own author, because ownership of an
+    idea is not ownership of the discussion under it. `organizations` has no
+    capability meaning "moderate a discussion" to check, and inventing one
+    would be the second authorization system S2-001 ruled out. There is also no
+    membership re-check on edit or delete, unlike `update_idea`: a comment was
+    never a write *into a tenant*, so that gate would strand a comment on a
+    `PUBLIC` idea its author may still read after leaving an organization.
+  - **Refusals never confirm existence.** An unknown comment id, another
+    author's comment and a comment on an unreadable idea all answer
+    `"Comment is unavailable."`; an unknown idea and an unreadable one both
+    answer `"Idea is unavailable."`
+  - **Content is validated, normalized and never truncated.** Rejected when
+    blank, whitespace-only, or over `MAX_COMMENT_LENGTH` (2000 — a module
+    constant, a judgement call of the same kind as `MIN_DESCRIPTION_LENGTH`).
+    Truncation would store text the author did not write and report success, so
+    the only honest answer is a refusal the UI can show next to the box.
+    Stripped at the ends and CRLF folded to LF, but internal whitespace is left
+    alone: collapsing it would destroy the indentation of a pasted code block.
+    Content is plain text throughout — stored verbatim, returned as a plain
+    GraphQL `String`, and rendered as text by the client. Nothing escapes it in
+    storage, because escaping belongs at render time.
+  - **A deterministic order, stated where the tie-break is needed.** Oldest
+    first, because a discussion is read in the order it happened. `created_at`
+    is microsecond-resolution, so `created_at, pk` — and the tie-break is in
+    the selector because `Comment.Meta.ordering` is `['created_at']` alone,
+    which is arbitrary for two comments written in the same instant and lets a
+    page boundary show one twice and skip another.
+  - **Paging reuses S2-004's module unchanged**, including the same default of
+    20 and maximum of 50, and `CommentPage` reuses the same `PageInfo` type as
+    `IdeaPage` — a second pagination type would be a second set of conventions
+    to learn. A discussion is a corollary of an idea being readable, so it gets
+    the ideas page size rather than one of its own.
+  - **The discussion-state rule lives beside the transition matrix.**
+    `DISCUSSION_CLOSED_STATUSES = {REJECTED}`, closed because it has no
+    outgoing transition and a comment there has no future move to inform.
+    `AUTOMATION_PROPOSAL` is terminal in this app too and stays **open** —
+    being terminal here is not the same as being finished with, and closing a
+    handoff would cut off the conversation it invites. `DRAFT` is open too.
+    Editing and deleting stay available in a closed discussion: retracting
+    what you wrote is not participating in it. The invariant is asserted
+    against `TRANSITIONS` rather than repeated, so the rule and the lifecycle
+    cannot drift into two answers.
+  - **Additive GraphQL change, reported deliberately:** `IdeaType` gains
+    `discussionOpen: Boolean!`, computed from the same rule `createComment`
+    enforces. No existing field changed and nothing was removed; the reason for
+    adding it rather than having the client re-derive "is this rejected?" is
+    the same one `availableTransitions` was added for — a client-side copy of a
+    lifecycle rule is a second answer to a question the server owns.
+  - **Frontend:** the discussion is a disclosure inside each idea's card,
+    fetched when it is opened rather than on mount (a list of twenty ideas
+    would otherwise be twenty requests), with at most one open at a time. A
+    successful post, edit or delete updates the thread in place and never
+    re-fetches the ideas list, so the reader keeps their filters and their
+    page. Two submissions in one tick are dropped by a ref rather than by
+    state, because state is not readable synchronously from a click handler
+    and a double-posted comment is a duplicate somebody has to delete by hand.
+    A failed read is reported as a failure rather than as an empty discussion,
+    because "nobody has commented" and "we could not ask" are different claims.
+  - Not implemented, and deliberately: threading/replies (S2-001 declined a
+    parent pointer because "who may see a reply to a private comment" has real
+    authorization depth), moderation and soft delete, mentions and
+    notifications (Sprint 3), voting (S2-006), attachments (S2-007), and rate
+    limiting on comment writes — this project has no throttling mechanism, and
+    introducing one here would be a new security framework for a single
+    operation.
 - S2-004: Categories and discovery — browsing ideas by category, search, and
   combined filters over a bounded page.
   `selectors.list_discoverable_ideas`, `selectors.IdeaFilters`,

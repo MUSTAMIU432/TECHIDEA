@@ -23,10 +23,26 @@ export const SINGLE_PAGE: IdeaPageInfo = {
   hasPreviousPage: false,
 }
 
+/**
+ * A page of anything, positioned as the backend would position it.
+ *
+ * Generic because `IdeaPage` and `IdeaCommentPage` are the same shape with
+ * the same `PageInfo` - the backend reuses one pagination type across both, so
+ * the test helper should not invent a second convention either.
+ */
+export function pageOf<T>(
+  items: T[],
+  overrides: Partial<IdeaPageInfo> = {},
+): {
+  items: T[]
+  pageInfo: IdeaPageInfo
+} {
+  return { items, pageInfo: { ...SINGLE_PAGE, totalCount: items.length, ...overrides } }
+}
+
 /** A page of `items`, positioned as the backend would position it. */
 export function page(items: Idea[], overrides: Partial<IdeaPageInfo> = {}): IdeaPage {
-  const info = { ...SINGLE_PAGE, totalCount: items.length, ...overrides }
-  return { items, pageInfo: info }
+  return pageOf<Idea>(items, overrides)
 }
 
 /**

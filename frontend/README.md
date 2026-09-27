@@ -278,8 +278,8 @@ What exists is Identity (sign in, sign up, Google sign-in, session lifecycle,
 password reset and email confirmation), the organizations tier (create an
 organization, switch between them, see members and roles), and the first
 Ideas slice (file an idea, edit your own draft, submit it for review, move it
-through review, and browse ideas by category, search and status over a paged
-list).
+through review, browse ideas by category, search and status over a paged list,
+and read and write the discussion on any idea).
 Reviews, projects, notifications, comments, voting and everything else in that
 direction do not exist yet. Within Identity, what is still missing is an
 authenticated Google-account-linking flow: Google sign-in authenticates or
@@ -332,6 +332,23 @@ Two things the Ideas area deliberately does **not** do on this side:
   term that is typed and then replaced is never sent at all — rather than
   being sent and then overwritten, which is what would leave the list showing
   results for a word that is no longer in the box.
+- It does not fetch a discussion until it is opened. Each idea's card has a
+  discussion toggle, and the thread is requested on first open: the ideas page
+  is a *list*, and mounting twenty discussions would be twenty requests for
+  content nobody asked to read. At most one is open at a time, and the open one
+  cannot outlive the results it belongs to.
+- It does not decide who may edit or delete a comment. The buttons are drawn
+  where `comment.authorId` matches the signed-in user, which is a question of
+  what to *offer*; the server checks authorship itself and would refuse
+  regardless, and there is no client-side elevation and no argument that could
+  express one.
+- It does not copy the "is this discussion open?" rule. `idea.discussionOpen`
+  is reported by the server from the same rule `createComment` enforces, for
+  the same reason `availableTransitions` exists.
+- It does not re-fetch the ideas list after a comment. A discussion is
+  append-only in reading order, so a post, an edit or a delete updates the
+  thread in place — the reader keeps their filters and their page, and a second
+  submission in the same tick is dropped rather than duplicated.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no

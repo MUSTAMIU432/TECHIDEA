@@ -1,0 +1,283 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+import {
+  commentsRequest,
+  createCommentRequest,
+  deleteCommentRequest,
+  updateCommentRequest,
+  type IdeaComment,
+  type IdeaPageInfo,
+} from '../api/ideasApi'
+
+/**
+ * One idea's discussion, and the four things a reader can do to it.
+ *
+ * The shape of the state is the interesting part. A discussion is *append-only
+ * in reading order*: comments are listed oldest first and a new one goes at the
+ * bottom, so a post does not reorder anything the reader is looking at. That
+ * lets a successful create splice the new comment onto the end of the loaded
+ * page and adjust the total, instead of re-fetching - which is what keeps a
+ * reader's scroll position and the page they were on through somebody else
+ * saying something.
+ *
+ * Three things it will not do:
+ *
+ * - **No local filtering, sorting or de-duplication.** The server's order and
+ *   membership are the truth. A client that sorted its own copy would show an
+ *   order the backend never promised.
+ * - **No pretending a refusal is a failure.** A `success: false` payload is the
+ *   server's answer and is reported as its message, with `field` for the input
+ *   at fault. Only a thrown error - the request never got a decision - becomes
+ *   the transport message.
+ * - **No second opinion about authorization.** Whether the current user may
+ *   edit or delete a comment is decided by comparing `authorId` with the
+ *   signed-in user, which is a question of what to *offer*. The server refuses
+ *   either way.
+ */
+export interface CommentDiscussion {
+  comments: IdeaComment[]
+  pageInfo: IdeaPageInfo | null
+  loading: boolean
+  error: string | null
+  /** A business refusal from the last write, with the field it blames. */
+  writeError: { message: string; field: string | null } | null
+  posting: boolean
+  /** The comment currently being written or edited, by id. */
+  busyCommentId: string | null
+  editingCommentId: string | null
+  canPost: boolean
+  post: (content: string) => Promise<boolean>
+  startEditing: (commentId: string) => void
+  cancelEditing: () => void
+  saveEdit: (commentId: string, content: string) => Promise<boolean>
+  remove: (commentId: string) => Promise<boolean>
+  clearWriteError: () => void
+}
+
+const TRANSPORT_FAILURE = 'We could not reach the server. Please try again.'
+
+/** One fetched page, tagged with the idea it belongs to. */
+interface Answer {
+  key: string
+  comments: IdeaComment[]
+  pageInfo: IdeaPageInfo
+}
+
+/**
+ * Matches the backend's `MAX_COMMENT_LENGTH`.
+ *
+ * Duplicated on purpose, and only to fail *before* a round trip: the server
+ * remains the authority and its message is what a reader is shown if the two
+ * ever disagree. Sending 2,001 characters to be told "too long" would be a
+ * request the client knew was going to be refused.
+ */
+export const MAX_COMMENT_LENGTH = 2000
+
+export function useComments(ideaId: string | null, canPost: boolean): CommentDiscussion {
+  const [answer, setAnswer] = useState<Answer | null>(null)
+  const [errorKey, setErrorKey] = useState<string | null>(null)
+  const [writeError, setWriteError] = useState<{ message: string; field: string | null } | null>(
+    null,
+  )
+  const [posting, setPosting] = useState(false)
+  const [busyCommentId, setBusyCommentId] = useState<string | null>(null)
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  // Bumped only when a successful write has nothing to splice into - i.e. the
+  // read failed, so there is no page to update. The normal path updates the
+  // answer in place and never touches this.
+  const [reloadToken, setReloadToken] = useState(0)
+
+  // Refs mirroring the two "is a write in flight" flags.
+  //
+  // React state cannot be read synchronously from an event handler, so
+  // guarding a submit with `if (posting) return` still lets two clicks in the
+  // same tick through - and a double-posted comment is a real duplicate the
+  // reader has to delete by hand, not a cosmetic glitch. The ref is checked in
+  // the tick the click happened in; the state is what the UI renders.
+  //
+  // `useRef`, deliberately, and not module scope: a module-level flag would be
+  // shared by every discussion on the page, so opening a second one would
+  // disable the first one's submit button - and it would outlive the component
+  // that set it, which is the same cross-test leak the test setup has to reset
+  // by hand elsewhere in this app.
+  const postingRef = useRef(false)
+  const busyRef = useRef<string | null>(null)
+
+  // The discussion this state belongs to, as a comparable value.
+  //
+  // Deciding "is the answer in state the one being waited for" by *comparing*
+  // during render, rather than by writing a fresh `loading` state into an
+  // effect, is the same trick `useIdeaDiscovery` uses: a second render to
+  // express something knowable already, and what makes a late answer for a
+  // discussion the reader has since closed be ignored rather than painted under
+  // the next one.
+  const key = ideaId
+
+  useEffect(() => {
+    // No idea, nothing to fetch. The component renders that case from `ideaId`
+    // rather than as an empty discussion.
+    if (key === null) return
+
+    commentsRequest(key)
+      .then((page) => {
+        setAnswer({ key, comments: page.items, pageInfo: page.pageInfo })
+        setErrorKey(null)
+      })
+      .catch(() => {
+        setAnswer(null)
+        setErrorKey(key)
+      })
+    // `reloadToken` is a trigger rather than an input: it is how a successful
+    // write says "there is no page to update, go and ask again". The linter is
+    // right that the effect does not read it.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+  }, [key, reloadToken])
+
+  const settled = answer !== null && answer.key === key
+  const failed = errorKey === key
+  // The last answer rather than necessarily the current one, so re-opening a
+  // discussion shows its contents immediately while it refreshes.
+  const comments = answer?.comments ?? []
+  const pageInfo = answer?.pageInfo ?? null
+  const loading = key !== null && !settled && !failed
+  // A transport failure is reported as itself. An empty list would read as
+  // "this idea has no comments", which is a different claim.
+  const error = failed ? TRANSPORT_FAILURE : null
+
+  const post = useCallback(
+    async (content: string) => {
+      if (ideaId === null) return false
+
+      // Refuse a second click before it becomes a request. `posting` alone
+      // cannot do this: it is state, so two clicks in the same tick both read
+      // the old value, and a double-posted comment is a duplicate the reader
+      // has to delete by hand.
+      if (postingRef.current) return false
+      postingRef.current = true
+
+      setPosting(true)
+      setWriteError(null)
+      try {
+        const result = await createCommentRequest(ideaId, content)
+        if (!result.success || result.comment === null) {
+          setWriteError({ message: result.message, field: result.field })
+          return false
+        }
+        // Spliced onto the end, because the server orders oldest first and a
+        // new comment is the newest. The total moves with it, so the count on
+        // screen stays true - and the idea list above is untouched, so the
+        // reader keeps their filters and their page.
+        const created = result.comment
+        if (answer === null) {
+          // The read failed, so there is no page to splice into. Reload rather
+          // than invent one, so the total is the server's number.
+          setReloadToken((token) => token + 1)
+        } else {
+          setAnswer({
+            ...answer,
+            comments: [...answer.comments, created],
+            pageInfo: { ...answer.pageInfo, totalCount: answer.pageInfo.totalCount + 1 },
+          })
+        }
+        return true
+      } catch {
+        setWriteError({ message: TRANSPORT_FAILURE, field: null })
+        return false
+      } finally {
+        postingRef.current = false
+        setPosting(false)
+      }
+    },
+    [ideaId, answer],
+  )
+
+  const saveEdit = useCallback(
+    async (commentId: string, content: string) => {
+      if (busyRef.current !== null) return false
+      busyRef.current = commentId
+      setBusyCommentId(commentId)
+      setWriteError(null)
+      try {
+        const result = await updateCommentRequest(commentId, content)
+        if (!result.success || result.comment === null) {
+          setWriteError({ message: result.message, field: result.field })
+          return false
+        }
+        // Replaced in place: an edit does not move a comment, so re-fetching
+        // would be a request for nothing, and it would risk the row leaving the
+        // loaded page for reasons that have nothing to do with the edit.
+        const edited = result.comment
+        if (answer !== null) {
+          setAnswer({
+            ...answer,
+            comments: answer.comments.map((comment) =>
+              comment.id === commentId ? edited : comment,
+            ),
+          })
+        }
+        setEditingCommentId(null)
+        return true
+      } catch {
+        setWriteError({ message: TRANSPORT_FAILURE, field: null })
+        return false
+      } finally {
+        busyRef.current = null
+        setBusyCommentId(null)
+      }
+    },
+    [answer],
+  )
+
+  const remove = useCallback(
+    async (commentId: string) => {
+      if (busyRef.current !== null) return false
+      busyRef.current = commentId
+      setBusyCommentId(commentId)
+      setWriteError(null)
+      try {
+        const result = await deleteCommentRequest(commentId)
+        if (!result.success) {
+          setWriteError({ message: result.message, field: result.field })
+          return false
+        }
+        if (answer !== null) {
+          setAnswer({
+            ...answer,
+            comments: answer.comments.filter((comment) => comment.id !== commentId),
+            pageInfo: {
+              ...answer.pageInfo,
+              totalCount: Math.max(0, answer.pageInfo.totalCount - 1),
+            },
+          })
+        }
+        if (editingCommentId === commentId) setEditingCommentId(null)
+        return true
+      } catch {
+        setWriteError({ message: TRANSPORT_FAILURE, field: null })
+        return false
+      } finally {
+        busyRef.current = null
+        setBusyCommentId(null)
+      }
+    },
+    [answer, editingCommentId],
+  )
+
+  return {
+    comments,
+    pageInfo,
+    loading,
+    error,
+    writeError,
+    posting,
+    busyCommentId,
+    editingCommentId,
+    canPost,
+    post,
+    startEditing: setEditingCommentId,
+    cancelEditing: () => setEditingCommentId(null),
+    saveEdit,
+    remove,
+    clearWriteError: () => setWriteError(null),
+  }
+}

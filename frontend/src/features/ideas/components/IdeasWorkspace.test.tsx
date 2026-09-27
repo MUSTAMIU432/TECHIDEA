@@ -45,6 +45,7 @@ const DRAFT: Idea = {
   // a button appears here because the server listed the move, not because the
   // component decided to draw one.
   availableTransitions: ['SUBMITTED'],
+  discussionOpen: true,
 }
 
 const SOMEONE_ELSES: typeof DRAFT = {

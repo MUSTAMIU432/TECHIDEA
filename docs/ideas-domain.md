@@ -326,8 +326,85 @@ cannot read.
 
 **As implemented (S2-002).** `create_idea`, `update_idea` and `submit_idea`
 ship, with `IdeaInput` carrying the four writable content fields and nothing
-else. `add_comment`, `update_comment`, `delete_comment`, `vote_for_idea` and
-`remove_vote` are still to come, and are not stubbed.
+else. `add_comment`, `update_comment` and `delete_comment` joined them in
+S2-005; `vote_for_idea` and `remove_vote` are still to come, and are not
+stubbed.
+
+### Comments (implemented, S2-005)
+
+A comment has no tenancy, no visibility and no state of its own, so every
+question about one is a question about the idea it hangs from.
+
+| Operation | Requires |
+| --------- | -------- |
+| `add_comment(user, idea_id, content)` | An active user who may **read** the idea, and an open discussion |
+| `update_comment(user, comment_id, content)` | The **author** of the comment, and still being able to read its idea |
+| `delete_comment(user, comment_id, None)` | The **author** of the comment, and still being able to read its idea |
+
+Three decisions, and why each went the way it did:
+
+- **Readability, not membership.** `add_comment` requires being able to read
+  the idea rather than being a member of its organization. That is the same
+  rule `docs/ideas-domain.md` set for voting ("a user may not vote on an idea
+  they cannot read"), and it is what lets anybody on the platform answer a
+  `PUBLIC` idea without first being made a member of someone else's
+  organization. `PUBLIC` means platform-readable; making it read-only to
+  outsiders would be a different visibility tier.
+- **No elevated path.** There is no administrator, moderator or Owner who may
+  edit or delete somebody else's comment. `organizations.authorization` has no
+  capability meaning "moderate a discussion" to check, and inventing one here
+  would be the second authorization system S2-001 ruled out. The idea's own
+  author cannot do it either: ownership of an *idea* is not ownership of the
+  discussion under it.
+- **No membership re-check on edit or delete**, unlike `update_idea`. Editing
+  an idea is a write *into a tenant*, so leaving that tenant has to end it; a
+  comment never was one — it follows the idea's own visibility — so the same
+  gate would strand a comment on a `PUBLIC` idea that its author may still read
+  after leaving an organization.
+
+**Refusals never confirm existence.** An unknown comment id, somebody else's
+comment and a comment on an idea the caller may not read all answer
+`"Comment is unavailable."`; an unknown idea and an unreadable one both answer
+`"Idea is unavailable."` A comment id is therefore not an oracle for which
+ideas exist, and an idea id is not an oracle for which comments exist.
+
+**Content** is stripped at the ends, has CRLF folded to LF, and is otherwise
+untouched: internal whitespace is somebody's content, and collapsing it would
+destroy the indentation of a pasted code block. A blank or whitespace-only
+comment is refused, and so is one over `MAX_COMMENT_LENGTH` (2000) — **refused,
+never truncated**, because truncating would store text the author did not write
+and report success. `MAX_COMMENT_LENGTH` is a judgement call of the same kind
+as `MIN_DESCRIPTION_LENGTH`, and it is a module constant so changing it is a
+visible decision. The model's own `clean()` refuses a contentless row as well;
+note that `bulk_create` and `QuerySet.update` bypass `save()` and therefore
+bypass it, the same gap that made S2-002 add database CHECK constraints for
+`status` and `visibility` on top of `choices`.
+
+**Ordering** is `created_at, pk` — chronological, because a discussion is read
+in the order it happened and the opening comment is what the rest answers. The
+`pk` tie-breaker is not decoration: `created_at` is microsecond-resolution, so
+two comments written in the same instant would otherwise come back in an
+arbitrary order and a page boundary could show one twice and skip another.
+`Comment.Meta.ordering` is `['created_at']` alone, so the tie-break is stated in
+the selector.
+
+**Paging** reuses `ideas/pagination.py` unchanged, including the default of 20
+and the maximum of 50: a discussion has no more reason to differ from the list
+it hangs under than to have its own conventions. An idea the caller may not
+read is an **empty page**, not an error — the same answer as for an idea that
+does not exist.
+
+**The discussion-state rule** lives in `ideas.lifecycle` next to the transition
+matrix it is derived from: `DISCUSSION_CLOSED_STATUSES` is
+`{REJECTED}`, and `discussion_is_open(idea)` is the predicate. `REJECTED` has
+no outgoing transition, so it is a state the lifecycle cannot leave and a
+comment there has no future move to inform. `AUTOMATION_PROPOSAL` is terminal
+in this app too and stays **open** — being terminal here is not the same as
+being finished with, and closing a handoff would cut off the conversation it
+invites. `DRAFT` is open as well: a draft is the author's working copy, and a
+colleague asking a question while it is being written is ordinary. Retracting
+or editing a comment already written stays available in a closed discussion,
+because taking something back is not participating in the discussion.
 
 Two decisions the implementation had to make that this document did not
 anticipate:
@@ -500,8 +577,9 @@ omission.
 ```
 frontend/src/features/ideas/
     api/          ideasApi.ts - the documents and typed request functions
-    components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination, IdeasWorkspace
-    hooks/        useIdeaDiscovery, useCategories
+    components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination,
+                  IdeaDiscussion, IdeasWorkspace
+    hooks/        useIdeaDiscovery, useCategories, useComments
 ```
 
 The data loading moved into `hooks/` in S2-004, and for a specific reason
@@ -527,6 +605,20 @@ backend rule rather than a free choice:
   renders the server's page, and the three empty states ("nothing here",
   "nothing matches", "nothing on this page") are kept apart because they are
   different facts.
+- **A discussion is a disclosure inside the card, fetched when it is opened.**
+  The ideas page is a *list*; fetching twenty discussions on mount would be
+  twenty requests for content nobody asked to read. At most one is open at a
+  time, and the open one cannot outlive the results it belongs to.
+- **A comment write updates the thread in place and never re-fetches the
+  ideas.** A discussion is append-only in reading order, so a post splices onto
+  the end and adjusts the total; the reader keeps their filters and their page.
+  Two submissions in one tick are dropped by a ref rather than by state, because
+  state is not readable synchronously from a click handler and a
+  double-posted comment is a duplicate somebody has to delete by hand.
+- **`idea.discussionOpen` decides whether the composer is drawn**, reported by
+  the server from the same rule `createComment` enforces — the same reason
+  `availableTransitions` exists, so no lifecycle rule is copied onto the
+  client.
 
 This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
@@ -557,6 +649,7 @@ the typed request functions, `context/`-free hooks read them, and
 | S2-002 | `createIdea`/`updateIdea`/`submitIdea`, selectors, the GraphQL schema, the frontend feature module — implemented. `addComment`/`voteIdea` were scoped into S2-002 in this document and are **not** implemented |
 | S2-003 | `transitionIdea` and the transition matrix, fail-closed `DEPARTMENT` — implemented |
 | S2-004 | `list_discoverable_ideas`, `IdeaFiltersInput`, `IdeaPage`, `ideas/pagination.py`, category/search/status filters, the discovery UI — implemented |
+| S2-005 | `add_comment`/`update_comment`/`delete_comment`, `CommentType`/`CommentPage`, `comments`/`createComment`/`updateComment`/`deleteComment`, `IdeaType.discussionOpen`, the discussion UI — implemented |
 | S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 

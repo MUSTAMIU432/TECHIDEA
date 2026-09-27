@@ -22,9 +22,9 @@ email address in its payload would publish it platform-wide. An id is enough
 for the client to answer the only question it asks - "is this mine?" - which
 is what decides whether to offer "Edit" and "Submit".
 
-No comments, votes or attachments appear here. They are later sprints; the
-types are not stubbed, so nothing in this schema promises a surface that does
-not work.
+Comments (S2-005) follow the same rules as everything else here. No votes or
+attachments appear: they are later sprints, and the types are not stubbed, so
+nothing in this schema promises a surface that does not work.
 
 Paging is offset-based and bounded: a page defaults to
 `ideas.pagination.DEFAULT_PAGE_SIZE` rows and is clamped to
@@ -52,7 +52,7 @@ service describes what may be *used* today.
 import strawberry
 
 from ideas import lifecycle, selectors, services
-from ideas.models import Category, Idea
+from ideas.models import Category, Comment, Idea
 
 IdeaStatus = strawberry.enum(Idea.Status, name='IdeaStatus')
 IdeaVisibility = strawberry.enum(Idea.Visibility, name='IdeaVisibility')
@@ -99,6 +99,13 @@ class IdeaType:
     # from hard-coding a second, drifting copy of the lifecycle - and it is a
     # convenience, not a control: `transitionIdea` asks the matrix again.
     available_transitions: list[IdeaStatus]
+    # Whether this idea accepts a new comment right now (S2-005), reported for
+    # the same reason as `availableTransitions`: the rule is a lifecycle rule,
+    # and a client that re-derived it here would be carrying a second copy of
+    # it that could disagree with the server. Not a control either - a client
+    # that sends `createComment` on a closed discussion is refused, whether or
+    # not it asked.
+    discussion_open: bool
 
     @staticmethod
     def from_model(idea: Idea, user=None) -> 'IdeaType':
@@ -117,6 +124,7 @@ class IdeaType:
             available_transitions=[
                 IdeaStatus(status) for status in lifecycle.available_transitions(user, idea)
             ],
+            discussion_open=lifecycle.discussion_is_open(idea),
         )
 
 
@@ -199,6 +207,50 @@ class IdeaPage:
     page_info: PageInfo
 
 
+@strawberry.type(
+    description=(
+        'One comment on an idea. Carries `authorId` and no author, for the '
+        'same reason `IdeaType` does: a `PUBLIC` idea is readable platform-wide, '
+        'so embedding a member here would publish their email to everybody. '
+        '`authorId` is what lets the client decide which comments to offer Edit '
+        'and Delete on - an offer, never a control, since the service checks '
+        'authorship itself.\n\n'
+        '`content` is plain text. It is stored and returned verbatim, and it is '
+        'rendered as text, so a client must not interpret it as markup.'
+    )
+)
+class CommentType:
+    id: strawberry.ID
+    idea_id: strawberry.ID
+    author_id: strawberry.ID
+    content: str
+    # ISO 8601 strings, as `IdeaType` reports its own timestamps: one
+    # representation across the schema rather than two.
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_model(cls, comment: Comment) -> 'CommentType':
+        return cls(
+            id=strawberry.ID(str(comment.pk)),
+            idea_id=strawberry.ID(str(comment.idea_id)),
+            author_id=strawberry.ID(str(comment.author_id)),
+            content=comment.content,
+            created_at=comment.created_at.isoformat(),
+            updated_at=comment.updated_at.isoformat(),
+        )
+
+
+@strawberry.type(description="One page of an idea's discussion, oldest first.")
+class CommentPage:
+    items: list[CommentType]
+    # The same `PageInfo` as `IdeaPage`, deliberately rather than a comment-
+    # shaped one: the offsets, limits and totals mean the same thing in both,
+    # and a second pagination type would be a second set of conventions to
+    # learn and a second thing to get wrong.
+    page_info: PageInfo
+
+
 @strawberry.input(
     description=(
         'Narrowing arguments for a discovery query. Every field can only '
@@ -218,6 +270,31 @@ class IdeaFiltersInput:
     search: str | None = None
     offset: int = 0
     limit: int | None = None
+
+
+@strawberry.input(description='The text of a comment.')
+class CommentInput:
+    # Bound by the service (MAX_COMMENT_LENGTH), not by the schema, because the
+    # limit is a product decision and the message for it belongs next to the
+    # other validation failures. It is a plain `String` and not an
+    # upload/scalar, so nothing here can carry a file or a rendered document.
+    content: str
+
+
+@strawberry.input(description='Post a comment on an idea.')
+class CreateCommentInput:
+    idea_id: strawberry.ID
+    comment: CommentInput
+
+
+@strawberry.input(description="Edit the current user's own comment.")
+class UpdateCommentInput:
+    id: strawberry.ID
+    comment: CommentInput
+
+
+def _comment_payload(comment: Comment) -> CommentType:
+    return CommentType.from_model(comment)
 
 
 def _service_error(exc: services.IdeaError) -> tuple[str, str | None]:
@@ -304,6 +381,35 @@ class Query:
     ) -> IdeaPage:
         return _idea_page(info, selectors.IdeaFilters(organization_id=organization_id), filters)
 
+    @strawberry.field(
+        description=(
+            "One idea's discussion, oldest first. Answers an empty page for an "
+            'idea the caller may not read, which is the same answer as for an '
+            'idea that does not exist: a comment list must not be a better '
+            'oracle than the idea it hangs from.\n\n'
+            'Discussion is readable in every state, including one where the '
+            'discussion is closed to new comments.'
+        )
+    )
+    def comments(
+        self,
+        info: strawberry.Info,
+        idea_id: strawberry.ID,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> CommentPage:
+        page = selectors.list_comments(info.context.user, idea_id, offset=offset, limit=limit)
+        return CommentPage(
+            items=[_comment_payload(comment) for comment in page.items],
+            page_info=PageInfo(
+                offset=page.offset,
+                limit=page.limit,
+                total_count=page.total_count,
+                has_next_page=page.has_next_page,
+                has_previous_page=page.has_previous_page,
+            ),
+        )
+
     @strawberry.field(description='Categories available to file an idea under.')
     def categories(self) -> list[CategoryType]:
         # Unauthenticated by design: the list is platform-wide reference data
@@ -312,6 +418,39 @@ class Query:
         return [
             CategoryType.from_model(category) for category in selectors.list_active_categories()
         ]
+
+
+# Comment payloads, shaped exactly like the idea payloads:
+# `(success, message, field, entity)`. One failure convention for the whole
+# API, so the frontend handles a refused comment the way it handles a refused
+# idea - by reading `message` and putting `field` next to the input at fault.
+
+
+@strawberry.type(description='Result of posting a comment.')
+class CreateCommentPayload:
+    success: bool
+    message: str
+    field: str | None = None
+    comment: CommentType | None = None
+
+
+@strawberry.type(description='Result of editing a comment.')
+class UpdateCommentPayload:
+    success: bool
+    message: str
+    field: str | None = None
+    comment: CommentType | None = None
+
+
+@strawberry.type(description='Result of deleting a comment.')
+class DeleteCommentPayload:
+    success: bool
+    message: str
+    field: str | None = None
+    # Always null. A delete removes the row, and there is no way to describe
+    # what a comment that no longer exists looks like. The client refreshes the
+    # discussion on `success`, not on the payload's contents.
+    comment: CommentType | None = None
 
 
 @strawberry.type
@@ -400,3 +539,60 @@ class Mutation:
             message='Idea submitted for review.',
             idea=IdeaType.from_model(idea),
         )
+
+    @strawberry.mutation(
+        description=(
+            'Post a comment on an idea. Requires being able to *read* the idea '
+            '- not membership of its organization, because participation '
+            'follows readability and a `PUBLIC` idea is meant to be answered '
+            'across tenants. Refused on an idea whose discussion is closed.'
+        )
+    )
+    def create_comment(
+        self, info: strawberry.Info, input: CreateCommentInput
+    ) -> CreateCommentPayload:
+        try:
+            comment = services.add_comment(info.context.user, input.idea_id, input.comment.content)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return CreateCommentPayload(success=False, message=message, field=field)
+
+        return CreateCommentPayload(
+            success=True,
+            message='Comment posted.',
+            comment=_comment_payload(comment),
+        )
+
+    @strawberry.mutation(
+        description=(
+            "Edit the current user's own comment. There is no elevated path: "
+            'no administrator and no role holder may edit a comment they did '
+            'not write, because no such capability exists to check.'
+        )
+    )
+    def update_comment(
+        self, info: strawberry.Info, input: UpdateCommentInput
+    ) -> UpdateCommentPayload:
+        try:
+            comment = services.update_comment(info.context.user, input.id, input.comment.content)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return UpdateCommentPayload(success=False, message=message, field=field)
+
+        return UpdateCommentPayload(
+            success=True,
+            message='Comment updated.',
+            comment=_comment_payload(comment),
+        )
+
+    @strawberry.mutation(
+        description="Delete the current user's own comment. There is no elevated path."
+    )
+    def delete_comment(self, info: strawberry.Info, id: strawberry.ID) -> DeleteCommentPayload:
+        try:
+            services.delete_comment(info.context.user, id)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return DeleteCommentPayload(success=False, message=message, field=field)
+
+        return DeleteCommentPayload(success=True, message='Comment deleted.', comment=None)
