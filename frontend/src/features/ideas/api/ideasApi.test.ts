@@ -10,10 +10,12 @@ import {
   ideaRequest,
   ideasRequest,
   organizationIdeasRequest,
+  removeVoteRequest,
   submitIdeaRequest,
   transitionIdeaRequest,
   updateCommentRequest,
   updateIdeaRequest,
+  voteIdeaRequest,
 } from './ideasApi'
 
 /**
@@ -550,5 +552,104 @@ describe('ideasApi', () => {
     // S2-006 and S2-007 are not implemented, and this client cannot ask for
     // either even by accident.
     expect(request.query).not.toMatch(/vote|attachment|upload/i)
+  })
+  // --- votes (S2-006) -------------------------------------------------------
+
+  it('selects the vote fields on the ideas it reads', async () => {
+    const fetchMock = stubFetch({ ideas: { items: [], pageInfo: PAGE_INFO } })
+
+    await ideasRequest()
+
+    const [request] = sentRequests(fetchMock)
+    // A card renders its vote control from the page it was given, so the count
+    // and the viewer's own answer have to be in the same document. Two fields
+    // rather than one: the count is global and the flag is personal.
+    expect(request.query).toContain('voteCount')
+    expect(request.query).toContain('viewerHasVoted')
+  })
+
+  it('votes for an idea by id, sending no voter', async () => {
+    const fetchMock = stubFetch({
+      voteIdea: {
+        success: true,
+        message: 'Vote recorded.',
+        field: null,
+        voteState: { ideaId: '1', voteCount: 3, viewerHasVoted: true },
+      },
+    })
+
+    const result = await voteIdeaRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('VoteIdea')
+    expect(request.variables).toEqual({ id: '1' })
+    // The signed-in user is the voter and there is no argument that could say
+    // otherwise, so this client cannot express voting for somebody else.
+    expect(JSON.stringify(request.variables)).not.toMatch(/user/i)
+    expect(result.voteState).toEqual({ ideaId: '1', voteCount: 3, viewerHasVoted: true })
+  })
+
+  it('withdraws a vote by id, sending no voter', async () => {
+    const fetchMock = stubFetch({
+      removeVote: {
+        success: true,
+        message: 'Vote withdrawn.',
+        field: null,
+        voteState: { ideaId: '1', voteCount: 2, viewerHasVoted: false },
+      },
+    })
+
+    const result = await removeVoteRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('RemoveVote')
+    expect(request.variables).toEqual({ id: '1' })
+    expect(JSON.stringify(request.variables)).not.toMatch(/user/i)
+    expect(result.voteState).toEqual({ ideaId: '1', voteCount: 2, viewerHasVoted: false })
+  })
+
+  it('asks for the vote state back on both mutations', async () => {
+    const fetchMock = stubFetch({
+      voteIdea: { success: true, message: 'Vote recorded.', field: null, voteState: null },
+    })
+
+    await voteIdeaRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    // The server's numbers, not a locally adjusted count: the response already
+    // accounts for concurrent votes and for the idempotency rule.
+    expect(request.query).toContain('voteState')
+    expect(request.query).toContain('voteCount')
+    expect(request.query).toContain('viewerHasVoted')
+  })
+
+  it('returns a refused vote as the payload it is', async () => {
+    stubFetch({
+      voteIdea: {
+        success: false,
+        message: 'Idea is unavailable.',
+        field: null,
+        voteState: null,
+      },
+    })
+
+    const result = await voteIdeaRequest('1')
+
+    // A refusal, not a thrown error - and with no vote state, because a caller
+    // who may not read an idea is not entitled to its count.
+    expect(result.success).toBe(false)
+    expect(result.message).toBe('Idea is unavailable.')
+    expect(result.voteState).toBeNull()
+  })
+
+  it('carries no list-of-voters query', async () => {
+    const fetchMock = stubFetch({ ideas: { items: [], pageInfo: PAGE_INFO } })
+
+    await ideasRequest()
+
+    const [request] = sentRequests(fetchMock)
+    // This client cannot enumerate who supported an idea, and does not try:
+    // the domain has no policy for that aggregate.
+    expect(request.query).not.toMatch(/voters|whoVoted|votes\s*\{/)
   })
 })

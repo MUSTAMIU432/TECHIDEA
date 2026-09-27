@@ -291,6 +291,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     limiting on comment writes — this project has no throttling mechanism, and
     introducing one here would be a new security framework for a single
     operation.
+- S2-006: Voting and engagement — the `Vote` model S2-001 designed, as
+  `vote_for_idea`/`remove_vote` in `ideas/services.py`, `voteIdea`/`removeVote`
+  and `IdeaVoteState` in the GraphQL schema, and a vote control on the
+  `/app/ideas` cards. No migration: the S2-001 `Vote` model and its
+  `unique_vote_per_user_idea` constraint are sufficient, and are relied on
+  rather than replaced.
+  - **One user, one vote per idea — enforced twice, on purpose.** A service
+    check answers the common case (a double-clicked button, a retried request);
+    the database constraint answers the one a check-then-insert cannot, which
+    is two *simultaneous* requests that both read "no vote" and both insert.
+    The constraint is the final boundary because it is the only thing that
+    cannot be raced. The loser catches `IntegrityError`, reads the row the
+    winner inserted, and **returns it as a success** — the state the caller
+    asked for does exist, so an error would be a worse answer than the truth.
+    An `IntegrityError` with no row behind it is re-raised rather than
+    swallowed, so a genuine fault is not dressed up as success. Proven with two
+    real connections and threads, and again deterministically so the
+    `IntegrityError` branch itself is exercised rather than left to timing.
+  - **Idempotency, chosen and asymmetric.** Voting twice succeeds, withdrawing
+    twice succeeds, withdrawing a vote that was never cast succeeds — all
+    because "no vote of mine" is the same fact either way, and a toggle
+    double-clicked should not produce an error about a state the reader already
+    reached. The one place it does **not** apply is the visibility gate: an
+    unreadable idea is refused rather than silently accepted, or the
+    idempotent branch would confirm the operation is available there.
+  - **Voting is gated on visibility alone, with no lifecycle condition** — a
+    deliberate divergence from S2-005's discussion rule, and the reason is
+    written down because it reads like an oversight otherwise. `docs/ideas-domain.md`
+    states the rule for votes as "a user may not vote on an idea they cannot
+    read", full stop, so a `REJECTED` idea can still be voted on. A comment is
+    participation in a *decision*; a vote is interest in the *idea*, which
+    outlives its own review state. Pinned by a test so it is not "corrected"
+    into a copy of the comment rule.
+  - **No elevated path and no new permission code.** Vote and withdraw are the
+    authenticated user's and nobody else's; `voteIdea` and `removeVote` take an
+    `id` and nothing else, so "vote as somebody else" is not a request this
+    API can express. `remove_vote` is scoped to the caller's own vote, so
+    another user's row is not even a statement it can name.
+  - **An unreadable idea leaks nothing.** The read side resolves through
+    `get_idea` first, so an idea the caller cannot read never becomes readable
+    enough to have a count; the mutation payloads carry a null `voteState` on
+    every refusal rather than a zeroed one, which would still confirm the idea
+    exists.
+  - **Counts are computed, never stored.** No denormalized column and no
+    cache, so there is no invalidation path to get wrong. A stored count would
+    have to be maintained on vote, un-vote and idea deletion, and would be
+    wrong the moment one of those failed.
+  - **No N+1, and S2-004's query count is unchanged.** `IdeaType` gained
+    `voteCount` and `viewerHasVoted`, annotated onto the page via
+    `Coalesce(Subquery(count), 0)` and `Exists(...)` — so a page of fifty ideas
+    still costs the same three queries as one, and Django does not carry
+    annotations into `.count()`, which is pinned. `Coalesce` is load-bearing: a
+    `COUNT` over an empty group returns SQL `NULL`, and `NULL` into a
+    non-nullable `Int!` is a GraphQL error on the overwhelmingly common case
+    of an idea nobody has voted on. An unannotated `Idea` (a single idea, or a
+    row a mutation just wrote) falls back to two queries, which is why the
+    *list* path is annotated and the single path is not.
+  - **Additive GraphQL change:** two fields on `IdeaType`, one new type, two
+    mutations. Nothing existing changed or was removed, and `ideas`,
+    `organizationIdeas`, `IdeaPage` and `PageInfo` are untouched.
+  - **Frontend:** the count and the reader's own answer arrive on each card, so
+    twenty controls cost no extra requests. Control state is keyed by idea id,
+    so a late response writes the idea it was for and never whichever one is on
+    screen. **No optimistic update** — the rendered count is the one the
+    mutation returned, which already accounts for other people's concurrent
+    votes — so a failed vote leaves the number exactly where it was and there
+    is nothing to roll back. The in-flight guard is a `useRef` rather than
+    state, because state cannot be read synchronously from a click handler, and
+    it is not module state because that would be shared by every mounted list
+    and would leak between tests. Neither voting nor commenting re-fetches the
+    ideas list, so a reader's filters and page survive both.
+  - Not implemented, and deliberately: ranking, scoring or trending of the votes
+    that now exist, a "who voted" listing (the domain has no policy for that
+    aggregate), downvotes or vote weights, attachments (S2-007), proposals,
+    developer matching, AI, payments, analytics, and any rate limiting — this
+    project has no throttling mechanism, and adding one here would be a new
+    security framework for a single operation.
 - S2-004: Categories and discovery — browsing ideas by category, search, and
   combined filters over a bounded page.
   `selectors.list_discoverable_ideas`, `selectors.IdeaFilters`,

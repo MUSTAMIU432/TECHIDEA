@@ -46,6 +46,8 @@ const DRAFT: Idea = {
   // component decided to draw one.
   availableTransitions: ['SUBMITTED'],
   discussionOpen: true,
+  voteCount: 0,
+  viewerHasVoted: false,
 }
 
 const SOMEONE_ELSES: typeof DRAFT = {

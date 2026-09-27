@@ -38,9 +38,10 @@ for the existence of another tenant's ideas.
 
 from dataclasses import dataclass
 
-from django.db.models import Q, QuerySet
+from django.db.models import Count, Exists, IntegerField, OuterRef, Q, QuerySet, Subquery
+from django.db.models.functions import Coalesce
 
-from ideas.models import Category, Comment, Idea
+from ideas.models import Category, Comment, Idea, Vote
 from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
@@ -349,7 +350,7 @@ def list_discoverable_ideas(
 
     queryset = _apply_filters(queryset, applied)
 
-    # `-pk` as the tie-breaker is not decoration: `created_at` is
+    # Ordering: `-pk` as the tie-breaker is not decoration: `created_at` is
     # microsecond-resolution, so two ideas filed in the same instant would
     # otherwise come back in an arbitrary order and a page boundary could
     # show the same row twice and skip another. Ordering by the primary key as
@@ -357,7 +358,12 @@ def list_discoverable_ideas(
     # correct way to page at all.
     queryset = queryset.order_by('-created_at', '-pk')
 
-    return paginate(queryset, offset=offset, limit=limit)
+    # Vote state rides along on the rows this query already fetches (S2-006).
+    # Annotated here rather than in the caller so that every path into a page
+    # of ideas reports the same numbers, and so no caller can forget: the
+    # alternative is a resolver looping and counting, which is an N+1 the
+    # annotations make unnecessary.
+    return paginate(annotate_vote_state(queryset, user), offset=offset, limit=limit)
 
 
 def list_active_categories() -> QuerySet[Category]:
@@ -458,3 +464,114 @@ def list_comments(
     )
 
     return paginate(queryset, offset=offset, limit=limit)
+
+
+# --- votes (S2-006) -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IdeaVoteState:
+    """
+    How an idea is voted on, as one reader sees it.
+
+    A value rather than a queryset, because the two numbers a client needs -
+    how many people voted, and whether *I* did - are two different questions
+    and the second one is only answerable for a known reader. Returning them
+    together is what lets a card render its vote control from a single row it
+    already has.
+
+    Frozen for the same reason `IdeaFilters` is: a caller that could mutate the
+    state it was handed would be holding a second version of the truth.
+    """
+
+    idea_id: int
+    vote_count: int
+    viewer_has_voted: bool
+
+
+def annotate_vote_state(queryset: QuerySet[Idea], user: User) -> QuerySet[Idea]:
+    """
+    Add `vote_count` and `viewer_has_voted` to a queryset of ideas.
+
+    **Why annotations rather than a loop.** A discovery page is up to 50 ideas
+    and each needs a count and a yes/no. Counting them in Python would be 50
+    queries per page; the obvious fix - a grouped aggregate - would change the
+    query's shape and add a `GROUP BY` to a query that also has to be sliced
+    and counted. Two correlated subqueries keep it to the one row-fetch the
+    page already made, and `paginate`'s `COUNT(*)` is unaffected: Django does
+    not carry annotations into `.count()`, which is pinned by
+    `test_discovery_still_costs_the_same_three_queries`.
+
+    **`Coalesce` is load-bearing.** A `COUNT` subquery over a group with no
+    rows returns SQL `NULL`, not `0`, and `NULL` into a non-nullable
+    `Int!` field is a GraphQL error. The overwhelmingly common case - an idea
+    nobody has voted on - would fail to serialize. So the zero is supplied
+    here, once, rather than in every consumer.
+
+    `Exists` rather than a count for the viewer's own vote, because the answer
+    is a boolean and the database can stop at the first row. It uses
+    `unique_vote_per_user_idea`, so it is an index probe.
+    """
+    return queryset.annotate(
+        vote_count=Coalesce(
+            Subquery(
+                Vote.objects.filter(idea=OuterRef('pk'))
+                .order_by()
+                .values('idea')
+                .annotate(total=Count('*'))
+                .values('total')[:1],
+                output_field=IntegerField(),
+            ),
+            0,
+        ),
+        viewer_has_voted=Exists(Vote.objects.filter(idea=OuterRef('pk'), user=user)),
+    )
+
+
+def vote_state_for(user: User | None, idea: Idea) -> IdeaVoteState | None:
+    """
+    The vote state of one *already authorized* idea, or `None`.
+
+    `None` for an absent or inactive reader, and for a deactivated one - the
+    same answer the rest of this module gives.
+
+    Deliberately takes an `Idea` rather than an id: the caller has already
+    resolved the idea through `get_idea`, so the visibility filter has already
+    run and re-running it here would be a second answer to "may this reader see
+    it". A count for an idea nobody was shown is never produced by this
+    function, which is the whole of the read-side authorization story for
+    votes.
+
+    Two queries rather than one annotated row, because a single idea that came
+    from `get_idea` has no annotations on it. That is fine here and would not
+    be for a page of fifty, which is why the list path uses
+    `annotate_vote_state`.
+    """
+    if user is None or not user.is_active:
+        return None
+
+    return IdeaVoteState(
+        idea_id=idea.pk,
+        vote_count=vote_count_for(idea),
+        viewer_has_voted=Vote.objects.filter(idea=idea, user=user).exists(),
+    )
+
+
+def vote_count_for(idea: Idea) -> int:
+    """
+    How many people have voted on one already authorized idea.
+
+    Split out from `vote_state_for` because the total is **not** a per-reader
+    fact, and only the "did *I* vote" half needs a reader. Three idea-writing
+    mutations (`createIdea`, `updateIdea`, `submitIdea`) build their payload
+    from an `Idea` without naming a viewer - that is S2-002's shape for
+    `availableTransitions` and is deliberately left exactly as it shipped - and
+    a count that fell back to `0` there would report a wrong number on an idea
+    that other people had already voted for. So the total is counted from the
+    idea itself in that case, and only the viewer's own answer goes unanswered.
+
+    Takes the same already authorized `Idea` for the same reason
+    `vote_state_for` does: authorization happened when the idea was resolved,
+    and this function is not a second place where it could be forgotten.
+    """
+    return Vote.objects.filter(idea=idea).aggregate(total=Count('*'))['total'] or 0

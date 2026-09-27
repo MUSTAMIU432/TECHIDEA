@@ -22,9 +22,9 @@ email address in its payload would publish it platform-wide. An id is enough
 for the client to answer the only question it asks - "is this mine?" - which
 is what decides whether to offer "Edit" and "Submit".
 
-Comments (S2-005) follow the same rules as everything else here. No votes or
-attachments appear: they are later sprints, and the types are not stubbed, so
-nothing in this schema promises a surface that does not work.
+Comments (S2-005) and votes (S2-006) follow the same rules as everything else
+here. No attachments appear: that is a later sprint, and the types are not
+stubbed, so nothing in this schema promises a surface that does not work.
 
 Paging is offset-based and bounded: a page defaults to
 `ideas.pagination.DEFAULT_PAGE_SIZE` rows and is clamped to
@@ -106,6 +106,18 @@ class IdeaType:
     # that sends `createComment` on a closed discussion is refused, whether or
     # not it asked.
     discussion_open: bool
+    # Voting (S2-006). Both are per-reader, because `viewerHasVoted` is about
+    # the caller and not the world - the same reason `availableTransitions` is
+    # computed per viewer rather than globally.
+    #
+    # Annotated onto the row by `selectors.annotate_vote_state` when the idea
+    # came from a discovery query, and computed here when it did not (a single
+    # idea, or the row a mutation just wrote). The fallback exists because
+    # `from_model` is called from a dozen places that hold an unannotated
+    # `Idea`, and defaulting to `0` instead would show a wrong count rather
+    # than an obviously missing one.
+    vote_count: int
+    viewer_has_voted: bool
 
     @staticmethod
     def from_model(idea: Idea, user=None) -> 'IdeaType':
@@ -125,6 +137,7 @@ class IdeaType:
                 IdeaStatus(status) for status in lifecycle.available_transitions(user, idea)
             ],
             discussion_open=lifecycle.discussion_is_open(idea),
+            **_vote_state_fields(idea, user),
         )
 
 
@@ -184,6 +197,23 @@ class TransitionIdeaPayload:
     message: str
     field: str | None = None
     idea: IdeaType | None = None
+
+
+@strawberry.type(
+    description=(
+        'How an idea is voted on, for one reader. `voteCount` is the total '
+        'across everybody; `viewerHasVoted` is about the caller alone, and is '
+        'the only reason a count is reader-specific rather than global.\n\n'
+        'The same two numbers are on `IdeaType`, so a card that arrived with '
+        'the ideas list already has them; this type is what the vote mutations '
+        "return so a client can render the server's answer rather than "
+        'guessing at one.'
+    )
+)
+class IdeaVoteState:
+    idea_id: strawberry.ID
+    vote_count: int
+    viewer_has_voted: bool
 
 
 @strawberry.type(
@@ -291,6 +321,32 @@ class CreateCommentInput:
 class UpdateCommentInput:
     id: strawberry.ID
     comment: CommentInput
+
+
+def _vote_state_fields(idea: Idea, user) -> dict:
+    """
+    `voteCount`/`viewerHasVoted` for an idea, from the row if it has them.
+
+    An annotated row - anything from `list_discoverable_ideas` - answers both
+    without a query. An unannotated one costs two, which is why the fallback is
+    only reachable from the single-idea paths.
+
+    The last branch is the one without a viewer. `createIdea`, `updateIdea` and
+    `submitIdea` build their payload from an `Idea` without naming one, which is
+    S2-002's existing shape for `availableTransitions` and is left exactly as it
+    shipped. The *count* is still answered from the idea - it is a fact about
+    the idea, not about the reader, and defaulting it to `0` would report a
+    wrong number on an idea other people had already voted for. Only the
+    viewer's own answer goes unanswered, which is what a missing viewer means.
+    """
+    if hasattr(idea, 'vote_count'):
+        return {'vote_count': idea.vote_count, 'viewer_has_voted': idea.viewer_has_voted}
+
+    state = selectors.vote_state_for(user, idea)
+    if state is not None:
+        return {'vote_count': state.vote_count, 'viewer_has_voted': state.viewer_has_voted}
+
+    return {'vote_count': selectors.vote_count_for(idea), 'viewer_has_voted': False}
 
 
 def _comment_payload(comment: Comment) -> CommentType:
@@ -424,6 +480,22 @@ class Query:
 # `(success, message, field, entity)`. One failure convention for the whole
 # API, so the frontend handles a refused comment the way it handles a refused
 # idea - by reading `message` and putting `field` next to the input at fault.
+
+
+@strawberry.type(
+    description=(
+        "Result of voting or withdrawing a vote. Carries the server's vote "
+        'state on success so a client can render what the database now says, '
+        'rather than adjusting a number locally and hoping.'
+    )
+)
+class VotePayload:
+    success: bool
+    message: str
+    field: str | None = None
+    # Null on any refusal, and always: a refused vote must not report a count,
+    # because the caller is not entitled to one for an idea they cannot read.
+    vote_state: IdeaVoteState | None = None
 
 
 @strawberry.type(description='Result of posting a comment.')
@@ -596,3 +668,67 @@ class Mutation:
             return DeleteCommentPayload(success=False, message=message, field=field)
 
         return DeleteCommentPayload(success=True, message='Comment deleted.', comment=None)
+
+    @strawberry.mutation(
+        description=(
+            'Record that the current user finds this idea worth doing. One '
+            'vote per user per idea: a second call is a no-op that returns '
+            'the same vote, and the database constraint makes two concurrent '
+            'attempts converge on one row.\n\n'
+            'The voter is the signed-in user and is never an input, so there is '
+            "no request here that can vote on somebody else's behalf. Refused "
+            'for an idea the caller cannot read, in every lifecycle state - '
+            'unlike commenting, a vote is not closed by a review outcome.'
+        )
+    )
+    def vote_idea(self, info: strawberry.Info, id: strawberry.ID) -> VotePayload:
+        try:
+            services.vote_for_idea(info.context.user, id)
+            # Read the state back from the selector rather than counting here,
+            # so the number the client renders is the one the database holds.
+            idea = selectors.get_idea(info.context.user, id)
+            state = selectors.vote_state_for(info.context.user, idea) if idea else None
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return VotePayload(success=False, message=message, field=field)
+
+        return VotePayload(
+            success=True,
+            message='Vote recorded.',
+            vote_state=IdeaVoteState(
+                idea_id=strawberry.ID(str(state.idea_id)),
+                vote_count=state.vote_count,
+                viewer_has_voted=state.viewer_has_voted,
+            )
+            if state
+            else None,
+        )
+
+    @strawberry.mutation(
+        description=(
+            "Withdraw the current user's own vote. Idempotent: withdrawing a "
+            "vote that is not there succeeds. Only the caller's own vote is "
+            'ever removed, and an idea they cannot read is refused rather than '
+            'silently accepted.'
+        )
+    )
+    def remove_vote(self, info: strawberry.Info, id: strawberry.ID) -> VotePayload:
+        try:
+            services.remove_vote(info.context.user, id)
+            idea = selectors.get_idea(info.context.user, id)
+            state = selectors.vote_state_for(info.context.user, idea) if idea else None
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return VotePayload(success=False, message=message, field=field)
+
+        return VotePayload(
+            success=True,
+            message='Vote withdrawn.',
+            vote_state=IdeaVoteState(
+                idea_id=strawberry.ID(str(state.idea_id)),
+                vote_count=state.vote_count,
+                viewer_has_voted=state.viewer_has_voted,
+            )
+            if state
+            else None,
+        )

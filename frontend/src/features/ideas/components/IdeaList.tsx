@@ -6,6 +6,7 @@ import { SpinnerIcon } from '../../identity/components/icons'
 import type { Idea, IdeaFilters, IdeaStatus } from '../api/ideasApi'
 import { useCategories } from '../hooks/useCategories'
 import { useIdeaDiscovery } from '../hooks/useIdeaDiscovery'
+import { useIdeaVotes } from '../hooks/useIdeaVotes'
 import {
   statusClasses,
   statusDescription,
@@ -14,6 +15,7 @@ import {
   visibilityLabel as visibilityLabelFor,
 } from '../utils/lifecycle'
 import { IdeaDiscussion } from './IdeaDiscussion'
+import { IdeaVoteButton } from './IdeaVoteButton'
 import { IdeaFiltersBar } from './IdeaFiltersBar'
 import { IdeaPagination } from './IdeaPagination'
 
@@ -101,6 +103,10 @@ export function IdeaList({
     filters,
     reloadToken,
   )
+  // Seeded from the ideas the list was just given, so the vote controls render
+  // the server's numbers on the first paint - no per-idea request, and nothing
+  // to reload when a vote changes.
+  const { votes, toggle: toggleVote, dismissError: dismissVoteError } = useIdeaVotes(ideas)
 
   if (organizationStatus === 'loading') return <LoadingPanel />
 
@@ -227,6 +233,21 @@ export function IdeaList({
                         </div>
                       )}
                     </dl>
+
+                    {/*
+                        The vote control, next to the idea's other facts. The
+                        count and whether *this* reader voted both arrive on
+                        the idea from the server, so there is no request per
+                        card and no client-side count to drift.
+                      */}
+                    <div className="mt-3 flex items-center gap-2">
+                      <IdeaVoteButton
+                        ideaId={idea.id}
+                        control={votes[idea.id]}
+                        onToggle={toggleVote}
+                        onDismissError={dismissVoteError}
+                      />
+                    </div>
 
                     {/*
                         Actions are rendered from `availableTransitions`, which the

@@ -46,6 +46,8 @@ function idea(overrides: Partial<Idea> = {}): Idea {
     category: null,
     availableTransitions: [],
     discussionOpen: true,
+    voteCount: 0,
+    viewerHasVoted: false,
     ...overrides,
   }
 }

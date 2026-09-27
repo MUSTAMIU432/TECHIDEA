@@ -279,8 +279,9 @@ password reset and email confirmation), the organizations tier (create an
 organization, switch between them, see members and roles), and the first
 Ideas slice (file an idea, edit your own draft, submit it for review, move it
 through review, browse ideas by category, search and status over a paged list,
-and read and write the discussion on any idea).
-Reviews, projects, notifications, comments, voting and everything else in that
+read and write the discussion on any idea, and vote for the ideas worth
+doing).
+Reviews, projects, notifications, attachments and everything else in that
 direction do not exist yet. Within Identity, what is still missing is an
 authenticated Google-account-linking flow: Google sign-in authenticates or
 provisions, and never links to an existing account by email.
@@ -345,7 +346,15 @@ Two things the Ideas area deliberately does **not** do on this side:
 - It does not copy the "is this discussion open?" rule. `idea.discussionOpen`
   is reported by the server from the same rule `createComment` enforces, for
   the same reason `availableTransitions` exists.
-- It does not re-fetch the ideas list after a comment. A discussion is
+- It does not count votes itself. `voteCount` and `viewerHasVoted` arrive on
+  each idea from the server, so a page of twenty cards costs no extra requests,
+  and `useIdeaVotes` keeps control state keyed by idea id — a response that
+  arrives late writes the idea it was for, never whichever one is on screen.
+  There is no optimistic arithmetic: the number rendered after a vote is the
+  one the mutation returned, which already accounts for other people's
+  concurrent votes, so a failed vote leaves the count exactly where it was and
+  there is nothing to roll back.
+- It does not re-fetch the ideas list after a comment or a vote. A discussion is
   append-only in reading order, so a post, an edit or a delete updates the
   thread in place — the reader keeps their filters and their page, and a second
   submission in the same tick is dropped rather than duplicated.

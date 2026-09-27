@@ -1,9 +1,11 @@
 """
 Writing ideas: create, edit, submit (S2-002), and commenting on them (S2-005).
 
-`vote_for_idea` and the review workflow's queue are later sprints; this
-module does not stub them, does not half-implement them, and does not define
-the vocabulary they would use.
+The review workflow's queue is a later sprint; this module does not stub it,
+does not half-implement it, and does not define the vocabulary it would use.
+S2-006 added the vote operations, which follow this module's existing rule
+that the client is never trusted with ownership: the voter is the
+authenticated user and the idea is authorized and then used.
 
 Who may do what
 ---------------
@@ -78,8 +80,10 @@ three operations into a probe for which idea ids are real.
 
 from dataclasses import dataclass
 
+from django.db import IntegrityError, transaction
+
 from ideas import selectors
-from ideas.models import Category, Comment, Idea
+from ideas.models import Category, Comment, Idea, Vote
 from identity.models import User
 from organizations import authorization
 from organizations.authorization import AuthorizationError
@@ -543,3 +547,111 @@ def delete_comment(user: User | None, comment_id: object) -> None:
     active_user = _require_active_user(user)
     comment = _load_owned_comment(active_user, comment_id)
     comment.delete()
+
+
+# --- votes (S2-006) -----------------------------------------------------------------
+
+
+def _require_readable_idea(user: User, idea_id: object) -> Idea:
+    """
+    The idea to act on, for an operation that only needs to *read* it.
+
+    Shared by the vote operations, and it is the same gate the comment
+    operations apply first - the visibility filter, resolved through
+    `selectors.get_idea` so the rule is not restated here.
+
+    Deliberately **no lifecycle check**, and the difference from
+    `_load_discussable_idea` is a decision rather than an oversight. This
+    domain's own rule for votes is that "a user may not vote on an idea they
+    cannot read" (`docs/ideas-domain.md`), full stop - and there is no vote
+    equivalent of `lifecycle.DISCUSSION_CLOSED_STATUSES`. So a rejected idea
+    can still be voted on, and an approved one handed to the opportunities
+    track most certainly can.
+
+    The reason the two rules differ: a comment is participation in a
+    *decision*, and a decision that is finished has nothing left to discuss;
+    a vote is a statement of interest in the *idea*, which is a thing that
+    outlives its own review state. Closing discussion on rejection while
+    accepting votes on it is not an inconsistency - they answer different
+    questions about the same object - but it is exactly the kind of thing that
+    looks like an oversight in review, so it is written down here and pinned
+    by `test_a_rejected_idea_can_still_be_voted_on`.
+    """
+    idea = selectors.get_idea(user, idea_id)
+    if idea is None:
+        raise IdeaError('Idea is unavailable.', reason='forbidden')
+    return idea
+
+
+def vote_for_idea(user: User | None, idea_id: object) -> Vote:
+    """
+    Record that `user` finds `idea` worth doing. One vote per user per idea.
+
+    The voter is `user` and is never an input, so there is no request that can
+    vote on somebody else's behalf. The idea is resolved, authorized and then
+    used, so there is no request that can name an idea the voter was never
+    shown.
+
+    **Idempotent at the service level, enforced at the database level** - both
+    halves, because they answer different races. The `get` below is the
+    common case: a double-clicked button, a retried request, a client that
+    replays on a timeout. The `unique_vote_per_user_idea` constraint is what
+    answers the case a check-then-insert cannot: two *simultaneous* requests
+    that both read "no vote" and both try to insert. The constraint is the
+    final integrity boundary because it is the only thing that cannot be
+    raced - a service-level check is a read followed by a write, and two of
+    those interleave.
+
+    So the loser of that race catches `IntegrityError` and reads the row the
+    winner inserted, and both callers get the same vote back rather than one
+    of them seeing an error for a state they asked for. `transaction.atomic()`
+    around the insert is what makes that readable: without the inner block the
+    failed statement would poison the outer transaction and the follow-up read
+    would fail too.
+    """
+    active_user = _require_active_user(user)
+    idea = _require_readable_idea(active_user, idea_id)
+
+    existing = Vote.objects.filter(idea=idea, user=active_user).first()
+    if existing is not None:
+        return existing
+
+    try:
+        with transaction.atomic():
+            return Vote.objects.create(idea=idea, user=active_user)
+    except IntegrityError:
+        # Lost the race to a concurrent insert. The constraint did its job, so
+        # the state the caller asked for now exists - which makes this a
+        # success, not a failure. Re-read rather than re-raise, and if the row
+        # genuinely is not there then something other than the constraint
+        # failed and the error belongs to the caller.
+        concurrent = Vote.objects.filter(idea=idea, user=active_user).first()
+        if concurrent is None:
+            raise
+        return concurrent
+
+
+def remove_vote(user: User | None, idea_id: object) -> None:
+    """
+    Withdraw `user`'s vote on `idea`, if they have one.
+
+    **Idempotent**: removing a vote that is not there succeeds and does
+    nothing. A vote control is a toggle that a reader may well double-click,
+    and a second click reporting "you have no vote to remove" would be an
+    error about a state the reader already achieved. It leaks nothing either
+    way, because "no vote of mine" is the same fact whether the row was never
+    written or was written and removed.
+
+    The visibility gate still applies in full, and that is the important part:
+    this is idempotent *within* the set of ideas the caller may read. An idea
+    they cannot read is refused, exactly as it is for voting - otherwise the
+    idempotent branch would turn "unreadable idea" into a success and quietly
+    confirm that the operation is available there.
+    """
+    active_user = _require_active_user(user)
+    idea = _require_readable_idea(active_user, idea_id)
+
+    # Scoped to the authenticated user rather than deleting by idea id: this
+    # removes *your* vote and can never touch anybody else's, so a vote for
+    # another user on the same idea is not even a row this statement can name.
+    Vote.objects.filter(idea=idea, user=active_user).delete()

@@ -327,8 +327,86 @@ cannot read.
 **As implemented (S2-002).** `create_idea`, `update_idea` and `submit_idea`
 ship, with `IdeaInput` carrying the four writable content fields and nothing
 else. `add_comment`, `update_comment` and `delete_comment` joined them in
-S2-005; `vote_for_idea` and `remove_vote` are still to come, and are not
-stubbed.
+S2-005; `vote_for_idea` and `remove_vote` joined them in S2-006. Nothing in
+this list is stubbed.
+
+### Votes (implemented, S2-006)
+
+The S2-001 `Vote` model is used as designed — one row per `(user, idea)`, no
+value, no weight, no downvotes — and `unique_vote_per_user_idea` is the final
+integrity boundary.
+
+| Operation | Requires |
+| --------- | -------- |
+| `vote_for_idea(user, idea_id)` | An active user who may **read** the idea. **No lifecycle gate** |
+| `remove_vote(user, idea_id)` | The same, and only ever removes the caller's own vote |
+
+**The one-user-one-vote invariant, twice.** A service-level check answers the
+common case — a double-clicked button, a retried request, a client replaying on
+a timeout — and the database constraint answers the one a check-then-insert
+cannot: two *simultaneous* requests that both read "no vote" and both try to
+insert. The constraint is the boundary because it is the only thing that cannot
+be raced. So the loser of that race catches `IntegrityError`, reads the row the
+winner inserted, and **returns it as a success** — the state the caller asked
+for does now exist, and an error would be a worse answer than the truth. An
+`IntegrityError` with no row behind it is re-raised rather than swallowed, so a
+genuine fault is not dressed up as a success.
+
+**Idempotency, chosen deliberately and asymmetrically.** Voting twice is a
+success (the reader already got what they asked for). Withdrawing twice is a
+success (a toggle double-clicked). Withdrawing a vote that was never cast is a
+success. All three leak nothing, because "no vote of mine" is the same fact
+whether the row was never written or was written and removed.
+
+The one place idempotency does **not** apply is the readability gate: an idea
+the caller cannot read is *refused*, not silently accepted. Otherwise the
+idempotent branch would turn "unreadable idea" into a success and quietly
+confirm the operation is available there.
+
+**No lifecycle gate, and that is a decision rather than an omission.** This
+document's rule for votes is that "a user may not vote on an idea they cannot
+read" — full stop, with no status condition. So a `REJECTED` idea can still be
+voted on, and an `APPROVED` one handed to the opportunities track most
+certainly can. The reason it differs from S2-005's discussion rule
+(`DISCUSSION_CLOSED_STATUSES = {REJECTED}`): a comment is participation in a
+*decision*, and a decision that is finished has nothing left to discuss; a vote
+is a statement of interest in the *idea*, which is a thing that outlives its own
+review state. Closing discussion on rejection while accepting votes on it is not
+an inconsistency — they answer different questions about the same object — but it
+reads like an oversight, so it is written down here and pinned by
+`test_a_rejected_idea_can_still_be_voted_on`.
+
+**Vote state is per-reader and authorization-aware.** `IdeaVoteState` reports
+`voteCount` (global) and `viewerHasVoted` (about the caller), because the two
+answer different questions and only the second is reader-specific. No vote
+operation ever reports either for an idea the caller cannot read: reading is
+resolved through `get_idea` first, so an unreadable idea never becomes
+readable enough to have a count.
+
+**Counts are computed, never stored.** No denormalized column, no cache, and
+`COUNT`/`EXISTS` per read. A stored count would need invalidation on vote,
+un-vote, and idea deletion, and would be wrong the moment one of those failed.
+
+### Reading vote counts without an N+1
+
+`selectors.annotate_vote_state` adds two correlated subqueries —
+`Coalesce(Subquery(count), 0)` and `Exists(...)` — to the queryset
+`list_discoverable_ideas` already fetches. A page of 50 ideas therefore costs
+the same three queries it cost in S2-004: the membership lookup, the
+`COUNT(*)`, and the page. Django does not carry annotations into `.count()`,
+which is pinned, so the count query is untouched and never evaluates a
+subquery per row.
+
+`Coalesce` is load-bearing and not decoration: a `COUNT` subquery over an empty
+group returns SQL `NULL`, not `0`, and `NULL` into a non-nullable `Int!` is a
+GraphQL error. An idea nobody has voted on is the overwhelmingly common case,
+so without it the common case fails to serialize.
+
+`IdeaType.from_model` reads those annotations when present, and computes the
+two numbers when it is handed an unannotated `Idea` (a single idea, or the row
+a mutation just wrote) — two queries for one object, which is why the *list*
+path is annotated rather than the single path. A fallback that defaulted to `0`
+without asking would show a wrong count rather than an obviously missing one.
 
 ### Comments (implemented, S2-005)
 
@@ -565,7 +643,7 @@ Intended operations:
 | `organizationIdeas(organizationId, filters)` | `submitIdea(id)` |
 | `categories` | `addComment(input)` |
 | `comments(ideaId)` | `updateComment(input)` / `deleteComment(id)` |
-| | `voteIdea(id)` / `removeVote(id)` |
+| | `voteIdea(id)` / `removeVote(id)` — implemented in S2-006 |
 
 The frontend will need `submittedAt` and `status` on the idea type to render
 a draft, so both are exposed; the three review-only statuses are exposed as
@@ -578,8 +656,8 @@ omission.
 frontend/src/features/ideas/
     api/          ideasApi.ts - the documents and typed request functions
     components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination,
-                  IdeaDiscussion, IdeasWorkspace
-    hooks/        useIdeaDiscovery, useCategories, useComments
+                  IdeaDiscussion, IdeaVoteButton, IdeasWorkspace
+    hooks/        useIdeaDiscovery, useCategories, useComments, useIdeaVotes
 ```
 
 The data loading moved into `hooks/` in S2-004, and for a specific reason
@@ -618,7 +696,15 @@ backend rule rather than a free choice:
 - **`idea.discussionOpen` decides whether the composer is drawn**, reported by
   the server from the same rule `createComment` enforces — the same reason
   `availableTransitions` exists, so no lifecycle rule is copied onto the
-  client.
+  client. `voteCount`/`viewerHasVoted` are reported the same way, and
+  `useIdeaVotes` adds no local arithmetic on top.
+- **The vote control's state is keyed by idea id**, so a response that arrives
+  late writes the idea it was for and cannot land on whichever idea is on
+  screen. **No optimistic update**: the count rendered after a vote is the one
+  the mutation returned, which already accounts for other people's concurrent
+  votes, so there is nothing to roll back and a failure leaves the number
+  exactly where it was. The in-flight guard is a `useRef`, not module state,
+  because state cannot be read synchronously from a click handler.
 
 This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
@@ -650,6 +736,7 @@ the typed request functions, `context/`-free hooks read them, and
 | S2-003 | `transitionIdea` and the transition matrix, fail-closed `DEPARTMENT` — implemented |
 | S2-004 | `list_discoverable_ideas`, `IdeaFiltersInput`, `IdeaPage`, `ideas/pagination.py`, category/search/status filters, the discovery UI — implemented |
 | S2-005 | `add_comment`/`update_comment`/`delete_comment`, `CommentType`/`CommentPage`, `comments`/`createComment`/`updateComment`/`deleteComment`, `IdeaType.discussionOpen`, the discussion UI — implemented |
+| S2-006 | `vote_for_idea`/`remove_vote`, `IdeaVoteState`, `voteIdea`/`removeVote`, `IdeaType.voteCount`/`viewerHasVoted` (annotated, no N+1), the vote control — implemented |
 | S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 

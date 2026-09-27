@@ -54,11 +54,17 @@ export function IdeaDiscussion({
       >
         {open ? 'Hide discussion' : 'Discussion'}
       </button>
+      {/*
+        A labelled region, so the thread is reachable as a unit by assistive
+        technology and so a test can ask "what is in the discussion?" of the
+        discussion rather than of the whole card - which also holds whatever
+        else a card grows.
+      */}
       {open && (
-        <div className="mt-3">
+        <section aria-label={`Discussion: ${idea.title}`} className="mt-3">
           <CommentList discussion={discussion} userId={user?.id ?? null} />
           <CommentComposer idea={idea} discussion={discussion} />
-        </div>
+        </section>
       )}
     </div>
   )

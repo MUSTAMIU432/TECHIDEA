@@ -35,6 +35,8 @@ const DRAFT: Idea = {
   category: CATEGORIES[0],
   availableTransitions: [],
   discussionOpen: true,
+  voteCount: 0,
+  viewerHasVoted: false,
 }
 
 function renderForm(props: Partial<React.ComponentProps<typeof IdeaForm>> = {}) {

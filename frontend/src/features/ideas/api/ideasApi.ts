@@ -168,6 +168,20 @@ export interface Idea {
    * refused by the server.
    */
   discussionOpen: boolean
+  /**
+   * How many people have voted for this idea (S2-006), and whether the signed-in
+   * user is one of them.
+   *
+   * Two numbers rather than one because they answer different questions: the
+   * count is global and the flag is personal. Both arrive on the idea itself, so
+   * a card renders its vote control from the page it was already given - there
+   * is no per-idea request, and no second query to count twenty ideas in.
+   *
+   * `0` and `false` rather than null when nobody has voted, which is the normal
+   * case and not an absence of data.
+   */
+  voteCount: number
+  viewerHasVoted: boolean
 }
 
 /** The writable content of an idea. Mirrors the backend's `IdeaInput`. */
@@ -206,6 +220,8 @@ const IDEA_FIELDS = `
   organizationId
   availableTransitions
   discussionOpen
+  voteCount
+  viewerHasVoted
   category { ${CATEGORY_FIELDS} }
 `
 
@@ -601,4 +617,95 @@ export async function deleteCommentRequest(id: string): Promise<CommentMutationR
     { id },
   )
   return data.deleteComment
+}
+
+/**
+ * Voting & engagement (S2-006).
+ *
+ * One vote per user per idea, and the rules that make that true are all
+ * server-side. What follows from that on this side:
+ *
+ * - **The voter is the signed-in user and is never an argument.** `voteIdea`
+ *   takes an idea and nothing else, so this client cannot express "vote on
+ *   somebody else's behalf" - the document has no field to carry it.
+ * - **Both mutations return the server's `voteState`.** That is the whole
+ *   reason this client does no optimistic arithmetic: the count it renders after
+ *   a vote is the count the database holds, including when a concurrent vote
+ *   from somebody else landed in between.
+ * - **A refusal is a payload, and its `voteState` is null.** A caller who may
+ *   not read an idea is not entitled to its vote count either, so there is
+ *   nothing to render and nothing to accidentally leak.
+ * - **No "who voted" query exists.** This client cannot enumerate supporters,
+ *   and does not try: the domain has no policy for that aggregate.
+ */
+
+/** The count and the viewer's own answer, as the server reports them. */
+export interface IdeaVoteState {
+  ideaId: string
+  voteCount: number
+  viewerHasVoted: boolean
+}
+
+export interface VoteMutationResult {
+  success: boolean
+  message: string
+  field: string | null
+  /** Null on any refusal - see the note above. */
+  voteState: IdeaVoteState | null
+}
+
+const VOTE_STATE_FIELDS = `
+  ideaId
+  voteCount
+  viewerHasVoted
+`
+
+const VOTE_IDEA_MUTATION = `
+  mutation VoteIdea($id: ID!) {
+    voteIdea(id: $id) {
+      success
+      message
+      field
+      voteState { ${VOTE_STATE_FIELDS} }
+    }
+  }
+`
+
+const REMOVE_VOTE_MUTATION = `
+  mutation RemoveVote($id: ID!) {
+    removeVote(id: $id) {
+      success
+      message
+      field
+      voteState { ${VOTE_STATE_FIELDS} }
+    }
+  }
+`
+
+/**
+ * Record that the signed-in user finds this idea worth doing.
+ *
+ * Idempotent on the server: a second call is a no-op returning the same state,
+ * because a double-clicked button and a retried request are ordinary.
+ */
+export async function voteIdeaRequest(id: string): Promise<VoteMutationResult> {
+  const data = await graphqlClient.request<{ voteIdea: VoteMutationResult }>(VOTE_IDEA_MUTATION, {
+    id,
+  })
+  return data.voteIdea
+}
+
+/**
+ * Withdraw the signed-in user's own vote. Idempotent too, so a second click on
+ * the toggle is not an error about a state the reader already reached.
+ *
+ * Only the caller's own vote can be removed; the mutation has no argument that
+ * could name somebody else's.
+ */
+export async function removeVoteRequest(id: string): Promise<VoteMutationResult> {
+  const data = await graphqlClient.request<{ removeVote: VoteMutationResult }>(
+    REMOVE_VOTE_MUTATION,
+    { id },
+  )
+  return data.removeVote
 }

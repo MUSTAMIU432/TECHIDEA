@@ -54,6 +54,8 @@ function idea(overrides: Partial<Idea> = {}): Idea {
     category: null,
     availableTransitions: [],
     discussionOpen: true,
+    voteCount: 0,
+    viewerHasVoted: false,
     ...overrides,
   }
 }
@@ -447,17 +449,21 @@ describe('Idea discussion (S2-005)', () => {
     expect(within(target).queryByLabelText('Add a comment')).not.toBeInTheDocument()
   })
 
-  it('offers no voting or attachment control', async () => {
+  it('offers no voting or attachment control inside the discussion', async () => {
     render(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    // S2-006 and S2-007. Nothing in this section may look like either.
-    const text = target.textContent ?? ''
+    // Scoped to the discussion region rather than the card: S2-006 added a
+    // vote control to the card, which is correct and lives outside the thread.
+    // What must stay true is that a *discussion* is a discussion - no voting,
+    // no attachments (S2-007).
+    const thread = within(target).getByRole('region', { name: /^Discussion:/ })
+    const text = thread.textContent ?? ''
     for (const word of ['Vote', 'Upvote', 'Like', 'Attach', 'Upload', 'attachment']) {
       expect(text).not.toContain(word)
     }
-    expect(within(target).queryByRole('button', { name: /vote|attach|upload/i })).toBeNull()
+    expect(within(thread).queryByRole('button', { name: /vote|attach|upload/i })).toBeNull()
   })
 
   // --- editing --------------------------------------------------------------

@@ -426,8 +426,8 @@ on it until that tier exists - see
 `ideas` is the first business domain beyond Identity & Access. S2-002
 implemented its first vertical slice end to end — file an idea, edit it as a
 draft, submit it — S2-003 added the lifecycle and the server-side read policy,
-S2-004 added categories and discovery, and S2-005 added comments and
-discussion. Voting and attachment uploads are still not started.
+S2-004 added categories and discovery, S2-005 added comments and discussion,
+and S2-006 added voting. Attachment uploads are still not started.
 
 **Authorization is Sprint 1's, unchanged.** `ideas` adds no permission code and
 no `permissions.py`. Filing an idea requires an *active membership* in the
@@ -527,8 +527,9 @@ Google-account-linking flow.
 
 Sprint 2 starts the core business domain with the `ideas` app. Its
 architecture and schema (S2-001), creation and submission (S2-002), lifecycle
-and visibility (S2-003), categories and discovery (S2-004) and comments and
-discussion (S2-005) exist. The review *queue* is Sprint 3 and is not started. Every other business domain is
+and visibility (S2-003), categories and discovery (S2-004), comments and
+discussion (S2-005) and voting (S2-006) exist. The review *queue* is Sprint 3
+and is not started. Every other business domain is
 not started.
 
 ### Implemented (Sprint 2)
@@ -541,6 +542,7 @@ not started.
 | Idea lifecycle | The seven-pair transition matrix in `ideas/lifecycle.py` behind a single `transitionIdea` mutation, with the per-viewer `availableTransitions` field. No mutation and no write input can set a status | S2-003 |
 | Categories and discovery | `list_discoverable_ideas` as the single read path, with `IdeaFilters` (category, status, search) that can only **narrow** what the visibility filter allowed, and `ideas/pagination.py` for bounded offset paging. `ideas`/`organizationIdeas` return an `IdeaPage`; there is no `visibility` or `authorId` filter to send | S2-004 |
 | Comments and discussion | `add_comment`/`update_comment`/`delete_comment` behind a `comments(ideaId)` query that filters by the idea's own visibility, so a comment is never more readable than the idea it is on. Edit and delete are author-only, with no elevated path and no new permission code | S2-005 |
+| Voting & engagement | One vote per user per idea, enforced by a service check *and* the `unique_vote_per_user_idea` constraint. Voting is gated on idea visibility only, with no lifecycle condition - a vote is interest in the idea, not participation in a review. `voteCount`/`viewerHasVoted` are annotated onto the discovery page, so a page of ideas costs no extra queries | S2-006 |
 | Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
 | Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
 | Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
@@ -596,10 +598,10 @@ How these are used day to day: [`development.md`](development.md),
 - Review *management*: the lifecycle transitions exist and work, but there is
   no review queue, no reviewer assignment, no reasons recorded against a
   `CHANGES_REQUESTED` idea, and no dashboard of any kind
-- Voting (S2-006) and attachments (S2-007), including their *bytes* and upload
-  flow. Also: threaded comment replies, comment moderation and soft delete,
-  and any rate limiting on comment writes — this project has no throttling
-  mechanism to extend
+- Attachments (S2-007), including their *bytes* and upload flow. Also: a
+  ranking or scoring of the votes that now exist, any "who voted" listing,
+  threaded comment replies, comment moderation and soft delete, and rate
+  limiting — this project has no throttling mechanism to extend
 - A discovery *algorithm*: there is no ranking, recommendation, trending or
   social feed. S2-004 filters and pages what a reader may see; it does not
   decide what they should see, and no engagement data is collected

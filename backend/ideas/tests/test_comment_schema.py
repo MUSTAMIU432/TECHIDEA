@@ -866,13 +866,24 @@ query Comments($ideaId: ID!) {
 
         assert 'errors' in response.json()
 
-    def test_there_is_no_vote_or_attachment_operation(self, world):
+    def test_there_is_no_attachment_or_later_sprint_operation(self, world):
         """
-        S2-006 and S2-007. Asserted at the schema level so a future change
-        cannot quietly widen the surface this sprint owns.
+        S2-007 and beyond. The vote names this test used to assert absent are
+        not listed here: S2-006 implemented them, and asserting their absence
+        would be asserting that a shipped feature does not exist. What is
+        pinned is the surface that is still not implemented, and the vote
+        operations are asserted present by
+        `test_vote_schema.py::test_the_vote_mutation_takes_no_id_beyond_the_idea`.
         """
         from graphql_api.schema import schema
 
         sdl = str(schema)
-        for name in ('voteIdea', 'removeVote', 'addAttachment', 'votes', 'attachments'):
+        for name in (
+            'addAttachment',
+            'attachments(',
+            'createProposal',
+            'proposals(',
+            'developerProfile',
+            'matchDevelopers',
+        ):
             assert name not in sdl, name
