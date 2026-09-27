@@ -26,6 +26,12 @@ No comments, votes or attachments appear here. They are later sprints; the
 types are not stubbed, so nothing in this schema promises a surface that does
 not work.
 
+Paging is offset-based and bounded: a page defaults to
+`ideas.pagination.DEFAULT_PAGE_SIZE` rows and is clamped to
+`ideas.pagination.MAX_PAGE_SIZE`, so no argument can ask for the whole table.
+The rationale for offset over cursor, and what it would cost, is in
+`ideas/pagination.py`.
+
 Status changes go through `transitionIdea` only. `updateIdea` takes content
 and nothing else - there is no `status` on `IdeaInput`, and no mutation that
 sets one - so "promote my own idea to Approved" is not an operation this schema
@@ -172,8 +178,94 @@ class TransitionIdeaPayload:
     idea: IdeaType | None = None
 
 
+@strawberry.type(
+    description=(
+        'Where the caller is in a paged result set. `offset` and `limit` are '
+        'as *applied*, so a caller that asked for more than the server allows '
+        'can tell from these numbers rather than having to know the maximum.'
+    )
+)
+class PageInfo:
+    offset: int
+    limit: int
+    total_count: int
+    has_next_page: bool
+    has_previous_page: bool
+
+
+@strawberry.type(description='One page of ideas visible to the current user.')
+class IdeaPage:
+    items: list[IdeaType]
+    page_info: PageInfo
+
+
+@strawberry.input(
+    description=(
+        'Narrowing arguments for a discovery query. Every field can only '
+        '*remove* rows the server has already decided are visible: there is no '
+        'visibility argument, because a filter that read like a grant is one. '
+        'There is deliberately no organization argument either — a tenant is '
+        'scoped by the `organizationIdeas` query that names it, so a request '
+        'cannot name two tenants at once and leave the server to resolve the '
+        'conflict.'
+    )
+)
+class IdeaFiltersInput:
+    category_id: strawberry.ID | None = None
+    status: IdeaStatus | None = None
+    # Free text over the title and description. Bound as a parameter by the
+    # ORM, never interpolated.
+    search: str | None = None
+    offset: int = 0
+    limit: int | None = None
+
+
 def _service_error(exc: services.IdeaError) -> tuple[str, str | None]:
     return exc.message, exc.field
+
+
+def _idea_page(info: strawberry.Info, scope: selectors.IdeaFilters, filters) -> IdeaPage:
+    """
+    Run one discovery query and shape the result.
+
+    The only place the GraphQL filter input is turned into a selector filter,
+    which is deliberate: the two are different vocabularies for the same idea
+    (camelCase optionals with enum values, versus the selector's normalized
+    values) and a resolver that did the translation itself would be a place
+    where the schema could disagree with the selector about what a filter
+    means. The authorization decision is not here — it was made in
+    `selectors.list_discoverable_ideas`, before this was called.
+
+    `scope` is the tenant, and it arrives from the query rather than from the
+    filter input: `organizationIdeas` supplies it, `ideas` supplies nothing and
+    is therefore platform-wide. There is no path where a filter can re-scope a
+    query that has already been scoped.
+    """
+    requested = filters or IdeaFiltersInput()
+    applied = selectors.IdeaFilters(
+        organization_id=scope.organization_id,
+        category_id=requested.category_id,
+        status=requested.status.value if requested.status else None,
+        search=requested.search,
+    )
+
+    page = selectors.list_discoverable_ideas(
+        info.context.user,
+        applied,
+        offset=requested.offset,
+        limit=requested.limit,
+    )
+
+    return IdeaPage(
+        items=[IdeaType.from_model(idea, info.context.user) for idea in page.items],
+        page_info=PageInfo(
+            offset=page.offset,
+            limit=page.limit,
+            total_count=page.total_count,
+            has_next_page=page.has_next_page,
+            has_previous_page=page.has_previous_page,
+        ),
+    )
 
 
 @strawberry.type
@@ -185,23 +277,32 @@ class Query:
         idea = selectors.get_idea(info.context.user, id)
         return IdeaType.from_model(idea, info.context.user) if idea else None
 
-    @strawberry.field(description='Ideas visible to the current user, newest first.')
-    def ideas(self, info: strawberry.Info) -> list[IdeaType]:
-        return [
-            IdeaType.from_model(idea, info.context.user)
-            for idea in selectors.list_ideas(info.context.user)
-        ]
+    @strawberry.field(
+        description=(
+            'Ideas visible to the current user, newest first, narrowed by the '
+            'filters given. The visibility filter is applied first and cannot '
+            'be widened by any argument; the result is one page, not the whole '
+            'table.'
+        )
+    )
+    def ideas(self, info: strawberry.Info, filters: IdeaFiltersInput | None = None) -> IdeaPage:
+        return _idea_page(info, selectors.IdeaFilters(), filters)
 
     @strawberry.field(
-        description="One organization's ideas visible to the current user, newest first."
+        description=(
+            "One organization's ideas visible to the current user, newest "
+            'first. Answers an empty page for an organization the caller is not '
+            'an active member of, which is also the answer for one that does '
+            'not exist.'
+        )
     )
     def organization_ideas(
-        self, info: strawberry.Info, organization_id: strawberry.ID
-    ) -> list[IdeaType]:
-        return [
-            IdeaType.from_model(idea, info.context.user)
-            for idea in selectors.list_organization_ideas(info.context.user, organization_id)
-        ]
+        self,
+        info: strawberry.Info,
+        organization_id: strawberry.ID,
+        filters: IdeaFiltersInput | None = None,
+    ) -> IdeaPage:
+        return _idea_page(info, selectors.IdeaFilters(organization_id=organization_id), filters)
 
     @strawberry.field(description='Categories available to file an idea under.')
     def categories(self) -> list[CategoryType]:

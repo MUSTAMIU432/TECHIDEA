@@ -203,8 +203,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     that leads nowhere would be worse than none.
   - Not implemented, and deliberately: review queues, reviewer assignment,
     reasons against a `CHANGES_REQUESTED` idea, dashboards, comments, voting,
-    attachment uploads, discovery, the `DEPARTMENT` tier, proposals,
-    developer matching, AI, payments and subscriptions.
+    attachment uploads, the `DEPARTMENT` tier, proposals, developer matching,
+    AI, payments and subscriptions. (Discovery arrives in S2-004.)
+- S2-004: Categories and discovery — browsing ideas by category, search, and
+  combined filters over a bounded page.
+  `selectors.list_discoverable_ideas`, `selectors.IdeaFilters`,
+  `ideas/pagination.py`, `IdeaFiltersInput` and the `IdeaPage`/`PageInfo`
+  types on `ideas`/`organizationIdeas`, and the discovery UI on
+  `/app/ideas`. No migration: this is behaviour over the S2-001 schema.
+  - **One read path.** `list_discoverable_ideas` is the only place the
+    visibility filter, the discovery filters and pagination meet, and both
+    queries go through it — so there is no second queryset for an unfiltered
+    idea to escape through. `organizationIdeas` is a scoped wrapper over the
+    same selector rather than a parallel query.
+  - **Filters can only remove rows.** `_visibility_filter` is applied first
+    and every filter narrows what it allowed; an idea matching the tenant, the
+    category, the status and the search *exactly* is still not returned when
+    it is private. `IdeaFilters` has no `visibility` and no `author_id`
+    field, because a filter that reads like a grant (`visibility=public`)
+    behaves like one the day somebody sends it.
+  - **An unowned organization answers empty, not forbidden.** An
+    `organization_id` the caller has no active membership of yields an empty
+    page — the same answer as for an organization that does not exist, so the
+    argument cannot be used to probe which ids are real.
+  - **A filter that cannot be understood empties the result** rather than
+    being ignored. A client that asked for category "abc" and got the
+    unfiltered list would read that as "no ideas in this category" when it
+    means "that category does not exist".
+  - **Search is a bound parameter, over two fields.** `icontains` on
+    `title` and `description`; the long-form fields (`problem_statement` and
+    friends) are deliberately not searched, because they are not exposed by
+    the API and matching text a reader may not read turns search into an
+    oracle. Django escapes the pattern metacharacters, so a reader who types
+    `%` searches for the character — pinned by a test, because it is a
+    property of the ORM rather than of this code, and swapping `icontains`
+    for `raw` to get trigram search would quietly turn it into "everything".
+  - **Retirement is not deletion.** A retired category leaves the picker but
+    keeps its history: an idea filed under it is still readable and still
+    matches that category as a filter. S2-001's `PROTECT` is what makes that
+    consistent. A retired category cannot reach a *private* idea, because
+    visibility is filtered first.
+  - **Paging is bounded and deterministic.** `ideas/pagination.py`, default 20
+    and maximum 50, clamped rather than refused so a client asking for 1000
+    rows gets a page and an error would only tell it to try again.
+    `pageInfo` echoes `offset`/`limit` back *as applied*. Ordering is
+    `-created_at, -pk` — the tie-breaker is what makes `offset` a correct way
+    to page, since `created_at` is microsecond-resolution and two ideas filed
+    in the same instant would otherwise let a page boundary repeat one row
+    and skip another. Three queries per page (memberships, count, fetch); the
+    `COUNT` is a deliberate trade, since `limit + 1` cannot answer "showing
+    1-20 of 137".
+  - **`ideas` and `organizationIdeas` now return a page, not a list.** A
+    shape change to a shipped query, taken deliberately: returning the whole
+    filtered table is not a thing this platform can keep doing as ideas
+    accumulate, and the alternative — a second, filtered-for-caller's-own-use
+    query — would be a second read policy to keep honest. A client that needs
+    everything pages through it.
+  - **There is no `organizationId` filter.** A tenant is scoped by the query
+    that names it, so a request cannot name two tenants at once and leave the
+    server to resolve the conflict.
+  - **Frontend:** the search box is debounced at 300ms, so a reader typing a
+    word sends one query instead of one per keystroke; the text in the box and
+    the filter in effect are separate values. A narrowing filter returns to
+    page 1 — written once, in the workspace, because it needs the filters and
+    the page together. A write reloads the list without discarding the
+    reader's place, which is why data loading moved into
+    `hooks/useIdeaDiscovery` and the remount-to-reload trick went away. The
+    three empty states — nothing here, nothing matches, nothing on this page —
+    are kept apart, because they are different facts.
+  - Not implemented, and deliberately: comments, voting, attachment uploads,
+    a discovery *algorithm* or social feed, AI, payments, subscriptions, a
+    marketplace, and Sprint 3's review queue.
 
 ### Added — Sprint 1: Identity & Access
 

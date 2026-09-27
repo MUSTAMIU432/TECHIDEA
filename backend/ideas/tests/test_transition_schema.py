@@ -50,7 +50,7 @@ query Idea($id: ID!) {
 
 IDEAS_QUERY = """
 query Ideas {
-  ideas { id status availableTransitions }
+  ideas { items { id status availableTransitions } }
 }
 """
 
@@ -482,8 +482,8 @@ class TestAvailableTransitionsField:
         theirs = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
         mine = make_idea(world['organization'], world['reviewer'], status=Idea.Status.SUBMITTED)
 
-        ideas = run(gql, IDEAS_QUERY, 'ideas', bearer=world['reviewer_token'])
-        by_id = {idea['id']: idea['availableTransitions'] for idea in ideas}
+        page = run(gql, IDEAS_QUERY, 'ideas', bearer=world['reviewer_token'])
+        by_id = {idea['id']: idea['availableTransitions'] for idea in page['items']}
 
         assert by_id[str(theirs.pk)] == ['UNDER_REVIEW']
         assert by_id[str(mine.pk)] == []

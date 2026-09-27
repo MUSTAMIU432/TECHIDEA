@@ -1,9 +1,16 @@
 import { useState } from 'react'
 
-import { transitionIdeaRequest, type Idea, type IdeaStatus } from '../api/ideasApi'
+import {
+  transitionIdeaRequest,
+  type Idea,
+  type IdeaFilters,
+  type IdeaStatus,
+} from '../api/ideasApi'
+import { useDebouncedCallback } from '../../../lib/useDebouncedCallback'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeaForm } from './IdeaForm'
 import { IdeaList } from './IdeaList'
+import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
 
 /**
  * The Ideas area: the organization's ideas on one side, the create/edit form
@@ -14,6 +21,18 @@ import { IdeaList } from './IdeaList'
  * decide which of the two things the user is looking at - a new idea, an
  * existing draft, or the list - and to keep them in step with each other
  * after a save or a submission.
+ *
+ * It does own two pieces of discovery state, because they are decisions about
+ * *the reader's intent* rather than about the ideas:
+ *
+ * - **the text in the search box, and the search that is in effect.** They
+ *   are different values on purpose. The text is what somebody has typed; the
+ *   filter is what has been asked for. Collapsing them would either fetch per
+ *   keystroke or clear the box on every debounce.
+ * - **the filters, and the page they apply to.** Held here rather than in
+ *   `IdeaList` so that the one rule connecting them is written once: narrowing
+ *   returns to the first page, and paging changes nothing else. That rule is
+ *   what stops "showing 40-60 of 12" from ever being rendered.
  *
  * The three outcomes of a submission are kept apart, because conflating them
  * misleads somebody about something that matters:
@@ -32,12 +51,34 @@ export function IdeasWorkspace() {
   const [isCreating, setIsCreating] = useState(false)
   const [submittingIdeaId, setSubmittingIdeaId] = useState<string | null>(null)
   const [submittingTarget, setSubmittingTarget] = useState<IdeaStatus | null>(null)
-  const [listVersion, setListVersion] = useState(0)
+  const [filters, setFilters] = useState<IdeaFilters>({})
+  const [reloadToken, setReloadToken] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
+  /*
+   * The search box reports every keystroke, and the list is asked only once
+   * the reader pauses - so a term is applied when it settles rather than
+   * while it is being typed. The text in the box is the bar's own state and is
+   * not mirrored here: the box knows what was typed, and this only needs to
+   * know what to ask for.
+   */
+  const searchFor = useDebouncedCallback((search: string) => {
+    applyFilters({ ...filters, search: search.trim() === '' ? null : search })
+  }, SEARCH_DEBOUNCE_MS)
+
   function reloadList() {
-    setListVersion((version) => version + 1)
+    setReloadToken((token) => token + 1)
+  }
+
+  /**
+   * Every change to the filters goes through here, and it always returns to
+   * the first page. That is the whole reason the parent owns them: the rule
+   * needs the filters and the page in one place, and a list that reset the
+   * page in three separate handlers would have three chances to forget.
+   */
+  function applyFilters(next: IdeaFilters) {
+    setFilters({ ...next, offset: next.offset ?? 0 })
   }
 
   function handleSaved(idea: Idea) {
@@ -105,11 +146,15 @@ export function IdeasWorkspace() {
       <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
         <div>
           <IdeaList
-            // Remounted rather than handed a "reload" prop: a save or a
-            // submission invalidates the whole list, and a fresh mount re-runs
-            // the one fetch that populates it without this component having to
-            // know anything about how that fetch works.
-            key={listVersion}
+            filters={filters}
+            onFiltersChange={applyFilters}
+            onSearchChange={searchFor}
+            // A token rather than a remount key: a save invalidates the list
+            // and must re-run its fetch, but a remount would also throw away
+            // the reader's filters and page, which have nothing to do with the
+            // write. The fetch is a side effect of the list's props, so
+            // changing one of them is enough.
+            reloadToken={reloadToken}
             onEdit={(idea) => {
               setSubmitError(null)
               setIsCreating(false)

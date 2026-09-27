@@ -70,13 +70,13 @@ query Idea($id: ID!) {
 
 IDEAS_QUERY = """
 query Ideas {
-  ideas { id title }
+  ideas { items { id title } pageInfo { totalCount } }
 }
 """
 
 ORGANIZATION_IDEAS_QUERY = """
 query OrganizationIdeas($organizationId: ID!) {
-  organizationIdeas(organizationId: $organizationId) { id title }
+  organizationIdeas(organizationId: $organizationId) { items { id title } pageInfo { totalCount } }
 }
 """
 
@@ -612,7 +612,7 @@ class TestQueries:
     def test_an_unauthenticated_caller_sees_no_ideas(self, gql, ada):
         create_via_api(gql, ada)
 
-        assert run(gql, IDEAS_QUERY, 'ideas') == []
+        assert run(gql, IDEAS_QUERY, 'ideas')['items'] == []
 
     def test_the_author_sees_their_own_idea(self, gql, ada):
         created = create_via_api(gql, ada)['idea']
@@ -654,7 +654,7 @@ class TestQueries:
         token = sign_in(client, outsider)
 
         assert run(gql, IDEA_QUERY, 'idea', {'id': created['id']}, bearer=token) is None
-        assert run(gql, IDEAS_QUERY, 'ideas', bearer=token) == []
+        assert run(gql, IDEAS_QUERY, 'ideas', bearer=token)['items'] == []
         assert (
             run(
                 gql,
@@ -662,14 +662,14 @@ class TestQueries:
                 'organizationIdeas',
                 {'organizationId': str(ada['organization'].pk)},
                 bearer=token,
-            )
+            )['items']
             == []
         )
 
     def test_the_organization_feed_is_tenant_scoped(self, gql, ada):
         create_via_api(gql, ada)
 
-        result = run(
+        page = run(
             gql,
             ORGANIZATION_IDEAS_QUERY,
             'organizationIdeas',
@@ -677,7 +677,8 @@ class TestQueries:
             bearer=ada['token'],
         )
 
-        assert len(result) == 1
+        assert len(page['items']) == 1
+        assert page['pageInfo']['totalCount'] == 1
 
     def test_a_category_is_returned_with_the_idea(self, gql, ada):
         category = Category.objects.create(name='Customer support')

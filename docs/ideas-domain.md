@@ -344,16 +344,18 @@ anticipate:
   `CHANGES_REQUESTED`, which is the route back to a draft; until it exists,
   refusing is the only answer that is not a lie about what `SUBMITTED` means.
 
-## Selector layer (implemented, S2-002)
+## Selector layer (implemented, S2-002; discovery in S2-004)
 
 Reads live in `ideas/selectors.py`, separate from writes, so the visibility
 and tenancy rules are applied in exactly one place:
 
 ```python
 get_idea(user, idea_id) -> Idea | None          # None for anything unreadable
-list_ideas(user, filters) -> QuerySet[Idea]      # already visibility-filtered
-list_organization_ideas(user, organization_id, filters) -> QuerySet[Idea]
-list_comments(user, idea_id) -> QuerySet[Comment]
+list_discoverable_ideas(user, filters, *, offset, limit) -> Page[Idea]
+list_ideas(user) -> QuerySet[Idea]              # already visibility-filtered
+list_organization_ideas(user, organization_id) -> QuerySet[Idea]
+list_own_ideas(user) -> QuerySet[Idea]
+list_active_categories() -> QuerySet[Category]
 can_view_idea(user, idea) -> bool
 ```
 
@@ -362,6 +364,101 @@ can_view_idea(user, idea) -> bool
 apply it: the only way to get ideas is through a selector that applied it.
 The filter is built from `get_membership`, so it is the same membership
 Sprint 1 authorizes with.
+
+`list_own_ideas` is deliberately *not* visibility-filtered: an author can
+always read their own idea, whatever state it is in. It is the one scope
+rather than a filter in the module, and the reason it is safe is that the
+author set is exactly the caller's own id.
+
+### Discovery (implemented, S2-004)
+
+`list_discoverable_ideas` is the single read path for browsing, and both
+`ideas` and `organizationIdeas` go through it. It is the only place the
+visibility filter, the discovery filters and pagination meet, so there is no
+second queryset for an unfiltered idea to escape through.
+
+```python
+filters = selectors.IdeaFilters(
+    organization_id=None,   # narrows to a tenant the caller belongs to
+    category_id=None,
+    status=None,
+    search=None,
+)
+```
+
+**Every filter can only remove rows, never add them**, because
+`_visibility_filter(user)` is applied *before* any of them. That ordering is
+the whole design, and `test_every_filter_together_still_excludes_what_it_should`
+is the test that says it: an idea matching the tenant, the category, the
+status and the search exactly is still not returned when it is private.
+
+Two fields are absent from `IdeaFilters` on purpose:
+
+- **`visibility`** - a filter that reads like a grant. `visibility=public`
+  is indistinguishable, in a query, from asking for everybody's public ideas,
+  and the day it is added somebody will send it and be surprised.
+- **`author_id`** - nobody needs "ideas by X" in discovery, and it is one more
+  surface to keep honest.
+
+`organization_id` looks like the same problem and is not: it can only ever
+narrow, and `list_discoverable_ideas` refuses it outright - an empty page -
+unless the caller holds an active membership. An organization the caller does
+not belong to and an organization that does not exist produce the *same* empty
+page, so the argument cannot be used to probe which ids are real.
+
+An unusable filter value (a category that is not an id, a status that is not
+in the enum) yields an empty page rather than being ignored. A client that
+asked for category "abc" and received the unfiltered list would read that as
+"no ideas in this category" when it means "that category does not exist".
+
+**Search** is a case-insensitive substring match over `title` and
+`description` only, via `icontains`, which binds the term as a parameter.
+`problem_statement` and the other long-form fields are deliberately not
+searched: they are not exposed by the API, and searching a field the UI does
+not show would let a reader confirm the presence of a phrase in text they
+cannot otherwise see. Django escapes the pattern metacharacters, so a reader
+who types `%` searches for the character rather than matching everything.
+
+**Ordering** is `-created_at, -pk`. The tie-breaker is not decoration:
+`created_at` is microsecond-resolution, so two ideas filed in the same instant
+would otherwise come back in an arbitrary order and a page boundary could show
+one row twice and skip another. A total order is what makes `offset` a correct
+way to page.
+
+**Categories** are platform-wide reference data, readable without signing in
+so a picker can render before somebody decides to sign in.
+`list_active_categories` filters `is_active=True` and orders by name.
+Retirement is not deletion (`Idea.category` is `PROTECT`, so a used category
+can never be deleted): a retired category keeps its history and disappears
+from the picker, but an idea filed under it before it was retired is still a
+real idea a reader may see, and still matches that category as a filter. A
+retired category cannot be used to reach a *private* idea, because visibility
+is filtered first.
+
+### Pagination (implemented, S2-004)
+
+`ideas/pagination.py` holds a small, domain-agnostic offset helper: `Page[T]`,
+`clamp_limit`, `clamp_offset`, `paginate`, `empty_page`, default 20, maximum
+50.
+
+- **Offset, not cursor.** A cursor is the better answer for a large,
+  append-heavy, continuously-ordered dataset. This is not that dataset: the
+  ordering is total, the result set is small enough that a count is cheap, and
+  the UI needs "page 2 of 7" more than it needs a stable cursor across an
+  insert. If that changes, this module is the one place, and `Page` can grow a
+  `cursor` field alongside `offset`.
+- **Clamped, not rejected.** A client asking for 1000 rows is asking for a
+  page, not for an error. The server enforces the ceiling, and `page_info`
+  echoes `offset` and `limit` back *as applied* so a client can see it.
+- **A float is refused, not truncated.** `3.5` is not a page size somebody
+  meant to send, and rounding it invents an answer to a question the caller
+  did not ask.
+- **Three queries per page**: the membership lookup the visibility filter
+  needs, the `COUNT` behind `total_count`, and the page fetch. The count is a
+  deliberate trade - the cheaper alternative is to fetch `limit + 1` rows and
+  infer "has more" from a short page, but that cannot answer "showing 1-20 of
+  137", which is the number people use to decide between refining a search and
+  paging.
 
 ## GraphQL boundary (implemented, S2-002)
 
@@ -398,21 +495,38 @@ a draft, so both are exposed; the three review-only statuses are exposed as
 enum values from the start so the frontend's union type is not wrong by
 omission.
 
-## Frontend boundary (planned, S2-002)
+## Frontend boundary (implemented, S2-002/S2-004)
 
 ```
 frontend/src/features/ideas/
     api/          ideasApi.ts - the documents and typed request functions
-    components/   IdeaForm, IdeaList, IdeasWorkspace
+    components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination, IdeasWorkspace
+    hooks/        useIdeaDiscovery, useCategories
 ```
 
-As implemented (S2-002/S2-003), the data loading is held in the components rather
-than in the `hooks/` layer sketched above: the workspace owns the mutations
-and the list owns its one fetch, and neither needs a shared cache yet — the
-app has no React Query and S2-002 has one screen and one list. The `pages/`,
-`types/`, `utils/` and `CommentThread`/`VoteButton` parts are still to come,
-and a `useIdeas` hook is the natural first extraction if a second screen ever
-needs the same list.
+The data loading moved into `hooks/` in S2-004, and for a specific reason
+rather than a general one. `IdeaList` had to be re-fetchable from two
+directions that are not the same thing - the filters changed, or something was
+written - and it also had to keep the reader's place across the second. A
+component that owned its own fetch plus a remount-to-reload trick could not do
+that without throwing the filters away, so `useIdeaDiscovery` owns the request
+and the workspace owns the state. The app still has no React Query and one
+screen still has one list.
+
+Three frontend decisions worth stating, because each is the client half of a
+backend rule rather than a free choice:
+
+- **The search box is debounced** (`useDebouncedCallback`, 300ms), so a reader
+  typing a word sends one query rather than one per keystroke. The text in the
+  box and the filter in effect are different values: the box knows what was
+  typed, and only a settled term is asked for.
+- **A narrowing filter returns to page 1.** Written once, in the workspace,
+  because it needs the filters and the page in one place - and it is what stops
+  "showing 40-60 of 12" from ever being rendered.
+- **The client never filters a list to decide what somebody may see.** It
+  renders the server's page, and the three empty states ("nothing here",
+  "nothing matches", "nothing on this page") are kept apart because they are
+  different facts.
 
 This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
@@ -441,6 +555,8 @@ the typed request functions, `context/`-free hooks read them, and
 | ------ | ----- |
 | S2-001 (this) | `ideas` app, five models, migration, admin, model tests, this document |
 | S2-002 | `createIdea`/`updateIdea`/`submitIdea`, selectors, the GraphQL schema, the frontend feature module — implemented. `addComment`/`voteIdea` were scoped into S2-002 in this document and are **not** implemented |
+| S2-003 | `transitionIdea` and the transition matrix, fail-closed `DEPARTMENT` — implemented |
+| S2-004 | `list_discoverable_ideas`, `IdeaFiltersInput`, `IdeaPage`, `ideas/pagination.py`, category/search/status filters, the discovery UI — implemented |
 | S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 

@@ -5,6 +5,7 @@ import { setAccessToken } from '../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../features/identity/auth/authApi'
 import { organizationIdeasRequest } from '../features/ideas/api/ideasApi'
 import { organizationsRequest } from '../features/organizations/api/organizationApi'
+import { page } from '../test/ideaPage'
 import { renderRoutes } from '../test/renderWithRouter'
 import { router } from './routes'
 
@@ -18,7 +19,7 @@ vi.mock('../features/organizations/api/organizationApi', () => ({
 // documents are asserted in `features/ideas/api/ideasApi.test.ts`.
 vi.mock('../features/ideas/api/ideasApi', () => ({
   organizationIdeasRequest: vi.fn(),
-  categoriesRequest: vi.fn(),
+  categoriesRequest: vi.fn(async () => []),
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   submitIdeaRequest: vi.fn(),
@@ -60,7 +61,7 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
     mockedMe.mockResolvedValue(null)
     mockedOrganizations.mockResolvedValue([])
-    mockedIdeas.mockResolvedValue([])
+    mockedIdeas.mockResolvedValue(page([]))
   })
 
   afterEach(() => {

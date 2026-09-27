@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
-import type { IdeaMutationResult } from '../api/ideasApi'
+import { page } from '../../../test/ideaPage'
+import type { Idea, IdeaMutationResult } from '../api/ideasApi'
 
 vi.mock('../api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -26,7 +27,7 @@ const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 
-const DRAFT: Awaited<ReturnType<typeof organizationIdeasRequest>>[number] = {
+const DRAFT: Idea = {
   id: '1',
   title: 'Automate the invoice run',
   description: 'A description long enough.',
@@ -67,7 +68,7 @@ function mockContext(
     activeOrganization,
     status: 'ready',
   } as unknown as ReturnType<typeof useOrganization>)
-  listMock.mockResolvedValue(ideas)
+  listMock.mockResolvedValue(page(ideas))
 }
 
 describe('IdeasWorkspace', () => {
@@ -85,8 +86,23 @@ describe('IdeasWorkspace', () => {
     render(<IdeasWorkspace />)
 
     // The tenant and visibility rules are the server's. This component asks
-    // for one organization's ideas and renders whatever it is given.
-    await waitFor(() => expect(listMock).toHaveBeenCalledWith('3'))
+    // for one organization's ideas by id and renders whatever it is given.
+    //
+    // The second argument is asserted key by key rather than as a literal,
+    // because it is the filter and it is meant to grow: what matters is that
+    // it names no tenant, no author and no visibility, since a filter that
+    // could widen a result is the one thing this client must not be able to
+    // ask for.
+    await waitFor(() => expect(listMock).toHaveBeenCalled())
+    const [organizationId, filters = {}] = listMock.mock.calls[0]
+    expect(organizationId).toBe('3')
+    expect(Object.keys(filters).sort()).toEqual([
+      'categoryId',
+      'limit',
+      'offset',
+      'search',
+      'status',
+    ])
   })
 
   it('shows a loading state before the ideas arrive', () => {
@@ -141,9 +157,15 @@ describe('IdeasWorkspace', () => {
 
     // Each state appears as its badge *and* in the details row, so the count
     // is asserted rather than assumed: one badge plus one row per idea.
+    //
+    // Scoped to the list, because the status filter above offers options with
+    // the same words in them. That is not a collision to design around - a
+    // filter labelled "Draft" is what it should be called - so the assertion
+    // asks about the rows rather than about the whole page.
     await screen.findByText('Their idea')
-    expect(screen.getAllByText('Draft')).toHaveLength(2)
-    expect(screen.getAllByText('Submitted')).toHaveLength(2)
+    const list = within(screen.getByRole('list'))
+    expect(list.getAllByText('Draft')).toHaveLength(2)
+    expect(list.getAllByText('Submitted')).toHaveLength(2)
   })
 
   it('shows who each idea is shared with', async () => {

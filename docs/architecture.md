@@ -423,9 +423,11 @@ on it until that tier exists - see
 
 ### Ideas (target — partly implemented)
 
-`ideas` is the first business domain beyond Identity & Access, and S2-002
-implements its first vertical slice end to end: file an idea, edit it as a
-draft, submit it.
+`ideas` is the first business domain beyond Identity & Access. S2-002
+implemented its first vertical slice end to end — file an idea, edit it as a
+draft, submit it — S2-003 added the lifecycle and the server-side read policy,
+and S2-004 added categories and discovery. Comments, voting and attachment
+uploads are still not started.
 
 **Authorization is Sprint 1's, unchanged.** `ideas` adds no permission code and
 no `permissions.py`. Filing an idea requires an *active membership* in the
@@ -523,10 +525,11 @@ tenant isolation (S1-008), and the integration/security hardening pass
 (S1-010). What remains inside Identity is an authenticated
 Google-account-linking flow.
 
-Sprint 2 starts the core business domain with the `ideas` app. Only its
-architecture and schema exist so far (S2-001); creation and submission
-(S2-002) and the review workflow (Sprint 3) are not started. Every other
-business domain is not started.
+Sprint 2 starts the core business domain with the `ideas` app. Its
+architecture and schema (S2-001), creation and submission (S2-002), lifecycle
+and visibility (S2-003) and categories and discovery (S2-004) exist. The
+review *queue* is Sprint 3 and is not started. Every other business domain is
+not started.
 
 ### Implemented (Sprint 2)
 
@@ -536,6 +539,7 @@ business domain is not started.
 | Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices` | S2-001 |
 | Idea creation and submission | `createIdea`/`updateIdea`/`submitIdea`, `idea`/`ideas`/`organizationIdeas`/`categories` queries, tenant- and visibility-filtered selectors, and the `/app/ideas` UI | S2-002 |
 | Idea lifecycle | The seven-pair transition matrix in `ideas/lifecycle.py` behind a single `transitionIdea` mutation, with the per-viewer `availableTransitions` field. No mutation and no write input can set a status | S2-003 |
+| Categories and discovery | `list_discoverable_ideas` as the single read path, with `IdeaFilters` (category, status, search) that can only **narrow** what the visibility filter allowed, and `ideas/pagination.py` for bounded offset paging. `ideas`/`organizationIdeas` return an `IdeaPage`; there is no `visibility` or `authorId` filter to send | S2-004 |
 | Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
 | Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
 | Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
@@ -593,8 +597,9 @@ How these are used day to day: [`development.md`](development.md),
   `CHANGES_REQUESTED` idea, and no dashboard of any kind
 - The Ideas operations beyond creation, submission and lifecycle: comments,
   voting, and attachments (their *bytes* and upload flow)
-- Discovery: there is no cross-organization idea search, no category browsing
-  page, and no feed beyond the one organization's ideas a reader is already in
+- A discovery *algorithm*: there is no ranking, recommendation, trending or
+  social feed. S2-004 filters and pages what a reader may see; it does not
+  decide what they should see, and no engagement data is collected
 - The `DEPARTMENT` visibility tier, and the `idea.review` permission code that
   would let a non-owner review
 - An authenticated Google-account-linking flow (today's Google sign-in only

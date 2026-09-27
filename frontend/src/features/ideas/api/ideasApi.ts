@@ -12,9 +12,14 @@
  * re-litigate:
  *
  * - **The server decides what is visible.** Every read here goes through a
- *   query that is already tenant- and visibility-filtered, and none of them
- *   takes a filter argument this client could use to widen the result. The
- *   UI's job is to render what it is given.
+ *   query that is already tenant- and visibility-filtered. S2-004 added
+ *   filters, and they are the same rule rather than an exception to it: every
+ *   one of them can only *remove* rows the server already decided were
+ *   readable, there is no `visibility` or `authorId` filter in the input type
+ *   to send, and the client cannot widen anything. The UI's job is to render
+ *   what it is given.
+ * - **A page, not a list.** Discovery returns `{ items, pageInfo }` so the
+ *   client cannot ask for the whole table by forgetting an argument.
  * - **`authorId` is an id, not a person.** `IdeaType` deliberately does not
  *   embed a user, so the client cannot render (or leak) a member's email on
  *   an idea that is readable platform-wide. Comparing `authorId` with the
@@ -78,6 +83,48 @@ export const SELECTABLE_VISIBILITIES: ReadonlyArray<{
     hint: 'Any signed-in member of the platform can read it.',
   },
 ]
+
+/**
+ * Where the caller is in a paged result, as the server applied it.
+ *
+ * `offset` and `limit` are echoed back *as applied* rather than as requested,
+ * so a client that asked for 1000 rows and got 50 can see that without
+ * knowing the server's ceiling. `IdeaPageInfo` therefore describes the
+ * response, never the request: the request is this module's business.
+ */
+export interface IdeaPageInfo {
+  offset: number
+  limit: number
+  totalCount: number
+  hasNextPage: boolean
+  hasPreviousPage: boolean
+}
+
+export interface IdeaPage {
+  items: Idea[]
+  pageInfo: IdeaPageInfo
+}
+
+/**
+ * The narrowing arguments of a discovery query. Mirrors the backend's
+ * `IdeaFiltersInput`, and is missing the same things on purpose: no
+ * `visibility`, no `authorId`, and no `organizationId` (a tenant is scoped by
+ * the `organizationIdeas` query that names it, so a request cannot name two
+ * tenants at once).
+ *
+ * Every field is optional and every field is a narrowing one, which is what
+ * makes the whole object safe to build from form fields. `undefined` and
+ * `null` are both normalized to `null` before sending, because a GraphQL
+ * input that carries `undefined` is a document that carries a field the
+ * server did not ask for.
+ */
+export interface IdeaFilters {
+  categoryId?: string | null
+  status?: IdeaStatus | null
+  search?: string | null
+  offset?: number
+  limit?: number
+}
 
 export interface IdeaCategory {
   id: string
@@ -189,15 +236,29 @@ const IDEA_QUERY = `
   }
 `
 
+const PAGE_INFO_FIELDS = `
+  offset
+  limit
+  totalCount
+  hasNextPage
+  hasPreviousPage
+`
+
 const IDEAS_QUERY = `
-  query Ideas {
-    ideas { ${IDEA_FIELDS} }
+  query Ideas($filters: IdeaFiltersInput) {
+    ideas(filters: $filters) {
+      items { ${IDEA_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
   }
 `
 
 const ORGANIZATION_IDEAS_QUERY = `
-  query OrganizationIdeas($organizationId: ID!) {
-    organizationIdeas(organizationId: $organizationId) { ${IDEA_FIELDS} }
+  query OrganizationIdeas($organizationId: ID!, $filters: IdeaFiltersInput) {
+    organizationIdeas(organizationId: $organizationId, filters: $filters) {
+      items { ${IDEA_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
   }
 `
 
@@ -307,24 +368,50 @@ export async function ideaRequest(id: string): Promise<Idea | null> {
   return data.idea
 }
 
-/** Every idea the signed-in user may read, newest first. */
-export async function ideasRequest(): Promise<Idea[]> {
-  const data = await graphqlClient.request<{ ideas: Idea[] }>(IDEAS_QUERY)
+/**
+ * Send only the filters that were actually set.
+ *
+ * A GraphQL input cannot carry `undefined`, and sending every key with a null
+ * value would be a different request from sending none: it would make the
+ * server's "was this filter supplied?" checks depend on JSON rather than on
+ * omission, and `offset: null` is not the same as an absent offset. So an
+ * unset filter is *absent*, which is also why the request cannot accidentally
+ * carry a `visibility` the backend would refuse.
+ */
+function filterVariables(filters: IdeaFilters): Record<string, unknown> {
+  const variables: Record<string, unknown> = {}
+  if (filters.categoryId) variables.categoryId = filters.categoryId
+  if (filters.status) variables.status = filters.status
+  if (filters.search) variables.search = filters.search
+  if (filters.offset !== undefined) variables.offset = filters.offset
+  if (filters.limit !== undefined) variables.limit = filters.limit
+  return variables
+}
+
+/** One page of every idea the signed-in user may read, newest first. */
+export async function ideasRequest(filters: IdeaFilters = {}): Promise<IdeaPage> {
+  const data = await graphqlClient.request<{ ideas: IdeaPage }>(IDEAS_QUERY, {
+    filters: filterVariables(filters),
+  })
   return data.ideas
 }
 
 /**
- * One organization's readable ideas, newest first.
+ * One page of one organization's readable ideas, newest first.
  *
  * Empty for an organization the caller is not an active member of - the
  * server does not confirm that the organization exists, so the UI shows an
  * empty state rather than an error.
  */
-export async function organizationIdeasRequest(organizationId: string): Promise<Idea[]> {
-  const data = await graphqlClient.request<{ organizationIdeas: Idea[] }>(
+export async function organizationIdeasRequest(
+  organizationId: string,
+  filters: IdeaFilters = {},
+): Promise<IdeaPage> {
+  const data = await graphqlClient.request<{ organizationIdeas: IdeaPage }>(
     ORGANIZATION_IDEAS_QUERY,
     {
       organizationId,
+      filters: filterVariables(filters),
     },
   )
   return data.organizationIdeas

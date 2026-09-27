@@ -36,9 +36,12 @@ exist" from "exists but is not yours", so a caller cannot use these to probe
 for the existence of another tenant's ideas.
 """
 
+from dataclasses import dataclass
+
 from django.db.models import Q, QuerySet
 
 from ideas.models import Category, Idea
+from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
 
@@ -213,6 +216,148 @@ def list_own_ideas(user: User | None) -> QuerySet[Idea]:
         return Idea.objects.none()
 
     return _base_queryset().filter(author=user).order_by('-created_at')
+
+
+@dataclass(frozen=True)
+class IdeaFilters:
+    """
+    Everything a caller may narrow a discovery query by.
+
+    Note what is *not* here: there is no `visibility` field, and no `author_id`,
+    and no free-form field mapping. Those are exactly the arguments that would
+    turn a read into a way of asking for somebody else's rows — `visibility=public`
+    reads like a filter and behaves like a grant. Visibility is decided by
+    `_visibility_filter` and by nothing else; an author filter is dropped for
+    the same reason (nobody needs "ideas by X" in discovery, and it is one more
+    surface to keep honest).
+
+    `organization_id` is the exception that looks like a grant and is not: it
+    can only ever *narrow*, because `list_discoverable_ideas` refuses it
+    outright unless the caller holds an active membership of that
+    organization.
+    """
+
+    organization_id: object | None = None
+    category_id: object | None = None
+    status: str | None = None
+    search: str | None = None
+
+
+def _normalize_id(value: object) -> int | None:
+    """`None` for an unusable id, so a bad filter empties the result set."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _search_filter(search: str | None) -> Q:
+    """
+    Case-insensitive substring match over the two fields a reader scans.
+
+    `icontains` builds a `LIKE` in which the term is a *bound parameter*, so
+    the text can never be interpreted as SQL — which is the only reason this is
+    safe to expose to a client at all. Django also escapes the pattern
+    metacharacters: a search for `%` compiles to a `LIKE` with that character
+    escaped, so a reader who types a wildcard searches for the character
+    rather than matching everything. Worth stating explicitly because it is a property of
+    the ORM's escaping, not of this module: swapping `icontains` for `raw` to
+    gain trigram search later would quietly turn "a % sign" into "everything",
+    so `test_a_wildcard_character_is_searched_for_literally` pins it.
+
+    Deliberately title and description only. `problem_statement` and friends
+    are not exposed anywhere yet, and searching a field the API does not
+    return would let a reader confirm the presence of a phrase in text they
+    cannot otherwise see.
+    """
+    term = (search or '').strip()
+    if not term:
+        return Q()
+    return Q(title__icontains=term) | Q(description__icontains=term)
+
+
+def _apply_filters(queryset: QuerySet[Idea], filters: IdeaFilters) -> QuerySet[Idea]:
+    """
+    Narrow an already-visibility-filtered queryset.
+
+    Order matters and is the whole point: the visibility filter is applied by
+    the caller *before* this, and everything here can only remove rows from
+    what that filter already allowed. A filter therefore cannot widen the
+    result, whatever it is set to.
+
+    An unusable filter value empties the result rather than being ignored. A
+    client that asked for category "abc" and got the unfiltered list would
+    read that as "no ideas in this category" when it means "that category does
+    not exist" — an empty page says the same thing and cannot be mistaken for
+    data.
+    """
+    queryset = queryset.filter(_search_filter(filters.search))
+
+    if filters.category_id is not None:
+        category_pk = _normalize_id(filters.category_id)
+        if category_pk is None:
+            return queryset.none()
+        queryset = queryset.filter(category_id=category_pk)
+
+    if filters.status is not None and str(filters.status).strip():
+        status = str(filters.status).strip().lower()
+        if status not in Idea.Status.values:
+            return queryset.none()
+        queryset = queryset.filter(status=status)
+
+    return queryset
+
+
+def list_discoverable_ideas(
+    user: User | None,
+    filters: IdeaFilters | None = None,
+    *,
+    offset: object = 0,
+    limit: object = None,
+) -> Page[Idea]:
+    """
+    One page of ideas `user` may see, newest first, narrowed by `filters`.
+
+    The single entry point for discovery, and the only place the visibility
+    filter, the discovery filters and pagination meet. It is the read path
+    `organizationIdeas` and `ideas` both go through, so there is no second
+    queryset an unfiltered idea could escape through.
+
+    An `organization_id` filter the caller has no active membership of yields
+    an empty page, not an error and not somebody else's ideas — the same
+    answer as for an organization that does not exist, so the argument cannot
+    be used to probe for either.
+    """
+    applied = filters or IdeaFilters()
+
+    if user is None or not user.is_active:
+        return empty_page(offset, limit)
+
+    queryset = _base_queryset().filter(_visibility_filter(user))
+
+    if applied.organization_id is not None:
+        organization_pk = _normalize_id(applied.organization_id)
+        if organization_pk is None:
+            return empty_page(offset, limit)
+        if authorization.get_membership(user, organization_pk) is None:
+            return empty_page(offset, limit)
+        queryset = queryset.filter(organization_id=organization_pk)
+
+    queryset = _apply_filters(queryset, applied)
+
+    # `-pk` as the tie-breaker is not decoration: `created_at` is
+    # microsecond-resolution, so two ideas filed in the same instant would
+    # otherwise come back in an arbitrary order and a page boundary could
+    # show the same row twice and skip another. Ordering by the primary key as
+    # well makes every page deterministic, which is what lets `offset` be a
+    # correct way to page at all.
+    queryset = queryset.order_by('-created_at', '-pk')
+
+    return paginate(queryset, offset=offset, limit=limit)
 
 
 def list_active_categories() -> QuerySet[Category]:

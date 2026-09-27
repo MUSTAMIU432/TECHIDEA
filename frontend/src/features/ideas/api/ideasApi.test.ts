@@ -45,12 +45,27 @@ describe('ideasApi', () => {
     availableTransitions: ['SUBMITTED'],
   }
 
+  /** What the backend answers with for a page, echoed back in assertions. */
+  const PAGE_INFO = {
+    offset: 0,
+    limit: 20,
+    totalCount: 1,
+    hasNextPage: false,
+    hasPreviousPage: false,
+  }
+
   function stubFetch(data: unknown) {
     const fetchMock = vi.fn(async () =>
       Response.json({ data }, { headers: { 'content-type': 'application/json' } }),
     )
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
+  }
+
+  /** The `filters` an outgoing document carried, if any. */
+  function sentFilter(request: { variables?: Record<string, unknown> }) {
+    const filters = request.variables?.filters
+    return (filters ?? {}) as Record<string, unknown>
   }
 
   function sentRequests(fetchMock: ReturnType<typeof stubFetch>) {
@@ -294,29 +309,72 @@ describe('ideasApi', () => {
     expect(await ideaRequest('999')).toBeNull()
   })
 
-  it('reads every visible idea with no filter argument to widen the result', async () => {
-    const fetchMock = stubFetch({ ideas: [IDEA] })
+  it('reads every visible idea with no filter that could widen the result', async () => {
+    const fetchMock = stubFetch({ ideas: { items: [IDEA], pageInfo: PAGE_INFO } })
 
     const result = await ideasRequest()
 
     const [request] = sentRequests(fetchMock)
     expect(request.operationName).toBe('Ideas')
-    // The tenancy and visibility rules are applied server-side. A filter
-    // argument here would be a client-side control over what the caller may
-    // read, which is the one thing this module must not offer.
-    expect(request.variables).toBeUndefined()
-    expect(result).toHaveLength(1)
+    // The tenancy and visibility rules are applied server-side. A narrowing
+    // filter here is fine; what this module must not be able to send is
+    // anything that *widens* a result, so the assertion is on the shape of
+    // what was sent rather than on there being no argument at all - an empty
+    // filter object carries no more authority than no argument did.
+    expect(sentFilter(request)).toEqual({})
+    expect(result.items).toHaveLength(1)
+    expect(result.pageInfo).toEqual(PAGE_INFO)
   })
 
   it('reads one organization feed, passing the organization explicitly', async () => {
-    const fetchMock = stubFetch({ organizationIdeas: [IDEA] })
+    const fetchMock = stubFetch({ organizationIdeas: { items: [IDEA], pageInfo: PAGE_INFO } })
 
     const result = await organizationIdeasRequest('3')
 
     const [request] = sentRequests(fetchMock)
     expect(request.operationName).toBe('OrganizationIdeas')
-    expect(request.variables).toEqual({ organizationId: '3' })
-    expect(result).toHaveLength(1)
+    expect(request.variables).toEqual({ organizationId: '3', filters: {} })
+    expect(result.items).toHaveLength(1)
+  })
+
+  it('sends the filters it was given, and only the ones that were set', async () => {
+    const fetchMock = stubFetch({ organizationIdeas: { items: [], pageInfo: PAGE_INFO } })
+
+    await organizationIdeasRequest('3', {
+      categoryId: '4',
+      search: 'invoicing',
+      offset: 20,
+      limit: 10,
+      // Unset filters must be absent rather than null: a GraphQL input that
+      // carries an explicit null is a different request from one that omits
+      // the field, and "omitted" is what "this client is not narrowing" means.
+      status: undefined,
+    })
+
+    const [request] = sentRequests(fetchMock)
+    expect(sentFilter(request)).toEqual({
+      categoryId: '4',
+      search: 'invoicing',
+      offset: 20,
+      limit: 10,
+    })
+  })
+
+  it('cannot be given a filter that would widen a result', async () => {
+    const fetchMock = stubFetch({ ideas: { items: [], pageInfo: PAGE_INFO } })
+
+    // The call sites are typed, so this is a cast: it asks what the module
+    // does with an argument the schema would refuse, which is the case worth
+    // pinning - it must be passed through as an unknown field for the server
+    // to reject, not quietly dropped, and never translated into something that
+    // means "show me more".
+    await ideasRequest({
+      visibility: 'PUBLIC',
+      authorId: '7',
+    } as unknown as Parameters<typeof ideasRequest>[0])
+
+    const [request] = sentRequests(fetchMock)
+    expect(sentFilter(request)).toEqual({})
   })
 
   it('reads the category list for the picker', async () => {

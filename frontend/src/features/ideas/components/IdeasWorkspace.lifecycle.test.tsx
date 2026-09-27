@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
+import { page } from '../../../test/ideaPage'
 import type { Idea, IdeaMutationResult, IdeaStatus } from '../api/ideasApi'
 
 vi.mock('../api/ideasApi', async (importOriginal) => ({
@@ -96,7 +97,7 @@ function mockContext({
           ],
     },
   } as unknown as ReturnType<typeof useOrganization>)
-  listMock.mockResolvedValue(ideas)
+  listMock.mockResolvedValue(page(ideas))
 }
 
 describe('IdeasWorkspace lifecycle (S2-003)', () => {
@@ -131,6 +132,11 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     // Human labels, not the raw enum names a client would otherwise have to
     // carry its own table for. Each appears twice — once as the badge, once in
     // the details row — which is asserted rather than assumed.
+    //
+    // Read from within the list: the status filter above the list offers
+    // options with these same seven words, and a filter named "Draft" is
+    // exactly what it should be called, so the assertion is about the rows.
+    const list = within(screen.getByRole('list'))
     const counts = [
       'Draft',
       'Submitted',
@@ -139,7 +145,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
       'Rejected',
       'Approved',
       'Automation proposal',
-    ].map((label) => [label, screen.getAllByText(label).length])
+    ].map((label) => [label, list.getAllByText(label).length])
     expect(counts).toEqual([
       ['Draft', 2],
       ['Submitted', 2],

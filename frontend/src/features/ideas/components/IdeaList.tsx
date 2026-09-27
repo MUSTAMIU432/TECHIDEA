@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
-
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
-import { organizationIdeasRequest, type Idea, type IdeaStatus } from '../api/ideasApi'
 import { SpinnerIcon } from '../../identity/components/icons'
+import type { Idea, IdeaFilters, IdeaStatus } from '../api/ideasApi'
+import { useCategories } from '../hooks/useCategories'
+import { useIdeaDiscovery } from '../hooks/useIdeaDiscovery'
 import {
   statusClasses,
   statusDescription,
@@ -11,17 +11,26 @@ import {
   transitionLabel,
   visibilityLabel as visibilityLabelFor,
 } from '../utils/lifecycle'
+import { IdeaFiltersBar } from './IdeaFiltersBar'
+import { IdeaPagination } from './IdeaPagination'
 
 /**
- * The organization's ideas, and what can be done with them.
+ * The organization's ideas, narrowed by the filters above them, and what can
+ * be done with them.
  *
- * Two rules shape this component:
+ * Three rules shape this component:
  *
- * - **The list comes from the server already filtered.** `organizationIdeas`
- *   applies the tenant and visibility rules; this component never filters a
- *   list to decide what somebody may see, because that is the one thing a
- *   client cannot be trusted with. It does filter for *presentation* - a
- *   "Your drafts" heading is a label, not a control.
+ * - **The list comes from the server already filtered.** Every read goes
+ *   through `organizationIdeas`, which applies the tenant rule, the
+ *   visibility rule and the discovery filters server-side; this component
+ *   never filters a list to decide what somebody may see, because that is the
+ *   one thing a client cannot be trusted with. It does arrange a list for
+ *   *presentation* - it is what renders the server's page - and the empty
+ *   states distinguish "there is nothing here" from "nothing matches what you
+ *   asked for", which are different facts.
+ * - **Filters only ever narrow.** The bar can offer a category, a status and
+ *   a search, and there is no control that could widen a result, because the
+ *   backend has no such argument to send.
  * - **What is offered is decided from the signed-in user's id.**
  *   `idea.authorId === user.id` is what puts Edit and Submit on an idea, and
  *   it is only ever a question of what to *offer*: the server refuses an
@@ -29,11 +38,25 @@ import {
  *   rendered, and a failure to render them is not a security control.
  */
 export function IdeaList({
+  filters,
+  onFiltersChange,
+  onSearchChange,
   onEdit,
   onTransition,
+  reloadToken,
   submittingIdeaId = null,
   submittingTarget = null,
 }: {
+  /** The filters in effect. Sent to the server; never applied here. */
+  filters: IdeaFilters
+  /**
+   * Replace the filters. The parent owns this because it owns the rule that a
+   * narrowing filter returns to the first page — the rule is one line, and
+   * having it in two places is how "page 4 of 3" gets rendered.
+   */
+  onFiltersChange: (next: IdeaFilters) => void
+  /** The raw text in the search box, which is not yet a filter. */
+  onSearchChange: (search: string) => void
   onEdit: (idea: Idea) => void
   /**
    * Perform a lifecycle move. The list decides nothing about whether the move
@@ -41,6 +64,13 @@ export function IdeaList({
    * has no opinion about the outcome either; the workspace reports that.
    */
   onTransition: (idea: Idea, target: IdeaStatus) => void
+  /**
+   * Bumped after a write. A remount would do the same job, and was what this
+   * used instead; a token is here because the component now holds filter
+   * state above the list, and remounting would throw that away and send the
+   * reader back to page 1 after every save.
+   */
+  reloadToken: number
   /**
    * Which idea's submission is in flight, so exactly one row shows a spinner.
    * Owned by the workspace rather than by this component: the mutation lives
@@ -53,39 +83,12 @@ export function IdeaList({
 }) {
   const { user } = useAuth()
   const { activeOrganization, status: organizationStatus } = useOrganization()
-  // `null` means "not fetched yet", which is the loading state. Deriving it
-  // rather than setting it imperatively keeps the first render and the render
-  // after a failed request from disagreeing about what is on screen.
-  const [ideas, setIdeas] = useState<Idea[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    // No organization means there is nothing to ask for; that case is
-    // rendered from `activeOrganization` below rather than fetched into an
-    // empty list, so no state is written synchronously here.
-    if (!activeOrganization) return
-
-    let cancelled = false
-    organizationIdeasRequest(activeOrganization.id)
-      .then((next) => {
-        if (!cancelled) {
-          setIdeas(next)
-          setError(null)
-        }
-      })
-      .catch(() => {
-        // A transport failure is not a business outcome, so it is shown as
-        // itself rather than as an empty list - an empty list would read as
-        // "this organization has no ideas", which is a different claim.
-        if (!cancelled) {
-          setIdeas([])
-          setError('We could not reach the server. Please try again.')
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activeOrganization])
+  const { categories } = useCategories()
+  const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
+    activeOrganization?.id ?? null,
+    filters,
+    reloadToken,
+  )
 
   if (organizationStatus === 'loading') return <LoadingPanel />
 
@@ -99,8 +102,8 @@ export function IdeaList({
   }
 
   // Checked *before* the "not fetched yet" guard below, and the order matters:
-  // with no organization there is nothing to fetch, so `ideas` stays null
-  // forever and the loading guard would spin indefinitely.
+  // with no organization there is nothing to fetch, so no request is ever made
+  // and the loading guard would spin indefinitely.
   if (!activeOrganization) {
     return (
       <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5">
@@ -112,122 +115,232 @@ export function IdeaList({
     )
   }
 
-  // A single-condition guard, on purpose: `ideas === null && !error` would read
-  // the same but would not narrow the type for what follows.
-  if (ideas === null) return <LoadingPanel />
+  const filtersActive = Boolean(filters.search || filters.categoryId || filters.status)
+  // `pageInfo === null` is "no answer yet"; `loading` afterwards is a refresh
+  // under a filter that is already different from the rows on screen.
+  const firstLoad = pageInfo === null
 
-  if (ideas.length === 0) {
+  if (firstLoad) return <LoadingPanel />
+
+  return (
+    <div>
+      <IdeaFiltersBar
+        filters={filters}
+        categories={categories}
+        onSearchChange={onSearchChange}
+        onCategoryChange={(categoryId) => onFiltersChange({ ...filters, categoryId })}
+        onStatusChange={(status) => onFiltersChange({ ...filters, status })}
+        onClear={() => {
+          onSearchChange('')
+          onFiltersChange({})
+        }}
+      />
+
+      {/*
+        The rows stay mounted while a new filter is in flight, dimmed rather
+        than replaced. Replacing them would flash an empty panel on every
+        keystroke; showing them at full strength would claim these are the
+        results for the term now in the box. `aria-busy` says which it is to
+        anything reading the page rather than looking at it.
+      */}
+      <div aria-busy={loading} className={loading ? 'mt-3 opacity-60 transition-opacity' : 'mt-3'}>
+        {ideas.length === 0 ? (
+          <EmptyState
+            filtered={filtersActive}
+            pastEnd={!filtersActive && (filters.offset ?? 0) > 0}
+            onClear={() => {
+              onSearchChange('')
+              onFiltersChange({})
+            }}
+            onFirstPage={() => onFiltersChange({ ...filters, offset: 0 })}
+          />
+        ) : (
+          <>
+            <ul className="space-y-3">
+              {ideas.map((idea) => {
+                const isMine = user?.id === idea.authorId
+                const isDraft = idea.status === 'DRAFT'
+                return (
+                  <li
+                    key={idea.id}
+                    className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="truncate text-sm font-semibold text-gray-900">
+                          {idea.title}
+                        </h3>
+                        <p className="mt-1 line-clamp-2 text-sm text-gray-600">
+                          {idea.description || 'No description yet.'}
+                        </p>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(idea.status)}`}
+                      >
+                        {statusLabel(idea.status)}
+                      </span>
+                    </div>
+
+                    {/*
+                      What the state *means*, not just which state it is. Worth the
+                      extra line for the two states where the next step is the author's
+                      to take: a changes-requested idea says so here, rather than the
+                      author having to infer it from a badge colour.
+                    */}
+                    {idea.status !== 'DRAFT' && (
+                      <p className="mt-2 text-xs text-gray-500">{statusDescription(idea.status)}</p>
+                    )}
+
+                    <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+                      <div className="flex items-center gap-1">
+                        <dt>Visibility</dt>
+                        <dd className="font-medium text-gray-700">{visibilityLabel(idea)}</dd>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <dt>Status</dt>
+                        <dd className="font-medium text-gray-700">{statusLabel(idea.status)}</dd>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <dt>Category</dt>
+                        <dd className="font-medium text-gray-700">
+                          {idea.category?.name ?? 'None'}
+                        </dd>
+                      </div>
+                      {idea.submittedAt && (
+                        <div className="flex items-center gap-1">
+                          <dt>Submitted on</dt>
+                          <dd className="font-medium text-gray-700">
+                            {new Date(idea.submittedAt).toLocaleDateString()}
+                          </dd>
+                        </div>
+                      )}
+                    </dl>
+
+                    {/*
+                        Actions are rendered from `availableTransitions`, which the
+                        backend computed for *this* viewer. So there is no client-side
+                        rule saying "the author may submit" or "a reviewer may approve"
+                        that could disagree with the server's, and an author who also
+                        holds the Owner role is offered nothing on their own submitted
+                        idea — because the server declined to allow it.
+
+                        Rendering nothing when the list is empty is a courtesy, not a
+                        control: the server refuses an unlisted move whether or not a
+                        button was drawn.
+                      */}
+                    {(isMine && isDraft) || idea.availableTransitions.length > 0 ? (
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {isMine && isDraft && (
+                          <button
+                            type="button"
+                            onClick={() => onEdit(idea)}
+                            className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+                          >
+                            Edit draft
+                          </button>
+                        )}
+                        {idea.availableTransitions.map((target) => {
+                          const label = transitionLabel(target)
+                          if (label === null) return null
+                          return (
+                            <button
+                              key={target}
+                              type="button"
+                              disabled={submittingIdeaId === idea.id}
+                              onClick={() => onTransition(idea, target)}
+                              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {submittingIdeaId === idea.id && submittingTarget === target && (
+                                <SpinnerIcon className="h-3.5 w-3.5 motion-safe:animate-spin" />
+                              )}
+                              {label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ) : null}
+                  </li>
+                )
+              })}
+            </ul>
+
+            {pageInfo && (
+              <IdeaPagination
+                pageInfo={pageInfo}
+                onOffsetChange={(offset) => onFiltersChange({ ...filters, offset })}
+              />
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Three different "no rows", because one message would be a lie twice over.
+ *
+ * - Nothing here at all: file the first one.
+ * - Nothing matches: the filters are doing their job, and the reader can see
+ *   which ones.
+ * - Nothing on *this page*: the reader is past the end, which happens when
+ *   rows were removed or a filter narrowed between paging. The way back is
+ *   offered rather than left to be deduced.
+ */
+function EmptyState({
+  filtered,
+  pastEnd,
+  onClear,
+  onFirstPage,
+}: {
+  filtered: boolean
+  pastEnd: boolean
+  onClear: () => void
+  onFirstPage: () => void
+}) {
+  if (pastEnd) {
     return (
       <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5">
-        <p className="text-sm font-semibold text-gray-900">No ideas here yet</p>
+        <p className="text-sm font-semibold text-gray-900">Nothing on this page</p>
         <p className="mt-1 text-sm leading-6 text-gray-600">
-          File the first one. It stays private to you until you widen its visibility.
+          There are ideas on an earlier page. Ideas change while you read.
         </p>
+        <button
+          type="button"
+          onClick={onFirstPage}
+          className="mt-3 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+        >
+          Back to the first page
+        </button>
+      </div>
+    )
+  }
+
+  if (filtered) {
+    return (
+      <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5">
+        <p className="text-sm font-semibold text-gray-900">Nothing matches those filters</p>
+        <p className="mt-1 text-sm leading-6 text-gray-600">
+          Ideas you can read exist, but not with this category, status and search together.
+        </p>
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-3 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+        >
+          Clear filters
+        </button>
       </div>
     )
   }
 
   return (
-    <ul className="space-y-3">
-      {ideas.map((idea) => {
-        const isMine = user?.id === idea.authorId
-        const isDraft = idea.status === 'DRAFT'
-        return (
-          <li key={idea.id} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="truncate text-sm font-semibold text-gray-900">{idea.title}</h3>
-                <p className="mt-1 line-clamp-2 text-sm text-gray-600">
-                  {idea.description || 'No description yet.'}
-                </p>
-              </div>
-              <span
-                className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(idea.status)}`}
-              >
-                {statusLabel(idea.status)}
-              </span>
-            </div>
-
-            {/*
-              What the state *means*, not just which state it is. Worth the
-              extra line for the two states where the next step is the author's
-              to take: a changes-requested idea says so here, rather than the
-              author having to infer it from a badge colour.
-            */}
-            {idea.status !== 'DRAFT' && (
-              <p className="mt-2 text-xs text-gray-500">{statusDescription(idea.status)}</p>
-            )}
-
-            <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
-              <div className="flex items-center gap-1">
-                <dt>Visibility</dt>
-                <dd className="font-medium text-gray-700">{visibilityLabel(idea)}</dd>
-              </div>
-              <div className="flex items-center gap-1">
-                <dt>Status</dt>
-                <dd className="font-medium text-gray-700">{statusLabel(idea.status)}</dd>
-              </div>
-              <div className="flex items-center gap-1">
-                <dt>Category</dt>
-                <dd className="font-medium text-gray-700">{idea.category?.name ?? 'None'}</dd>
-              </div>
-              {idea.submittedAt && (
-                <div className="flex items-center gap-1">
-                  <dt>Submitted on</dt>
-                  <dd className="font-medium text-gray-700">
-                    {new Date(idea.submittedAt).toLocaleDateString()}
-                  </dd>
-                </div>
-              )}
-            </dl>
-
-            {/*
-                Actions are rendered from `availableTransitions`, which the
-                backend computed for *this* viewer. So there is no client-side
-                rule saying "the author may submit" or "a reviewer may approve"
-                that could disagree with the server's, and an author who also
-                holds the Owner role is offered nothing on their own submitted
-                idea — because the server declined to allow it.
-
-                Rendering nothing when the list is empty is a courtesy, not a
-                control: the server refuses an unlisted move whether or not a
-                button was drawn.
-              */}
-            {(isMine && isDraft) || idea.availableTransitions.length > 0 ? (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {isMine && isDraft && (
-                  <button
-                    type="button"
-                    onClick={() => onEdit(idea)}
-                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
-                  >
-                    Edit draft
-                  </button>
-                )}
-                {idea.availableTransitions.map((target) => {
-                  const label = transitionLabel(target)
-                  if (label === null) return null
-                  return (
-                    <button
-                      key={target}
-                      type="button"
-                      disabled={submittingIdeaId === idea.id}
-                      onClick={() => onTransition(idea, target)}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {submittingIdeaId === idea.id && submittingTarget === target && (
-                        <SpinnerIcon className="h-3.5 w-3.5 motion-safe:animate-spin" />
-                      )}
-                      {label}
-                    </button>
-                  )
-                })}
-              </div>
-            ) : null}
-          </li>
-        )
-      })}
-    </ul>
+    <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5">
+      <p className="text-sm font-semibold text-gray-900">No ideas here yet</p>
+      <p className="mt-1 text-sm leading-6 text-gray-600">
+        File the first one. It stays private to you until you widen its visibility.
+      </p>
+    </div>
   )
 }
 

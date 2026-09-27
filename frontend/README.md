@@ -277,8 +277,9 @@ Future business domains each get their own route module under
 What exists is Identity (sign in, sign up, Google sign-in, session lifecycle,
 password reset and email confirmation), the organizations tier (create an
 organization, switch between them, see members and roles), and the first
-Ideas slice (file an idea, edit your own draft, submit it for review, and
-move it through review).
+Ideas slice (file an idea, edit your own draft, submit it for review, move it
+through review, and browse ideas by category, search and status over a paged
+list).
 Reviews, projects, notifications, comments, voting and everything else in that
 direction do not exist yet. Within Identity, what is still missing is an
 authenticated Google-account-linking flow: Google sign-in authenticates or
@@ -299,12 +300,13 @@ side, because the backend is the authority for both:
 
 Two things the Ideas area deliberately does **not** do on this side:
 
-- It does not filter anything. Every read goes through a query the backend has
-  already applied the tenant and visibility rules to, and the client offers no
-  filter argument that could widen the result — a client-side filter over
-  ideas would be a client-side control over what somebody may read, which is
-  the one thing a browser cannot be trusted with. The frontend narrows what it
-  *shows* (a "Your drafts" heading, a sort) and never what it is *given*.
+- It does not filter anything *for itself*. S2-004 added a category, a status
+  and a search, and every one of them is sent to the backend and applied
+  there: the client filters nothing it is given, and the `IdeaFilters` type has
+  no `visibility` and no `authorId` field to send, because a filter that can
+  widen a result is a client-side control over what somebody may read. The
+  frontend still arranges what it shows — the status badge, the pager — and
+  never decides what it is shown.
 - It does not decide who may edit, submit, review or approve. The buttons on
   an idea are rendered from `idea.availableTransitions`, which the backend
   computed *for this viewer* from the same transition matrix that enforces the
@@ -318,6 +320,18 @@ Two things the Ideas area deliberately does **not** do on this side:
   each transition come from one vocabulary table in
   `features/ideas/utils/lifecycle.ts`, and a state the backend reports that
   table has never heard of renders as its raw name rather than being hidden.
+  The status *filter* offers the same seven names for the same reason: the
+  union is the contract, and a client that only listed the two states Sprint 2
+  could produce would need editing the moment review did.
+- It does not do its own paging. The page controls are driven entirely by the
+  backend's `pageInfo` — `hasNextPage`, `hasPreviousPage`, `totalCount` — and
+  move by the `limit` the server applied rather than by a page index
+  invented here, so a clamped page size cannot produce a gap. Nothing on this
+  side knows what the maximum page size is, because nothing needs to.
+- It does not search on every keystroke. The box is debounced at 300ms, and a
+  term that is typed and then replaced is never sent at all — rather than
+  being sent and then overwritten, which is what would leave the list showing
+  results for a word that is no longer in the box.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no
