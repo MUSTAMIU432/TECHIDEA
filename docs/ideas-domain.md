@@ -83,6 +83,16 @@ The table is `ideas.lifecycle.TRANSITIONS`: `(from, to) -> required actor`.
 It is the whole lifecycle — anything not listed is not a transition, and
 `transition_idea` refuses it.
 
+**Review-owned moves (S3-004).** Four of the reviewer's pairs —
+`SUBMITTED → UNDER_REVIEW` and `UNDER_REVIEW → CHANGES_REQUESTED | APPROVED |
+REJECTED` — are `lifecycle.REVIEW_OWNED_TRANSITIONS`. `transition_idea`
+refuses them (after the actor check, so only a would-be reviewer learns why)
+and `availableTransitions` never lists them; they are made only by the
+Reviews domain's `startReview` / `completeReview`, through
+`lifecycle.apply_review_transition`, in the same transaction as the `Review`
+record. The matrix itself is unchanged. See
+[`reviews-domain.md`](reviews-domain.md) §5.
+
 | From | To | Actor |
 | ---- | -- | ----- |
 | `DRAFT` | `SUBMITTED` | author |

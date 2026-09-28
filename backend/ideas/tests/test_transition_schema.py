@@ -234,34 +234,49 @@ def _introspect_type_fields(gql, type_name: str) -> set[str]:
 
 @pytest.mark.django_db
 class TestTransitionIdeaMutation:
-    def test_a_reviewer_starts_a_review(self, gql, world):
-        idea = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
+    @pytest.mark.parametrize(
+        ('from_status', 'to'),
+        [
+            (Idea.Status.SUBMITTED, 'UNDER_REVIEW'),
+            (Idea.Status.UNDER_REVIEW, 'CHANGES_REQUESTED'),
+            (Idea.Status.UNDER_REVIEW, 'APPROVED'),
+            (Idea.Status.UNDER_REVIEW, 'REJECTED'),
+        ],
+    )
+    def test_a_reviewer_cannot_make_a_review_move_through_it(self, gql, world, from_status, to):
+        """
+        S3-004: starting and deciding a review are `startReview` /
+        `completeReview`, which leave a `Review`. Through `transitionIdea` they
+        would leave none, so they are refused here - as a payload, with the
+        idea unmoved - even for a reviewer who could otherwise make them.
+        """
+        idea = make_idea(world['organization'], world['author'], status=from_status)
 
         result = run(
             gql,
             TRANSITION,
             'transitionIdea',
-            {'id': str(idea.pk), 'to': 'UNDER_REVIEW'},
+            {'id': str(idea.pk), 'to': to},
             bearer=world['reviewer_token'],
         )
 
-        assert result['success'] is True
-        assert result['idea']['status'] == 'UNDER_REVIEW'
-        assert Idea.objects.get(pk=idea.pk).status == Idea.Status.UNDER_REVIEW
+        assert result['success'] is False
+        assert 'review workspace' in result['message']
+        assert Idea.objects.get(pk=idea.pk).status == from_status
 
-    def test_a_reviewer_approves(self, gql, world):
-        idea = make_idea(world['organization'], world['author'], status=Idea.Status.UNDER_REVIEW)
+    def test_a_reviewer_hands_off_an_approved_idea(self, gql, world):
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.APPROVED)
 
         result = run(
             gql,
             TRANSITION,
             'transitionIdea',
-            {'id': str(idea.pk), 'to': 'APPROVED'},
+            {'id': str(idea.pk), 'to': 'AUTOMATION_PROPOSAL'},
             bearer=world['reviewer_token'],
         )
 
         assert result['success'] is True
-        assert result['idea']['status'] == 'APPROVED'
+        assert result['idea']['status'] == 'AUTOMATION_PROPOSAL'
 
     def test_the_author_submits_a_draft(self, gql, world):
         idea = make_idea(world['organization'], world['author'])
@@ -454,7 +469,9 @@ class TestAvailableTransitionsField:
         as_author = run(gql, IDEA_QUERY, 'idea', {'id': str(idea.pk)}, bearer=world['author_token'])
         as_member = run(gql, IDEA_QUERY, 'idea', {'id': str(idea.pk)}, bearer=world['member_token'])
 
-        assert as_reviewer['availableTransitions'] == ['UNDER_REVIEW']
+        # Starting a review is offered through `viewerCanStartReview` since
+        # S3-004, not as a transition `transitionIdea` would refuse.
+        assert as_reviewer['availableTransitions'] == []
         # The author holds the Owner role and is still offered nothing on their
         # own submitted idea.
         assert as_author['availableTransitions'] == []
@@ -476,16 +493,16 @@ class TestAvailableTransitionsField:
     def test_a_list_reports_the_viewers_moves_per_item(self, gql, world):
         """
         Per item, not per request: a reviewer looking at a list of somebody
-        else's submitted ideas is offered the review move on each, and offered
+        else's approved ideas is offered the hand-off on each, and offered
         nothing on their own.
         """
-        theirs = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
-        mine = make_idea(world['organization'], world['reviewer'], status=Idea.Status.SUBMITTED)
+        theirs = make_idea(world['organization'], world['author'], status=Idea.Status.APPROVED)
+        mine = make_idea(world['organization'], world['reviewer'], status=Idea.Status.APPROVED)
 
         page = run(gql, IDEAS_QUERY, 'ideas', bearer=world['reviewer_token'])
         by_id = {idea['id']: idea['availableTransitions'] for idea in page['items']}
 
-        assert by_id[str(theirs.pk)] == ['UNDER_REVIEW']
+        assert by_id[str(theirs.pk)] == ['AUTOMATION_PROPOSAL']
         assert by_id[str(mine.pk)] == []
 
 
@@ -495,19 +512,19 @@ class TestAvailableTransitionsField:
 @pytest.mark.django_db
 class TestPayloadShape:
     def test_a_success_reports_the_state_and_where_it_went_next(self, gql, world):
-        idea = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
+        idea = make_idea(world['organization'], world['author'])
 
         result = run(
             gql,
             TRANSITION,
             'transitionIdea',
-            {'id': str(idea.pk), 'to': 'UNDER_REVIEW'},
-            bearer=world['reviewer_token'],
+            {'id': str(idea.pk), 'to': 'SUBMITTED'},
+            bearer=world['author_token'],
         )
 
         assert result['success'] is True
         assert result['field'] is None
-        assert result['message'] == 'Idea moved to Under review.'
+        assert result['message'] == 'Idea moved to Submitted.'
 
     def test_a_refusal_carries_no_field(self, gql, world):
         """

@@ -27,10 +27,10 @@ What the suite is organised around, in the order the failures would hurt:
 import threading
 
 import pytest
-from django.db import connections
+from django.db import connections, transaction
 from django.utils import timezone
 
-from ideas import lifecycle, services
+from ideas import lifecycle, selectors, services
 from ideas.models import Category, Idea
 from identity.models import User
 from organizations.models import Membership, MembershipRole, Role
@@ -118,6 +118,20 @@ def move(idea, status):
     return idea
 
 
+def review_move(user, idea_id, target):
+    """
+    Make a review-owned move the only way it can now be made (S3-004): on a
+    locked idea, inside a transaction, through `apply_review_transition`.
+    `reviews.services` is the production caller and writes the `Review` in the
+    same transaction; this exercises the lifecycle half on its own.
+    """
+    with transaction.atomic():
+        idea = selectors.get_idea_for_update(user, idea_id)
+        if idea is None:
+            raise services.IdeaError('Idea is unavailable.')
+        return lifecycle.apply_review_transition(user, idea, target)
+
+
 @pytest.fixture
 def world():
     """
@@ -202,16 +216,14 @@ class TestValidTransitions:
     def test_submitted_to_under_review(self, world):
         idea = move(make_idea(world['organization'], world['author']), Idea.Status.SUBMITTED)
 
-        result = lifecycle.transition_idea(world['reviewer'], idea.pk, Idea.Status.UNDER_REVIEW)
+        result = review_move(world['reviewer'], idea.pk, Idea.Status.UNDER_REVIEW)
 
         assert result.status == Idea.Status.UNDER_REVIEW
 
     def test_under_review_to_changes_requested(self, world):
         idea = move(make_idea(world['organization'], world['author']), Idea.Status.UNDER_REVIEW)
 
-        result = lifecycle.transition_idea(
-            world['reviewer'], idea.pk, Idea.Status.CHANGES_REQUESTED
-        )
+        result = review_move(world['reviewer'], idea.pk, Idea.Status.CHANGES_REQUESTED)
 
         assert result.status == Idea.Status.CHANGES_REQUESTED
 
@@ -231,14 +243,14 @@ class TestValidTransitions:
     def test_under_review_to_approved(self, world):
         idea = move(make_idea(world['organization'], world['author']), Idea.Status.UNDER_REVIEW)
 
-        result = lifecycle.transition_idea(world['reviewer'], idea.pk, Idea.Status.APPROVED)
+        result = review_move(world['reviewer'], idea.pk, Idea.Status.APPROVED)
 
         assert result.status == Idea.Status.APPROVED
 
     def test_under_review_to_rejected(self, world):
         idea = move(make_idea(world['organization'], world['author']), Idea.Status.UNDER_REVIEW)
 
-        result = lifecycle.transition_idea(world['reviewer'], idea.pk, Idea.Status.REJECTED)
+        result = review_move(world['reviewer'], idea.pk, Idea.Status.REJECTED)
 
         assert result.status == Idea.Status.REJECTED
 
@@ -269,8 +281,60 @@ class TestValidTransitions:
             (world['reviewer'], Idea.Status.APPROVED),
             (world['reviewer'], Idea.Status.AUTOMATION_PROPOSAL),
         ):
-            lifecycle.transition_idea(actor, idea.pk, target)
+            current = Idea.objects.get(pk=idea.pk).status
+            if (current, target) in lifecycle.REVIEW_OWNED_TRANSITIONS:
+                review_move(actor, idea.pk, target)
+            else:
+                lifecycle.transition_idea(actor, idea.pk, target)
             assert Idea.objects.get(pk=idea.pk).status == target
+
+    def test_transition_idea_refuses_every_review_owned_move(self, world):
+        """
+        S3-004: a review move made through `transition_idea` would leave no
+        `Review`. So a reviewer who could otherwise make it is told where it is
+        made instead, and the idea does not move.
+        """
+        for from_status, target in sorted(lifecycle.REVIEW_OWNED_TRANSITIONS):
+            idea = move(make_idea(world['organization'], world['author']), from_status)
+
+            with pytest.raises(services.IdeaError) as exc_info:
+                lifecycle.transition_idea(world['reviewer'], idea.pk, target)
+
+            assert exc_info.value.message == lifecycle.REVIEW_OWNED_MESSAGE
+            assert Idea.objects.get(pk=idea.pk).status == from_status
+
+    def test_the_review_owned_moves_are_exactly_the_four_review_pairs(self):
+        assert {
+            (Idea.Status.SUBMITTED, Idea.Status.UNDER_REVIEW),
+            (Idea.Status.UNDER_REVIEW, Idea.Status.CHANGES_REQUESTED),
+            (Idea.Status.UNDER_REVIEW, Idea.Status.APPROVED),
+            (Idea.Status.UNDER_REVIEW, Idea.Status.REJECTED),
+        } == lifecycle.REVIEW_OWNED_TRANSITIONS
+        assert set(lifecycle.TRANSITIONS) >= lifecycle.REVIEW_OWNED_TRANSITIONS
+
+    # `transaction=True`: the default `django_db` wraps every test in a
+    # transaction, so "outside one" could not be observed without it.
+    @pytest.mark.django_db(transaction=True)
+    def test_apply_review_transition_refuses_outside_a_transaction(self, world):
+        idea = move(make_idea(world['organization'], world['author']), Idea.Status.SUBMITTED)
+
+        with pytest.raises(RuntimeError):
+            lifecycle.apply_review_transition(world['reviewer'], idea, Idea.Status.UNDER_REVIEW)
+
+    def test_apply_review_transition_applies_the_actor_rule(self, world):
+        idea = move(make_idea(world['organization'], world['author']), Idea.Status.SUBMITTED)
+
+        for actor in (world['author'], world['member']):
+            with pytest.raises(services.IdeaError) as exc_info:
+                review_move(actor, idea.pk, Idea.Status.UNDER_REVIEW)
+            assert 'not allowed' in exc_info.value.message
+
+    def test_apply_review_transition_refuses_a_non_review_move(self, world):
+        idea = move(make_idea(world['organization'], world['author']), Idea.Status.APPROVED)
+
+        with pytest.raises(services.IdeaError):
+            review_move(world['reviewer'], idea.pk, Idea.Status.AUTOMATION_PROPOSAL)
+        assert Idea.objects.get(pk=idea.pk).status == Idea.Status.APPROVED
 
     def test_submit_idea_still_goes_through_the_matrix(self, world):
         """
@@ -626,7 +690,11 @@ class TestSubmittedAtSemantics:
             Idea.Status.AUTOMATION_PROPOSAL,
         ):
             actor = world['author'] if target == Idea.Status.SUBMITTED else world['reviewer']
-            lifecycle.transition_idea(actor, idea.pk, target)
+            current = Idea.objects.get(pk=idea.pk).status
+            if (current, target) in lifecycle.REVIEW_OWNED_TRANSITIONS:
+                review_move(actor, idea.pk, target)
+            else:
+                lifecycle.transition_idea(actor, idea.pk, target)
             assert Idea.objects.get(pk=idea.pk).submitted_at == first, target
 
     def test_the_model_would_reject_an_inconsistent_row(self, world):
@@ -693,7 +761,9 @@ class TestAtomicity:
         def attempt(target):
             try:
                 barrier.wait(timeout=10)
-                lifecycle.transition_idea(world['reviewer'], idea.pk, target)
+                # The review path since S3-004; the same locked read as
+                # `transition_idea`, so the property under test is unchanged.
+                review_move(world['reviewer'], idea.pk, target)
             except Exception as exc:
                 # Recorded rather than raised: a thread's exception would not
                 # fail the test on its own, so the assertion below is what
@@ -735,22 +805,26 @@ class TestAvailableTransitions:
             Idea.Status.SUBMITTED
         ]
 
-    def test_a_reviewer_is_offered_the_review_moves_and_nothing_else(self, world):
+    def test_a_reviewer_is_offered_no_review_owned_move(self, world):
+        """
+        S3-004: starting and deciding a review are offered through the review
+        capability fields, not as generic transitions, so `transitionIdea` is
+        never offered a move it would refuse. The hand-off from `APPROVED` is
+        still a plain transition.
+        """
         submitted = move(make_idea(world['organization'], world['author']), Idea.Status.SUBMITTED)
         under_review = move(
             make_idea(world['organization'], world['author']), Idea.Status.UNDER_REVIEW
         )
+        approved = move(make_idea(world['organization'], world['author']), Idea.Status.APPROVED)
 
-        assert lifecycle.available_transitions(world['reviewer'], submitted) == [
-            Idea.Status.UNDER_REVIEW
+        assert lifecycle.available_transitions(world['reviewer'], submitted) == []
+        assert lifecycle.available_transitions(world['reviewer'], under_review) == []
+        assert lifecycle.available_transitions(world['reviewer'], approved) == [
+            Idea.Status.AUTOMATION_PROPOSAL
         ]
-        # In the model's own enum order, which is what `TARGET_STATUSES` walks -
-        # deterministic, and the same order the GraphQL enum is declared in.
-        assert lifecycle.available_transitions(world['reviewer'], under_review) == [
-            Idea.Status.CHANGES_REQUESTED,
-            Idea.Status.REJECTED,
-            Idea.Status.APPROVED,
-        ]
+        # The actor rule itself is unchanged: the reviewer *could* make them.
+        assert lifecycle.can_transition(world['reviewer'], submitted, Idea.Status.UNDER_REVIEW)
 
     def test_the_author_is_never_offered_a_review_move(self, world):
         """

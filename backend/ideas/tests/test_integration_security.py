@@ -548,8 +548,10 @@ def test_submitting_a_private_idea_does_not_make_it_reviewer_visible(client, wor
     queue = gql(client, ORG_IDEAS, {'org': a.organization.pk, 'status': 'SUBMITTED'}, reviewer)
     assert str(private.pk) not in {item['id'] for item in queue['organizationIdeas']['items']}
 
-    refused = gql(client, TRANSITION, {'id': private.pk, 'to': 'UNDER_REVIEW'}, reviewer)
-    assert refused['transitionIdea'] == {'success': False, 'message': 'Idea is unavailable.'}
+    # Starting a review is `startReview` since S3-004.
+    start = 'mutation($id: ID!) { startReview(ideaId: $id) { success message } }'
+    refused = gql(client, start, {'id': private.pk}, reviewer)
+    assert refused['startReview'] == {'success': False, 'message': 'Idea is unavailable.'}
     private.refresh_from_db()
     assert private.status == Idea.Status.SUBMITTED
     assert private.visibility == Idea.Visibility.PRIVATE
@@ -558,10 +560,15 @@ def test_submitting_a_private_idea_does_not_make_it_reviewer_visible(client, wor
     visible = make_idea(
         a.organization, a.author, Idea.Visibility.ORGANIZATION, status=Idea.Status.SUBMITTED
     )
-    offered = gql(client, IDEA, {'id': visible.pk}, reviewer)['idea']['availableTransitions']
-    assert offered == ['UNDER_REVIEW']
-    moved = gql(client, TRANSITION, {'id': visible.pk, 'to': 'UNDER_REVIEW'}, reviewer)
-    assert moved['transitionIdea']['success'] is True
+    offered = gql(
+        client,
+        'query($id: ID!) { idea(id: $id) { viewerCanStartReview } }',
+        {'id': visible.pk},
+        reviewer,
+    )['idea']['viewerCanStartReview']
+    assert offered is True
+    moved = gql(client, start, {'id': visible.pk}, reviewer)
+    assert moved['startReview']['success'] is True
 
 
 # --- 10. secondary resources go through the idea ---------------------------------------

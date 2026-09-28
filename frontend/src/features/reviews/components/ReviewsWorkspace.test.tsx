@@ -13,19 +13,24 @@ vi.mock('../api/reviewsApi', () => ({
   viewerCanReviewInRequest: vi.fn(),
   reviewQueueRequest: vi.fn(),
   ideaReviewsRequest: vi.fn(),
+  startReviewRequest: vi.fn(),
+  completeReviewRequest: vi.fn(),
 }))
 vi.mock('../../ideas/api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
   attachmentsRequest: vi.fn(async () => pageOf([])),
+  ideaRequest: vi.fn(),
 }))
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
 
-const { viewerCanReviewInRequest, reviewQueueRequest, ideaReviewsRequest } =
+const { viewerCanReviewInRequest, reviewQueueRequest, ideaReviewsRequest, startReviewRequest } =
   await import('../api/reviewsApi')
+const { ideaRequest } = await import('../../ideas/api/ideasApi')
 const canReviewMock = vi.mocked(viewerCanReviewInRequest)
 const queueMock = vi.mocked(reviewQueueRequest)
 const historyMock = vi.mocked(ideaReviewsRequest)
+const startMock = vi.mocked(startReviewRequest)
 
 function idea(overrides: Partial<Idea> = {}): Idea {
   return {
@@ -201,7 +206,7 @@ describe('ReviewsWorkspace', () => {
 
     const context = screen.getByRole('article')
     expect(within(context).getByText('We key every invoice in by hand.')).toBeInTheDocument()
-    expect(within(context).getByText(/You can review this idea/)).toBeInTheDocument()
+    expect(within(context).getByRole('button', { name: 'Start review' })).toBeInTheDocument()
     const history = await within(context).findByRole('list', { name: 'Review history' })
     expect(within(history).getByText('Add the monthly volume.')).toBeInTheDocument()
     expect(within(history).getByText('Changes requested')).toBeInTheDocument()
@@ -210,12 +215,87 @@ describe('ReviewsWorkspace', () => {
     expect(historyMock).toHaveBeenCalledWith('1')
   })
 
-  it('offers no decision controls - claiming and deciding are not part of this workspace', async () => {
+  it('offers no Start review, and no decision form, where the server says not', async () => {
+    queueMock.mockResolvedValue(pageOf([idea({ viewerCanStartReview: false })]))
+
     renderWorkspace()
     fireEvent.click(await within(await queueList()).findByRole('button', { name: /Automate/ }))
 
-    for (const name of [/start review/i, /approve/i, /reject/i, /request changes/i]) {
-      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
-    }
+    expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('form', { name: 'Review decision' })).not.toBeInTheDocument()
+  })
+
+  it('starts a review and shows the server’s idea with the decision form', async () => {
+    startMock.mockResolvedValue({
+      success: true,
+      message: 'Review started.',
+      field: null,
+      review: review({ id: '12', decision: null, completedAt: null }),
+      idea: idea({
+        status: 'UNDER_REVIEW',
+        viewerCanStartReview: false,
+        viewerActiveReviewId: '12',
+      }),
+    })
+
+    renderWorkspace()
+    fireEvent.click(await within(await queueList()).findByRole('button', { name: /Automate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }))
+
+    expect(await screen.findByRole('form', { name: 'Review decision' })).toBeInTheDocument()
+    expect(screen.getByText('Review started.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
+    expect(startMock).toHaveBeenCalledWith('1')
+    // The idea is no longer waiting, so the queue is asked again.
+    await waitFor(() => expect(queueMock.mock.calls.length).toBeGreaterThan(1))
+  })
+
+  it('shows the server’s refusal when somebody else started first', async () => {
+    startMock.mockResolvedValue({
+      success: false,
+      message: 'This idea is not waiting for review.',
+      field: null,
+      review: null,
+      idea: null,
+    })
+
+    renderWorkspace()
+    fireEvent.click(await within(await queueList()).findByRole('button', { name: /Automate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('not waiting for review')
+    expect(screen.queryByRole('form', { name: 'Review decision' })).not.toBeInTheDocument()
+  })
+
+  it('reports a failed start as a transport failure', async () => {
+    startMock.mockRejectedValue(new Error('offline'))
+
+    renderWorkspace()
+    fireEvent.click(await within(await queueList()).findByRole('button', { name: /Automate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('review was not started')
+  })
+
+  it('reopens an in-progress review from ?idea=', async () => {
+    vi.mocked(ideaRequest).mockResolvedValue(
+      idea({
+        id: '5',
+        title: 'Being reviewed',
+        status: 'UNDER_REVIEW',
+        viewerCanStartReview: false,
+        viewerActiveReviewId: '12',
+      }),
+    )
+
+    render(
+      <MemoryRouter initialEntries={['/app/reviews?idea=5']}>
+        <ReviewsWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Being reviewed' })).toBeInTheDocument()
+    expect(screen.getByRole('form', { name: 'Review decision' })).toBeInTheDocument()
+    expect(ideaRequest).toHaveBeenCalledWith('5')
   })
 })

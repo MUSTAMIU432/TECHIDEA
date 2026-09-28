@@ -488,8 +488,11 @@ inconsistent apart.
 `ideas.lifecycle.TRANSITIONS` maps `(from, to)` to the actor that may make
 that move — seven pairs, `DRAFT → SUBMITTED` and `CHANGES_REQUESTED →
 SUBMITTED` for the author, the five review moves for a reviewer. `transitionIdea`
-is the only mutation that changes a status, no write input has a `status`
-field, and `updateIdea` refuses anything past `DRAFT`, so a client cannot mark
+changes a status for every move except the four a review makes (start,
+request changes, approve, reject): since S3-004 those are refused there and
+made only by `startReview` / `completeReview`, which write the `Review` in the
+same transaction through `ideas.lifecycle.apply_review_transition`. No write
+input has a `status` field, and `updateIdea` refuses anything past `DRAFT`, so a client cannot mark
 its own idea reviewed or approved by any request shape. `IdeaType.availableTransitions`
 reports the viewer's own moves *from the same table that enforces them*, so
 the UI cannot offer something the server would refuse — or drift from it.

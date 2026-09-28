@@ -12,8 +12,15 @@ their constraints (§3, §17), and `reviews.eligibility` (`can_review`,
 `can_start_review`). S3-003 is implemented: the read side of §13 and §14
 (`reviewQueue`, `ideaReviews`, `viewerCanReviewIn`, the two `IdeaType`
 capability fields, the `/app/reviews` workspace and the review history on
-idea cards). Claiming, decisions, changes-requested, notifications and audit
-are not implemented yet. §1 describes the code as it was before S3-002.
+idea cards). S3-004 is implemented: `startReview` / `completeReview`
+(`reviews/services.py`), the review-owned moves closed on `transitionIdea`
+and opened through `ideas.lifecycle.apply_review_transition` (§5.1), and the
+decision form in the workspace. As built, `completeReview` takes `ideaId` as
+well as `reviewId` (the review must belong to that idea), and the feedback
+rule (D-3) is enforced by the service rather than a database CHECK. Not
+implemented yet: the take-over of a review whose reviewer lost eligibility
+(§5.3, D-2), changes-requested editing and resubmission, notifications and
+audit. §1 describes the code as it was before S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
 organization bootstrap and through Django admin (staff). No self-service
@@ -613,7 +620,7 @@ from "nothing to review".
 | Mutation | Input | Payload |
 | -------- | ----- | ------- |
 | `startReview(ideaId: ID!)` | none | `ReviewPayload { success, message, field, review, idea }` |
-| `completeReview(input: CompleteReviewInput!)` | `reviewId: ID!`, `decision: ReviewDecision!`, `feedback: String!`, `assessments: [CriterionAssessmentInput!]!` | `ReviewPayload` |
+| `completeReview(input: CompleteReviewInput!)` | `ideaId: ID!`, `reviewId: ID!`, `decision: ReviewDecision!`, `feedback: String`, `assessments: [CriterionAssessmentInput!]!` | `ReviewPayload` |
 
 **Types**
 

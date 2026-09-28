@@ -291,11 +291,10 @@ class TestIdeaReviews:
         assert 'errors' in body
         assert "Cannot query field 'review'" in body['errors'][0]['message']
 
-    @pytest.mark.parametrize(
-        'mutation',
-        ['startReview', 'completeReview', 'claimReview', 'approveIdea', 'rejectIdea'],
-    )
-    def test_no_review_mutation_exists_yet(self, gql, world, mutation):
+    # `startReview` and `completeReview` exist since S3-004 and are tested in
+    # `test_operations_schema.py`; no other review mutation does.
+    @pytest.mark.parametrize('mutation', ['claimReview', 'approveIdea', 'rejectIdea'])
+    def test_no_other_review_mutation_exists(self, gql, world, mutation):
         body = gql(f'mutation {{ {mutation}(ideaId: "1") {{ success }} }}', user=world['reviewer'])
 
         assert 'errors' in body

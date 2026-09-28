@@ -48,14 +48,19 @@ export function IdeaReviewSection({
         </button>
         {idea.viewerCanStartReview && (
           <Link
-            to="/app/reviews"
+            to={`/app/reviews?idea=${encodeURIComponent(idea.id)}`}
             className="text-xs font-semibold text-brand-700 hover:text-brand-800 hover:underline"
           >
-            Waiting for review — open the review queue
+            Waiting for review — open it in the review workspace
           </Link>
         )}
         {idea.viewerActiveReviewId !== null && (
-          <span className="text-xs font-medium text-amber-800">You are reviewing this idea.</span>
+          <Link
+            to={`/app/reviews?idea=${encodeURIComponent(idea.id)}`}
+            className="text-xs font-semibold text-amber-800 hover:underline"
+          >
+            You are reviewing this idea — continue review
+          </Link>
         )}
       </div>
       {open && (

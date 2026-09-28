@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ideaReviewsRequest, reviewQueueRequest, viewerCanReviewInRequest } from './reviewsApi'
+import {
+  completeReviewRequest,
+  ideaReviewsRequest,
+  reviewQueueRequest,
+  startReviewRequest,
+  viewerCanReviewInRequest,
+} from './reviewsApi'
 
 /**
  * The Reviews documents (S3-003), asserted on the wire: what is sent, and
@@ -76,6 +82,36 @@ describe('reviewsApi', () => {
     expect(request.query).toContain('ideaReviews(ideaId: $ideaId)')
     expect(request.variables).toEqual({ ideaId: '1' })
     expect(result).toEqual(reviews)
+  })
+
+  const REFUSED = { success: false, message: 'No.', field: null, review: null, idea: null }
+
+  it('starts a review by the idea id and hands back the payload', async () => {
+    const fetchMock = stubFetch({ startReview: REFUSED })
+
+    await expect(startReviewRequest('1')).resolves.toEqual(REFUSED)
+
+    const request = sent(fetchMock)
+    expect(request.query).toContain('startReview(ideaId: $ideaId)')
+    expect(request.query).toContain('viewerActiveReviewId')
+    expect(request.variables).toEqual({ ideaId: '1' })
+  })
+
+  it('completes a review with every assessment in one input', async () => {
+    const fetchMock = stubFetch({ completeReview: REFUSED })
+    const input = {
+      ideaId: '1',
+      reviewId: '12',
+      decision: 'APPROVED' as const,
+      feedback: '',
+      assessments: [{ criterion: 'EVIDENCE' as const, rating: 'MEETS' as const, note: '' }],
+    }
+
+    await completeReviewRequest(input)
+
+    const request = sent(fetchMock)
+    expect(request.query).toContain('completeReview(input: $input)')
+    expect(request.variables).toEqual({ input })
   })
 
   it('asks whether the viewer reviews in an organization', async () => {

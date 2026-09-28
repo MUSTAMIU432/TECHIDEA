@@ -97,6 +97,23 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     (Idea.Status.APPROVED, Idea.Status.AUTOMATION_PROPOSAL): REVIEWER,
 }
 
+# The moves a review makes (S3-004). Starting a review and deciding one are
+# *review operations*: each must leave a `Review` record, written in the same
+# transaction as the status change. So these pairs are refused by the public
+# `transition_idea` and are reachable only through `apply_review_transition`,
+# which the Reviews domain calls inside that transaction. The matrix above is
+# unchanged - these are still the lifecycle's moves and still need a reviewer;
+# what changes is that they can no longer be made without a review.
+# `APPROVED -> AUTOMATION_PROPOSAL` is not here: no review is open by then.
+REVIEW_OWNED_TRANSITIONS = frozenset(
+    {
+        (Idea.Status.SUBMITTED, Idea.Status.UNDER_REVIEW),
+        (Idea.Status.UNDER_REVIEW, Idea.Status.CHANGES_REQUESTED),
+        (Idea.Status.UNDER_REVIEW, Idea.Status.APPROVED),
+        (Idea.Status.UNDER_REVIEW, Idea.Status.REJECTED),
+    }
+)
+
 # Every status a client may *name* as a target. All of them are accepted here
 # and then checked against the matrix, so an unreachable target is refused by
 # the same code path as an illegal pair - which means the error can say which
@@ -243,8 +260,16 @@ def available_transitions(user: User | None, idea: Idea) -> list[str]:
     accept. A convenience, never a control: the same matrix is enforced again
     inside `transition_idea`, and a client that ignores this and posts a
     different target gets the refusal it would have got anyway.
+
+    Review-owned moves are never listed: `transitionIdea` refuses them, and a
+    client offers them from the review capability fields instead.
     """
-    return [to_status for to_status in TARGET_STATUSES if can_transition(user, idea, to_status)]
+    return [
+        to_status
+        for to_status in TARGET_STATUSES
+        if (idea.status, to_status) not in REVIEW_OWNED_TRANSITIONS
+        and can_transition(user, idea, to_status)
+    ]
 
 
 def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
@@ -300,6 +325,11 @@ def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
         ):
             raise IdeaError('You are not allowed to make that change to this idea.')
 
+        # After the actor check, so only somebody who could have made the move
+        # learns that it is made elsewhere.
+        if (idea.status, normalized_target) in REVIEW_OWNED_TRANSITIONS:
+            raise IdeaError(REVIEW_OWNED_MESSAGE)
+
         if (idea.status, normalized_target) not in TRANSITIONS:
             raise _illegal_transition_error(idea, normalized_target)
 
@@ -318,4 +348,40 @@ def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
         # other write.
         idea.save()
 
+    return idea
+
+
+REVIEW_OWNED_MESSAGE = (
+    'Reviews are started and decided in the review workspace, not by changing the status directly.'
+)
+
+
+def apply_review_transition(user: User, idea: Idea, to_status: str) -> Idea:
+    """
+    Make one review-owned move on an idea the caller has already locked.
+
+    The only way to reach the pairs in `REVIEW_OWNED_TRANSITIONS`, and it has
+    exactly one caller: `reviews.services`, which writes the `Review` record in
+    the same transaction. It opens no transaction of its own and refuses to run
+    outside one, because its whole contract is "the review and the status
+    commit together or not at all" - the caller's transaction is that contract.
+
+    `idea` must have been read with `selectors.get_idea_for_update` inside the
+    caller's transaction, so the status checked here is the locked one. The
+    rules are the same as `transition_idea`'s: an active membership, the
+    REVIEWER actor rule (which refuses the author), and a pair in the matrix.
+    """
+    if not transaction.get_connection().in_atomic_block:
+        raise RuntimeError('apply_review_transition must run inside a transaction.')
+
+    normalized_target = str(to_status or '').strip().lower()
+    if (idea.status, normalized_target) not in REVIEW_OWNED_TRANSITIONS:
+        raise _illegal_transition_error(idea, normalized_target)
+
+    membership = _require_membership(user, idea.organization_id)
+    if not _actor_may(user, idea, membership, normalized_target):
+        raise IdeaError('You are not allowed to make that change to this idea.')
+
+    idea.status = normalized_target
+    idea.save()
     return idea

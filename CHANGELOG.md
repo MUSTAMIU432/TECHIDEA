@@ -62,6 +62,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     convention, not the `page`/`pageSize` the S3-001 table named; the Ideas
     GraphQL adapter (not the Ideas domain) reads Reviews for the capability
     fields.
+- S3-004: Start review and complete review.
+  - **`startReview(ideaId)`** — one transaction: lock the idea, re-check
+    eligibility on the locked row, require `SUBMITTED`, open the next review
+    round with a snapshot of the idea, and move it to `UNDER_REVIEW`. Two
+    reviewers starting at once produce one review and one refusal (row lock;
+    the one-open-review constraint is the backstop).
+  - **`completeReview(input)`** — one transaction: lock the idea then the
+    review, require the caller's own open review of that idea, record all five
+    criterion assessments (exactly once each, categorical, notes allowed),
+    the feedback (required for changes requested and rejected) and the
+    decision, set `completed_at`, and move the idea to the decided status. A
+    failure at any step rolls all of it back; a completed review is refused.
+  - **The old path is closed** — `transitionIdea` refuses the four
+    review-owned moves and `availableTransitions` no longer offers them, so
+    every review decision leaves a `Review`. The lifecycle stays the only
+    writer of `Idea.status`, via `lifecycle.apply_review_transition`.
+    `APPROVED → AUTOMATION_PROPOSAL` is unchanged.
+  - **Frontend** — Start review in the review workspace, the decision form
+    (five criteria with rating and note, feedback, decision, client checks
+    mirroring the server's), reconciliation from the server's answer, and
+    `/app/reviews?idea=<id>` to continue a review from an idea card.
+  - Existing Ideas tests that made review moves through `transitionIdea` now
+    make them through the review path or assert the refusal.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

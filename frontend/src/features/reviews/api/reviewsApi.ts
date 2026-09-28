@@ -1,16 +1,17 @@
 /**
- * GraphQL operations for the Reviews domain (S3-003): read-only.
+ * GraphQL operations for the Reviews domain: the reads (S3-003) and the two
+ * review operations, start and complete (S3-004).
  *
  * Every document the review workspace sends lives here, in the same shape as
  * `ideasApi`. Nothing here decides who may review what: the queue, the history
  * and the capability flags are all answered by the server for the signed-in
  * user, and an answer the user is not entitled to comes back empty rather
- * than as an error. There are no mutations yet: claiming a review and
- * recording a decision arrive in S3-004.
+ * than as an error. The mutations answer with a `(success, message, field)`
+ * payload: a refusal is data to show, not an exception.
  */
 
 import { graphqlClient } from '../../../graphql/client'
-import { IDEA_FIELDS, PAGE_INFO_FIELDS, type IdeaPage } from '../../ideas/api/ideasApi'
+import { IDEA_FIELDS, PAGE_INFO_FIELDS, type Idea, type IdeaPage } from '../../ideas/api/ideasApi'
 
 export type ReviewDecision = 'CHANGES_REQUESTED' | 'APPROVED' | 'REJECTED'
 
@@ -118,4 +119,90 @@ export async function viewerCanReviewInRequest(organizationId: string): Promise<
     { organizationId },
   )
   return data.viewerCanReviewIn
+}
+
+// --- operations (S3-004) ---------------------------------------------------
+
+const REVIEW_FIELDS = `
+  id
+  ideaId
+  round
+  reviewerId
+  decision
+  feedback
+  createdAt
+  completedAt
+  submissionSnapshot
+  assessments { criterion rating note }
+`
+
+/**
+ * The payload both operations answer with. On success `review` is the review
+ * as its reviewer now sees it and `idea` is the idea in its new state, so the
+ * client reconciles from the answer rather than guessing.
+ */
+export interface ReviewMutationResult {
+  success: boolean
+  message: string
+  field: string | null
+  review: Review | null
+  idea: Idea | null
+}
+
+export interface CriterionAssessmentInput {
+  criterion: ReviewCriterion
+  rating: CriterionRating
+  note: string
+}
+
+export interface CompleteReviewInput {
+  ideaId: string
+  reviewId: string
+  decision: ReviewDecision
+  feedback: string
+  assessments: CriterionAssessmentInput[]
+}
+
+const START_REVIEW_MUTATION = `
+  mutation StartReview($ideaId: ID!) {
+    startReview(ideaId: $ideaId) {
+      success
+      message
+      field
+      review { ${REVIEW_FIELDS} }
+      idea { ${IDEA_FIELDS} }
+    }
+  }
+`
+
+const COMPLETE_REVIEW_MUTATION = `
+  mutation CompleteReview($input: CompleteReviewInput!) {
+    completeReview(input: $input) {
+      success
+      message
+      field
+      review { ${REVIEW_FIELDS} }
+      idea { ${IDEA_FIELDS} }
+    }
+  }
+`
+
+/** Start reviewing a submitted idea. The server decides whether this viewer may. */
+export async function startReviewRequest(ideaId: string): Promise<ReviewMutationResult> {
+  const data = await graphqlClient.request<{ startReview: ReviewMutationResult }>(
+    START_REVIEW_MUTATION,
+    { ideaId },
+  )
+  return data.startReview
+}
+
+/** Record the decision on the viewer's own open review. */
+export async function completeReviewRequest(
+  input: CompleteReviewInput,
+): Promise<ReviewMutationResult> {
+  const data = await graphqlClient.request<{ completeReview: ReviewMutationResult }>(
+    COMPLETE_REVIEW_MUTATION,
+    { input },
+  )
+  return data.completeReview
 }

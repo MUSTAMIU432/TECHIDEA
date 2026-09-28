@@ -260,14 +260,14 @@ class TestAgreesWithTheLifecycle:
     have made these moves.
     """
 
-    def test_a_reviewer_role_holder_can_make_the_reviewer_moves(self, world):
-        idea = lifecycle.transition_idea(
-            world['reviewer'], world['idea'].pk, Idea.Status.UNDER_REVIEW
-        )
-        assert idea.status == Idea.Status.UNDER_REVIEW
+    def test_a_reviewer_role_holder_can_start_a_review(self, world):
+        # Through the review operation since S3-004; `transitionIdea` refuses it.
+        from reviews.services import start_review
 
-        idea = lifecycle.transition_idea(world['reviewer'], idea.pk, Idea.Status.APPROVED)
-        assert idea.status == Idea.Status.APPROVED
+        start_review(world['reviewer'], world['idea'].pk)
+
+        world['idea'].refresh_from_db()
+        assert world['idea'].status == Idea.Status.UNDER_REVIEW
 
     @pytest.mark.parametrize('who', ['member', 'author', 'globex_reviewer', 'globex_owner'])
     def test_the_ineligible_are_refused_by_the_lifecycle_too(self, world, who):
@@ -277,9 +277,9 @@ class TestAgreesWithTheLifecycle:
             lifecycle.transition_idea(world[who], world['idea'].pk, Idea.Status.UNDER_REVIEW)
 
     @pytest.mark.parametrize('who', ['reviewer', 'acme_owner', 'member', 'author'])
-    def test_available_transitions_match_eligibility(self, world, who):
-        offered = Idea.Status.UNDER_REVIEW in lifecycle.available_transitions(
-            world[who], world['idea']
-        )
+    def test_the_lifecycle_actor_rule_matches_eligibility(self, world, who):
+        # `can_transition` is the actor rule alone; review-owned moves are no
+        # longer *offered* as transitions (S3-004), but the rule must agree.
+        allowed = lifecycle.can_transition(world[who], world['idea'], Idea.Status.UNDER_REVIEW)
 
-        assert offered is can_start_review(world[who], world['idea'])
+        assert allowed is can_start_review(world[who], world['idea'])

@@ -20,6 +20,7 @@ from identity.schema import Mutation as IdentityMutation
 from identity.schema import Query as IdentityQuery
 from organizations.schema import Mutation as OrganizationsMutation
 from organizations.schema import Query as OrganizationsQuery
+from reviews.schema import Mutation as ReviewsMutation
 from reviews.schema import Query as ReviewsQuery
 
 
@@ -48,7 +49,7 @@ class Query(IdentityQuery, OrganizationsQuery, IdeasQuery, ReviewsQuery):
 
 
 @strawberry.type
-class Mutation(IdentityMutation, OrganizationsMutation, IdeasMutation):
+class Mutation(IdentityMutation, OrganizationsMutation, IdeasMutation, ReviewsMutation):
     @strawberry.mutation(
         description=('Infrastructure check: echoes the input to prove the mutation root resolves.')
     )

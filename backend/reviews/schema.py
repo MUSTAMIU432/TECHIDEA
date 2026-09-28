@@ -1,10 +1,12 @@
 """
-The Reviews GraphQL adapter (S3-003): read-only.
+The Reviews GraphQL adapter (S3-003 reads, S3-004 operations).
 
-The same shape as `ideas/schema.py`: types with `from_model`, resolvers that
-only move data between the schema and `reviews/selectors.py` /
-`reviews/eligibility.py`, and no rule decided here. There are no mutations
-yet: claiming a review and recording a decision are S3-004.
+The same shape as `ideas/schema.py`: types with `from_model`, payloads
+carrying `(success, message, field)`, and resolvers that only move data
+between the schema and `reviews/selectors.py` / `reviews/eligibility.py` /
+`reviews/services.py`, with no rule decided here. The two mutations,
+`startReview` and `completeReview`, are the only way to make the review moves
+of the idea lifecycle; `transitionIdea` refuses them.
 
 What is exposed, and what is not
 --------------------------------
@@ -26,7 +28,7 @@ import strawberry
 from strawberry.scalars import JSON
 
 from ideas.schema import IdeaPage, IdeaType, PageInfo
-from reviews import eligibility, selectors
+from reviews import eligibility, selectors, services
 from reviews.models import Review, ReviewCriterionAssessment
 
 ReviewDecision = strawberry.enum(Review.Decision, name='ReviewDecision')
@@ -101,7 +103,7 @@ class Query:
             'first, for a reviewer there. An empty page for anybody else - '
             'including a reviewer of another organization - which is also the '
             'answer for an organization that does not exist. Reading the queue '
-            'never claims an idea.'
+            'never starts a review.'
         )
     )
     def review_queue(
@@ -148,3 +150,98 @@ class Query:
     )
     def viewer_can_review_in(self, info: strawberry.Info, organization_id: strawberry.ID) -> bool:
         return eligibility.is_reviewer_in(info.context.user, organization_id)
+
+
+@strawberry.input(description="One criterion's rating, and an optional note on it.")
+class CriterionAssessmentInput:
+    criterion: ReviewCriterion
+    rating: CriterionRating
+    note: str = ''
+
+
+@strawberry.input(
+    description=(
+        "Complete the caller's own open review of an idea. Every criterion must "
+        'be rated exactly once; feedback is required for CHANGES_REQUESTED and '
+        'REJECTED.'
+    )
+)
+class CompleteReviewInput:
+    idea_id: strawberry.ID
+    review_id: strawberry.ID
+    decision: ReviewDecision
+    assessments: list[CriterionAssessmentInput]
+    feedback: str = ''
+
+
+@strawberry.type(
+    description=(
+        'Result of a review operation. On success `review` is the review as '
+        'the caller now sees it and `idea` is the idea in its new state.'
+    )
+)
+class ReviewPayload:
+    success: bool
+    message: str
+    field: str | None = None
+    review: ReviewType | None = None
+    idea: IdeaType | None = None
+
+
+def _review_payload(info: strawberry.Info, review: Review, message: str) -> ReviewPayload:
+    user = info.context.user
+    return ReviewPayload(
+        success=True,
+        message=message,
+        # The caller is this review's reviewer, so they see its snapshot.
+        review=ReviewType.from_model(review, include_snapshot=True),
+        idea=IdeaType.from_model(review.idea, user),
+    )
+
+
+@strawberry.type
+class Mutation:
+    @strawberry.mutation(
+        description=(
+            'Start reviewing a submitted idea: open its next review round and '
+            "move it to UNDER_REVIEW. Only a reviewer in the idea's organization "
+            'who can read it and did not write it; refused if somebody else has '
+            'already started.'
+        )
+    )
+    def start_review(self, info: strawberry.Info, idea_id: strawberry.ID) -> ReviewPayload:
+        try:
+            review = services.start_review(info.context.user, idea_id)
+        except services.ReviewError as exc:
+            return ReviewPayload(success=False, message=exc.message, field=exc.field)
+        return _review_payload(info, review, 'Review started.')
+
+    @strawberry.mutation(
+        description=(
+            'Record the decision on your own open review - every criterion, the '
+            'feedback and the decision - and move the idea to the status the '
+            'decision names. All of it, or none of it.'
+        )
+    )
+    def complete_review(self, info: strawberry.Info, input: CompleteReviewInput) -> ReviewPayload:
+        try:
+            review = services.complete_review(
+                info.context.user,
+                services.CompleteReviewInput(
+                    idea_id=input.idea_id,
+                    review_id=input.review_id,
+                    decision=input.decision.value,
+                    feedback=input.feedback,
+                    assessments=tuple(
+                        services.AssessmentInput(
+                            criterion=item.criterion.value,
+                            rating=item.rating.value,
+                            note=item.note,
+                        )
+                        for item in input.assessments
+                    ),
+                ),
+            )
+        except services.ReviewError as exc:
+            return ReviewPayload(success=False, message=exc.message, field=exc.field)
+        return _review_payload(info, review, f'Review completed: {review.get_decision_display()}.')

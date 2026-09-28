@@ -77,19 +77,22 @@ describe('IdeaReviewSection', () => {
     expect(screen.queryByRole('button', { name: 'Review history' })).not.toBeInTheDocument()
   })
 
-  it('points a reviewer who can start a review at the queue', () => {
+  it('points a reviewer who can start a review at it in the review workspace', () => {
     renderSection(idea({ status: 'SUBMITTED', viewerCanStartReview: true }), '99')
 
-    expect(screen.getByRole('link', { name: /open the review queue/ })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /open it in the review workspace/ })).toHaveAttribute(
       'href',
-      '/app/reviews',
+      '/app/reviews?idea=1',
     )
   })
 
   it('tells a reviewer with an active review that it is theirs', () => {
     renderSection(idea({ status: 'UNDER_REVIEW', viewerActiveReviewId: '12' }), '99')
 
-    expect(screen.getByText('You are reviewing this idea.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /continue review/ })).toHaveAttribute(
+      'href',
+      '/app/reviews?idea=1',
+    )
   })
 
   it('fetches and shows the history once open', async () => {
