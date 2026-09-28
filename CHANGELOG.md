@@ -101,6 +101,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     the existing `IdeaForm` in a revise mode with the reviewer's feedback
     above the fields and visibility locked; resubmission via
     `submitIdeaRequest`, then the list refreshes.
+- S3-006: Reviewer approval.
+  - **Approval is the existing `completeReview`** with `decision: APPROVED` -
+    no new mutation, permission or lifecycle code. It moves the idea
+    `UNDER_REVIEW → APPROVED` in the same locked transaction as the review's
+    completion, with the S3-004 rules unchanged (the review's own reviewer,
+    still eligible, all five criteria, known ratings, idea still under review).
+    It stops at `APPROVED`: no opportunity or proposal is created, and the
+    `APPROVED → AUTOMATION_PROPOSAL` hand-off is unchanged.
+  - **Immutability** — a completed review now also refuses `delete()`, on top
+    of refusing edits and new assessments.
+  - **The author's decision email** (brought forward from S3-007) —
+    `reviews/notifications.py`: one plain-text email to the author for every
+    decision, sent only after the completion commits, with the decision and a
+    link but not the feedback; a delivery failure is logged and the decision
+    stands. No notification centre, no Celery.
+  - Tests: approval end to end, every refusal, concurrent approve/reject by
+    the same reviewer (one decision), immutability, the hand-off, the email
+    (content, on-commit only, never on refusal or rollback, failures logged),
+    and the GraphQL path.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

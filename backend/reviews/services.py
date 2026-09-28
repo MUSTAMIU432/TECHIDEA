@@ -45,7 +45,7 @@ from ideas.models import Idea
 from ideas.services import IdeaError
 from identity.models import User
 from organizations.authorization import AuthorizationError
-from reviews import eligibility
+from reviews import eligibility, notifications
 from reviews.models import Review, ReviewCriterionAssessment
 
 MAX_FEEDBACK_LENGTH = 5000
@@ -250,5 +250,11 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
         review.save()
 
         _lifecycle(lambda: lifecycle.apply_review_transition(active_user, idea, decision))
+
+        # After the commit, never before: a completion that rolls back must not
+        # tell the author about a decision that was never recorded. The email
+        # never raises (see `reviews.notifications`).
+        review_pk = review.pk
+        transaction.on_commit(lambda: notifications.send_review_decision_email(review_pk))
 
     return Review.objects.prefetch_related('assessments').get(pk=review.pk)

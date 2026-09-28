@@ -26,8 +26,15 @@ operation is new. Completed reviews are immutable and are never touched by
 the edit or the resubmission, and resubmission creates no review - the next
 round (n+1, with a snapshot of the revised content) is created only when a
 reviewer calls `startReview`. The optional "refuse submission of `PRIVATE`
-ideas" half of D-6 is not implemented. §1 describes the code as it was before
-S3-002.
+ideas" half of D-6 is not implemented. S3-006 (approval) is implemented as
+§11 recommends: approval is `completeReview` with `decision = APPROVED`,
+through the same validation, locks and review-owned transition as the other
+decisions - no separate mutation or permission - and it ends at `APPROVED`:
+no opportunity or proposal is created, and `APPROVED → AUTOMATION_PROPOSAL`
+stays the existing reviewer transition. A completed review now also refuses
+`delete()`. The author's decision email (§15) was brought forward from
+S3-007 and ships in S3-006, for every decision. §1 describes the code as it
+was before S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
 organization bootstrap and through Django admin (staff). No self-service
@@ -716,6 +723,11 @@ Required notifications:
 | ----- | --------- | ------- |
 | Review completed (any decision) | idea author | email |
 | Idea submitted or resubmitted | eligible reviewers of the organization | email, optional ([D-11](#20-open-product-decisions)) |
+
+**Implemented in S3-006** for the first row (the second is not): `reviews/notifications.py`
+and the `reviews/email/review_decision.txt` template, subject "Your idea has
+been reviewed", body with the idea's title, the decision, a next step for
+changes requested, and a link to `FRONTEND_URL/app/ideas` when that is set.
 
 Implementation: a `reviews/notifications.py` following `identity/email.py`'s
 contract (plain text, `django.core.mail`, failures logged and never raised,

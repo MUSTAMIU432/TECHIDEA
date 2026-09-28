@@ -1,0 +1,19 @@
+{% comment %}
+Plain text on purpose, like identity/email/*.txt. The decision and a link, never
+the feedback or the criteria: those stay behind authentication, where the
+review history shows them to the author (reviews/notifications.py).
+{% endcomment %}Hello{% if first_name %} {{ first_name }}{% endif %},
+
+Your idea "{{ idea_title }}" has been reviewed.
+
+Decision: {{ decision }}
+{% if next_step %}
+{{ next_step }}
+{% endif %}{% if ideas_url %}
+Sign in to read the reviewer's feedback:
+
+{{ ideas_url }}
+{% else %}
+Sign in to {{ app_name }} to read the reviewer's feedback.
+{% endif %}
+- The {{ app_name }} team

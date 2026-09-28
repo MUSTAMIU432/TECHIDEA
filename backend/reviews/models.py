@@ -210,6 +210,14 @@ class Review(models.Model):
         if self.idea_id is not None and self.reviewer_id == self.idea.author_id:
             raise ValidationError('An idea cannot be reviewed by its author.')
 
+    def delete(self, *args, **kwargs):
+        # History is not deletable one review at a time (S3-006). Removing the
+        # idea or its organization still removes its reviews: that is a
+        # database cascade of the whole record, not this method.
+        if type(self).objects.filter(pk=self.pk, completed_at__isnull=False).exists():
+            raise ValidationError('A completed review cannot be deleted.')
+        return super().delete(*args, **kwargs)
+
     @property
     def is_completed(self) -> bool:
         return self.completed_at is not None
