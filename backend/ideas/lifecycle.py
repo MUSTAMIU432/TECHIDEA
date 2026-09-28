@@ -28,9 +28,9 @@ The two kinds of actor
 - **AUTHOR** - the person who wrote the idea, who must still hold an active
   membership. Before review begins the lifecycle belongs to them: they submit
   a finished draft, and they re-submit after a reviewer asks for changes.
-- **REVIEWER** - an active member who holds a *system* role in the idea's own
-  organization, and who is **not** the author. Everything from `SUBMITTED`
-  onward belongs to them.
+- **REVIEWER** - an active member who holds the `idea.review` permission in
+  the idea's own organization, and who is **not** the author. Everything from
+  `SUBMITTED` onward belongs to them.
 
 The author exclusion is the point of the split. Without it, an author who also
 holds the Owner role - the common case, since bootstrap makes everybody's
@@ -39,10 +39,13 @@ amount of role checking would catch it, because the role is genuinely held.
 Self-review is refused structurally rather than by hoping the two roles go to
 different people.
 
-A custom, non-system "Reviewer" role can be granted later without touching
-this module: see `organizations.authorization.membership_holds_system_role`
-for why the gate is a system role today, and for the one function to replace
-if that trade changes.
+Until S3-002 the gate was "holds a system role", which meant only an Owner
+could review. It is now the `idea.review` permission
+(`organizations.authorization.IDEA_REVIEW`), checked through the same
+`membership_has_permission` every other capability uses. The Owner role holds
+it, so nobody who could review before lost the ability, and the non-system
+Reviewer role holds it, so reviewing can be granted without ownership. See
+`docs/reviews-domain.md` §6.
 
 `submitted_at` is written exactly once
 ---------------------------------------
@@ -154,7 +157,7 @@ def is_reviewer(user: User | None, idea: Idea) -> bool:
 
     Convenience predicate with the same meaning as the REVIEWER half of
     `_actor_may`, for callers that want the answer on its own. Both go through
-    `authorization`, so "active member" and "holds a system role" mean exactly
+    `authorization`, so "active member" and "holds `idea.review`" mean exactly
     what they mean everywhere else in the platform.
     """
     if user is None or not user.is_active:
@@ -162,7 +165,7 @@ def is_reviewer(user: User | None, idea: Idea) -> bool:
     if idea.author_id == getattr(user, 'pk', None):
         return False
     membership = authorization.get_membership(user, idea.organization_id)
-    return authorization.membership_holds_system_role(membership)
+    return authorization.membership_has_permission(membership, authorization.IDEA_REVIEW)
 
 
 def _actor_may(
@@ -188,11 +191,11 @@ def _actor_may(
         return idea.author_id == user.pk
 
     if idea.author_id == user.pk:
-        # A person never reviews their own idea, even holding the role that
-        # would otherwise let them.
+        # A person never reviews their own idea, even holding the permission
+        # that would otherwise let them.
         return False
 
-    return authorization.membership_holds_system_role(membership)
+    return authorization.membership_has_permission(membership, authorization.IDEA_REVIEW)
 
 
 def _illegal_transition_error(idea: Idea, to_status: str) -> IdeaError:

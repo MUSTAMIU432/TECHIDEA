@@ -37,6 +37,11 @@ ORGANIZATION_CREATE = 'organization.create'
 ORGANIZATION_UPDATE = 'organization.update'
 ORGANIZATION_MEMBERS_VIEW = 'organization.members.view'
 ORGANIZATION_MEMBERS_MANAGE = 'organization.members.manage'
+# Act as a reviewer on the organization's ideas (S3-002). Checked, like every
+# code here, against the membership of the idea's *own* organization, so a
+# grant in one tenant authorizes nothing in another. Held by the Owner role
+# and by the non-system Reviewer role; see `docs/reviews-domain.md` §6.
+IDEA_REVIEW = 'idea.review'
 
 AuthorizationReason = Literal['unauthenticated', 'membership_required', 'forbidden']
 
@@ -123,41 +128,6 @@ def membership_has_permission(membership: Membership | None, permission_code: st
         membership=membership,
         role__organization_id=membership.organization_id,
         role__role_permissions__permission__code=permission_code,
-    ).exists()
-
-
-def membership_holds_system_role(membership: Membership | None) -> bool:
-    """
-    Whether `membership` holds a **system** role in its own organization.
-
-    A system role is one the platform provisions rather than one a person
-    creates: today the only one is `Owner`, granted in full at organization
-    bootstrap. That makes it the existing answer to "who is trusted to act on
-    this organization beyond ordinary membership", without inventing a
-    permission code for a capability nothing else needs.
-
-    The organization check is deliberate and mirrors
-    `membership_has_permission`: a role is scoped to one organization, so a
-    role id means nothing without it. Without that clause a membership could be
-    made "trusted" by holding a system role in some *other* organization.
-
-    Why not a permission code. A dedicated `idea.review` code would be more
-    precise, and is the obvious shape if the platform later grows a custom
-    Reviewer role that should be grantable without full ownership. It is not
-    added now because nothing else needs a second capability code, and a
-    permission that only ever means "is an Owner" is a permission that
-    duplicates `is_system` and would have to be granted by hand to every
-    organization created before it existed. If that trade changes, this is the
-    one function to replace - and the transition rules that call it are the
-    only callers.
-    """
-    if membership is None:
-        return False
-
-    return MembershipRole.objects.filter(
-        membership=membership,
-        role__organization_id=membership.organization_id,
-        role__is_system=True,
     ).exists()
 
 

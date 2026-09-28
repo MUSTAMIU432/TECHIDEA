@@ -264,6 +264,16 @@ def tenant_b(client: Client) -> dict:
     }
 
 
+def _role_ids(tenant):
+    """Every role in `tenant`'s organization, as the API's string ids."""
+    return {
+        str(role_id)
+        for role_id in Role.objects.filter(organization_id=tenant['organization_id']).values_list(
+            'id', flat=True
+        )
+    }
+
+
 def _assert_no_leakage(response, tenant, *, secret_strings=()):
     """
     Nothing identifying the foreign tenant may appear anywhere in the raw
@@ -361,7 +371,8 @@ def test_user_a_sees_only_organization_a(tenant_a, tenant_b):
     memberships = api.data(MEMBERSHIPS_QUERY)['meMemberships']
     assert [item['id'] for item in memberships] == [tenant_a['membership_id']]
     roles = api.data(MY_ROLES_QUERY)['myOrganizationRoles']
-    assert [role['id'] for role in roles] == [tenant_a['owner_role_id']]
+    # Exactly A's roles (Owner and, since S3-002, Reviewer) and nothing else.
+    assert {role['id'] for role in roles} == _role_ids(tenant_a)
     # ...and B's identifiers are nowhere in any of those bodies.
     _assert_no_leakage(api.raw(ORGANIZATIONS_QUERY), tenant_b)
     _assert_no_leakage(api.raw(MY_ROLES_QUERY), tenant_b)
@@ -384,7 +395,8 @@ def test_user_a_reaches_every_organization_a_operation(tenant_a):
     roles = api.data(ORGANIZATION_ROLES_QUERY, {'organizationId': organization_id})[
         'organizationRoles'
     ]
-    assert [role['id'] for role in roles] == [tenant_a['owner_role_id']]
+    assert {role['id'] for role in roles} == _role_ids(tenant_a)
+    assert tenant_a['owner_role_id'] in {role['id'] for role in roles}
 
     members = api.data(ORGANIZATION_MEMBERS_QUERY, {'organizationId': organization_id})[
         'organizationMembers'

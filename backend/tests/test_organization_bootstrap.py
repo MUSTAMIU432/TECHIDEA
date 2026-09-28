@@ -217,7 +217,8 @@ def test_the_creator_can_act_on_the_organization_they_just_created(bootstrapped:
     roles = api.data(ORGANIZATION_ROLES_QUERY, {'organizationId': bootstrapped['organization_id']})[
         'organizationRoles'
     ]
-    assert [role['slug'] for role in roles] == ['owner']
+    # Bootstrap provisions the Owner role and (S3-002) the Reviewer role.
+    assert [role['slug'] for role in roles] == ['owner', 'reviewer']
 
 
 @pytest.mark.django_db

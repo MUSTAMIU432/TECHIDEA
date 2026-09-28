@@ -54,9 +54,10 @@ Expected future domains:
 - audit
 
 Implemented: the Django project, split settings, the `graphql_api`
-infrastructure app (not a business domain), and the first three business
-domain apps — `identity`, `organizations` and `ideas`. The rest are
-introduced incrementally in later sprints.
+infrastructure app (not a business domain), and four business domain apps —
+`identity`, `organizations`, `ideas` and `reviews` (models and reviewer
+eligibility only, S3-002). The rest are introduced incrementally in later
+sprints.
 
 ### API (target — foundation implemented)
 
@@ -71,8 +72,8 @@ Implemented: the `/graphql/` endpoint with a foundation schema and the
 
 PostgreSQL, configured entirely through environment variables — no
 credentials committed to source control. Implemented via `DATABASE_URL`.
-`identity`, `organizations` and `ideas` own the business models and
-migrations; every other domain is still only Django's built-in tables.
+`identity`, `organizations`, `ideas` and `reviews` own the business models
+and migrations; every other domain is still only Django's built-in tables.
 
 ### Asynchronous Processing (target — not yet implemented)
 
@@ -492,14 +493,15 @@ its own idea reviewed or approved by any request shape. `IdeaType.availableTrans
 reports the viewer's own moves *from the same table that enforces them*, so
 the UI cannot offer something the server would refuse — or drift from it.
 
-**A reviewer is an active member holding a system role, and never the
-author.** A dedicated `idea.review` permission code would be more precise, and
-is the shape to adopt if a custom Reviewer role is ever needed; it is not added
-because nothing else needs a second capability code and a code that only ever
-means "is an Owner" would duplicate `Role.is_system` and need granting by hand
-in every existing organization. The self-review exclusion is structural: an
-author who also holds the `Owner` role genuinely holds it, so the refusal
-comes from the authorship check rather than from the role.
+**A reviewer is an active member holding `idea.review` in the idea's
+organization, and never the author.** Until S3-002 the gate was "holds a
+system role" (Owner only). The `idea.review` permission is held by the Owner
+role and by a non-system Reviewer role provisioned per organization, so
+reviewing can be granted through `assignRoleToMembership` without granting
+ownership; see [`reviews-domain.md`](reviews-domain.md). The self-review
+exclusion is structural: an author who also holds the `Owner` role genuinely
+holds the permission, so the refusal comes from the authorship check rather
+than from the role.
 
 **Transitions are serialized per idea.** The row is read with
 `SELECT … FOR UPDATE` inside the transaction, so "approve" and "reject" fired
@@ -603,8 +605,8 @@ How these are used day to day: [`development.md`](development.md),
 
 ### Not implemented (planned)
 
-- Business domain apps other than `identity`, `organizations` and `ideas`:
-  reviews, opportunities, proposals, developers, projects, tasks,
+- Business domain apps other than `identity`, `organizations`, `ideas` and
+  `reviews`: opportunities, proposals, developers, projects, tasks,
   notifications, impact, files, audit
 - Review *management*: the lifecycle transitions exist and work, but there is
   no review queue, no reviewer assignment, no reasons recorded against a
@@ -620,8 +622,7 @@ How these are used day to day: [`development.md`](development.md),
 - A discovery *algorithm*: there is no ranking, recommendation, trending or
   social feed. S2-004 filters and pages what a reader may see; it does not
   decide what they should see, and no engagement data is collected
-- The `DEPARTMENT` visibility tier, and the `idea.review` permission code that
-  would let a non-owner review
+- The `DEPARTMENT` visibility tier
 - An authenticated Google-account-linking flow (today's Google sign-in only
   ever authenticates or provisions a *new* account - it never links to an
   existing one, by verified email or otherwise)

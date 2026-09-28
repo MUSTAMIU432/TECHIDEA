@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — Sprint 3: Review & Validation
+
+- S3-001: Review & Validation domain architecture — `docs/reviews-domain.md`.
+- S3-002: Reviewer eligibility and the review-domain foundation.
+  - **`idea.review` permission** — the reviewer gate in `ideas.lifecycle`
+    moves from "holds a system role" to this permission, checked through
+    `organizations.authorization.membership_has_permission` and therefore
+    scoped to the idea's own organization. The Owner role holds it, so no one
+    who could review before lost the ability. `membership_holds_system_role`,
+    whose only callers were the two reviewer checks, is removed.
+  - **Reviewer role** — a non-system role provisioned per organization with
+    exactly `organization.view` and `idea.review`, granted and removed through
+    the existing `assignRoleToMembership` / `removeRoleFromMembership`.
+    Migration `organizations/0003` grants `idea.review` to existing Owner roles
+    and provisions the Reviewer role for existing organizations, leaving any
+    pre-existing role with the `reviewer` slug untouched; it is reversible.
+  - **`reviews` app** — `Review` (one row per review round: idea, reviewer
+    (`PROTECT`), round, decision, feedback, submission snapshot, timestamps)
+    and `ReviewCriterionAssessment` (five fixed criteria, categorical rating,
+    no numeric score). Database constraints: unique `(idea, round)`, at most
+    one open review per idea (partial unique), `round >= 1`, decided exactly
+    when completed, known decision/criterion/rating values, one assessment per
+    criterion per review. Completed reviews refuse further saves and new
+    assessments; the admin is read-only.
+  - **`reviews.eligibility`** — `can_review` (can read the idea and is its
+    reviewer under the lifecycle's own rule) and `can_start_review` (the same,
+    on a `SUBMITTED` idea). No queue, claiming, decision, GraphQL or UI yet.
+  - **Membership prerequisite** — not added. A self-service "add member by
+    email" mutation would reveal which emails have accounts to anyone who
+    creates an organization; members are added through Django admin until a
+    consent-based invitation flow exists.
+
 ### Added — Sprint 2: Ideas & Problem Submission
 
 - S2-001: Ideas domain architecture — the `ideas` app, the platform's first

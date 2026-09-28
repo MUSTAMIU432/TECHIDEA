@@ -6,6 +6,7 @@ from django.utils.text import slugify
 from identity.models import User
 from organizations import authorization
 from organizations.authorization import (
+    IDEA_REVIEW,
     ORGANIZATION_CREATE,
     ORGANIZATION_MEMBERS_MANAGE,
     ORGANIZATION_MEMBERS_VIEW,
@@ -71,8 +72,21 @@ PERMISSION_DEFINITIONS = (
         'Manage organization members',
         'Manage organization memberships and their roles.',
     ),
+    (
+        IDEA_REVIEW,
+        'Review ideas',
+        "Review and decide on the organization's submitted ideas.",
+    ),
 )
 DEFAULT_OWNER_ROLE_SLUG = 'owner'
+
+# The non-system Reviewer role (S3-002): reviewing without ownership. Granted
+# and removed through the ordinary `assign_role_to_membership` /
+# `remove_role_from_membership`, like any other role. `ORGANIZATION_VIEW` is
+# included because a role without it is invisible to `list_roles_for_user`,
+# and a reviewer has to be able to see the organization they review for.
+REVIEWER_ROLE_SLUG = 'reviewer'
+REVIEWER_ROLE_PERMISSIONS = frozenset({ORGANIZATION_VIEW, IDEA_REVIEW})
 
 
 def _require_active_user(user: User | None) -> User:
@@ -208,9 +222,23 @@ def create_organization_for_user(
                     for permission in permissions
                 ]
             )
+            reviewer_role = Role.objects.create(
+                organization=organization,
+                name='Reviewer',
+                slug=REVIEWER_ROLE_SLUG,
+                description="Review and decide on the organization's submitted ideas.",
+                is_system=False,
+            )
+            RolePermission.objects.bulk_create(
+                [
+                    RolePermission(role=reviewer_role, permission=permission)
+                    for permission in permissions
+                    if permission.code in REVIEWER_ROLE_PERMISSIONS
+                ]
+            )
         except IntegrityError:
             raise OrganizationError(
-                'We could not provision the organization owner role. Please try again.'
+                'We could not provision the organization roles. Please try again.'
             ) from None
 
         try:

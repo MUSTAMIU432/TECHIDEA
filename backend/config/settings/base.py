@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'identity',
     'organizations',
     'ideas',
+    'reviews',
     'graphql_api',
 ]
 

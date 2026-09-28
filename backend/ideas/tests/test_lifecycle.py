@@ -68,9 +68,10 @@ def add_active_member(organization, user, *, system_role=False):
     bootstrap already created - rather than a second one, because role slugs are
     unique per organization and inventing an `owner` here would collide with
     it. The `system_role=False` branch is a *custom* role somebody created,
-    deliberately not flagged `is_system`: that flag is the distinction the
-    reviewer gate turns on, and a suite that used the Owner role everywhere
-    would not notice a gate that had quietly degraded to "is a member".
+    carrying no permissions: the reviewer gate turns on `idea.review`, which
+    the Owner role holds and this one does not, and a suite that used the Owner
+    role everywhere would not notice a gate that had quietly degraded to "is a
+    member".
     """
     membership = Membership.objects.create(
         user=user, organization=organization, status=Membership.Status.ACTIVE

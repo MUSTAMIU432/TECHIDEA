@@ -316,13 +316,19 @@ def test_my_organization_roles_returns_only_current_users_roles(gql):
     response = gql(MY_ORGANIZATION_ROLES_QUERY, access_token=access_token)
 
     assert 'errors' not in response.json()
-    roles = response.json()['data']['myOrganizationRoles']
-    assert len(roles) == 1
-    assert roles[0]['slug'] == 'owner'
-    assert roles[0]['isSystem'] is True
-    assert {permission['code'] for permission in roles[0]['permissions']} >= {
+    roles = {role['slug']: role for role in response.json()['data']['myOrganizationRoles']}
+    # Bootstrap provisions the Owner role and (S3-002) the Reviewer role.
+    assert set(roles) == {'owner', 'reviewer'}
+    assert roles['owner']['isSystem'] is True
+    assert {permission['code'] for permission in roles['owner']['permissions']} >= {
         'organization.view',
         'organization.members.manage',
+        'idea.review',
+    }
+    assert roles['reviewer']['isSystem'] is False
+    assert {permission['code'] for permission in roles['reviewer']['permissions']} == {
+        'organization.view',
+        'idea.review',
     }
 
 
@@ -348,7 +354,10 @@ def test_organization_roles_are_membership_scoped(gql):
         access_token=grace_token,
     )
 
-    assert len(allowed.json()['data']['organizationRoles']) == 1
+    assert {role['slug'] for role in allowed.json()['data']['organizationRoles']} == {
+        'owner',
+        'reviewer',
+    }
     assert denied.json()['data']['organizationRoles'] == []
 
 

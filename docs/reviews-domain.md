@@ -1,9 +1,25 @@
 # Review & Validation Domain
 
-Architecture for Sprint 3 (S3-001). **Nothing described here is implemented
-yet.** This document records what the code does today, the smallest domain
-model that turns the existing lifecycle into an auditable review workflow, and
-the product decisions that must be made before implementation starts.
+Architecture for Sprint 3 (S3-001). This document records what the code did
+when Sprint 3 started, the smallest domain model that turns the existing
+lifecycle into an auditable review workflow, and the product decisions that
+must be made before implementation starts.
+
+**Implementation status.** S3-002 is implemented: the `idea.review`
+permission, the Reviewer role, the lifecycle gate switched to the permission
+(§6), the `reviews` app with `Review` and `ReviewCriterionAssessment` and
+their constraints (§3, §17), and `reviews.eligibility` (`can_review`,
+`can_start_review`). Everything from §13 onward (queue, claiming, decisions,
+changes-requested, notifications, audit) is not implemented yet. §1 describes
+the code as it was before S3-002.
+
+**D-1 as implemented in S3-002.** Membership creation still exists only at
+organization bootstrap and through Django admin (staff). No self-service
+"add member by email" mutation was added: anyone can create an organization
+and so hold `organization.members.manage`, which would make such a mutation
+an oracle for which email addresses have accounts, the thing Identity is
+built to avoid. A consent-based invitation flow in the Organizations domain
+remains the prerequisite for reviewers outside staff-managed organizations.
 
 Companion to [`ideas-domain.md`](ideas-domain.md), which owns the lifecycle
 this domain builds on. Where the two disagree about what exists, the code is

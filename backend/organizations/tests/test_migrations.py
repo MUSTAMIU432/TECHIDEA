@@ -30,4 +30,9 @@ def test_existing_organizations_receive_owner_role_in_migration_backfill():
     owner_role = Role.objects.get(organization=organization, slug='owner')
     assert owner_role.is_system is True
     assert MembershipRole.objects.filter(membership=membership, role=owner_role).exists()
-    assert owner_role.role_permissions.count() == 5
+    # The backfill grants every permission row that exists. In a fully
+    # migrated test database that includes `idea.review` (0003), so assert
+    # the five 0002 defines rather than an exact count.
+    assert set(owner_role.role_permissions.values_list('permission__code', flat=True)) >= {
+        code for code, _, _ in migration.PERMISSION_DEFINITIONS
+    }

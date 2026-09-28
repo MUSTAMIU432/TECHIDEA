@@ -5,6 +5,7 @@ source =
     identity
     organizations
     ideas
+    reviews
 omit =
     */tests/*
     */migrations/*

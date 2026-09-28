@@ -113,20 +113,22 @@ something S2 does implicitly.
 
 **The two actors.** Before review begins the lifecycle belongs to the author,
 who must still hold an active membership; from `SUBMITTED` onward it belongs
-to a *reviewer* — an active member holding a **system** role in the idea's own
-organization, who is **not** the author. The self-review exclusion is
-structural rather than a matter of hoping two roles go to different people:
-bootstrap makes everybody's own organization theirs, so an author who also
-holds the `Owner` role genuinely holds it, and no role check would catch them.
+to a *reviewer* — an active member holding the **`idea.review`** permission in
+the idea's own organization, who is **not** the author. The self-review
+exclusion is structural rather than a matter of hoping two roles go to
+different people: bootstrap makes everybody's own organization theirs, so an
+author who also holds the `Owner` role genuinely holds `idea.review`, and no
+permission check would catch them.
 
-**Why a system role rather than a new permission code.** A dedicated
-`idea.review` code would be more precise, and is the shape to adopt if the
-platform grows a custom Reviewer role that should be grantable without full
-ownership. It is not added because nothing else needs a second capability
-code, and a permission that only ever means "is an Owner" duplicates
-`Role.is_system` and would have to be granted by hand in every organization
-created before it existed. `organizations.authorization.membership_holds_system_role`
-is the single function to replace if that trade changes.
+**From system role to `idea.review` (S3-002).** Until S3-002 the reviewer gate
+was "holds a system role", which meant only an Owner could review. It is now
+the `idea.review` permission, checked through
+`organizations.authorization.membership_has_permission` like every other
+capability. The Owner role holds it (at bootstrap, and by migration
+`organizations/0003` for organizations that already existed), so nobody who
+could review lost the ability; the non-system **Reviewer** role holds it too,
+so reviewing can be granted without ownership. See
+[`reviews-domain.md`](reviews-domain.md) §6.
 
 `submitted_at` is set once, by the first `DRAFT → SUBMITTED`, and never
 rewritten: it is an audit fact, and `created_at` (the row was written) and
