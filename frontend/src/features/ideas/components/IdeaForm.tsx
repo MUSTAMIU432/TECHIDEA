@@ -15,6 +15,7 @@ import {
   type IdeaVisibility,
 } from '../api/ideasApi'
 import { SpinnerIcon } from '../../identity/components/icons'
+import { ReviewHistory } from '../../reviews/components/ReviewHistory'
 
 /**
  * Create or edit one idea.
@@ -50,7 +51,10 @@ export const MIN_DESCRIPTION_LENGTH = 20
 
 interface IdeaFormProps {
   organizationId: string
-  /** The draft being edited. `null` means "create a new one". */
+  /**
+   * The idea being edited: a draft, or (S3-005) an idea a reviewer sent back
+   * with `CHANGES_REQUESTED`. `null` means "create a new one".
+   */
   idea?: Idea | null
   onSaved: (idea: Idea) => void
   onCancel?: () => void
@@ -74,6 +78,8 @@ function validate(values: { title: string; description: string }): FieldErrors {
 
 export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: IdeaFormProps) {
   const isEditing = idea !== null
+  // Sent back by a reviewer (S3-005): the same form, answering the feedback.
+  const isRevising = idea?.status === 'CHANGES_REQUESTED'
   const [title, setTitle] = useState(idea?.title ?? '')
   const [description, setDescription] = useState(idea?.description ?? '')
   const [categoryId, setCategoryId] = useState(idea?.category?.id ?? '')
@@ -176,14 +182,30 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
     >
       <div>
         <h2 className="text-base font-semibold text-gray-900">
-          {isEditing ? 'Edit this draft' : 'File a new idea'}
+          {isRevising ? 'Revise this idea' : isEditing ? 'Edit this draft' : 'File a new idea'}
         </h2>
         <p className="mt-1 text-sm leading-6 text-gray-600">
-          {isEditing
-            ? 'A draft can be saved half-finished. Submitting puts it forward for review; it does not change who can see it.'
-            : 'Describe a problem worth automating. Saving keeps it as a draft only you can edit; who can read it is set by its visibility below.'}
+          {isRevising
+            ? 'A reviewer asked for changes. Edit the idea and save, then use Submit again on the idea to put it forward for the next review. Who can see it is fixed now that it has been submitted.'
+            : isEditing
+              ? 'A draft can be saved half-finished. Submitting puts it forward for review; it does not change who can see it.'
+              : 'Describe a problem worth automating. Saving keeps it as a draft only you can edit; who can read it is set by its visibility below.'}
         </p>
       </div>
+
+      {isRevising && idea && (
+        // The feedback being answered, above the fields it is about. Read
+        // from the server's history, unchanged by anything saved here.
+        <section
+          aria-label="Reviewer feedback"
+          className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3"
+        >
+          <h3 className="text-sm font-semibold text-amber-900">Reviewer feedback</h3>
+          <div className="mt-2">
+            <ReviewHistory ideaId={idea.id} viewerId={null} />
+          </div>
+        </section>
+      )}
 
       {formError && (
         <p role="alert" className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -233,8 +255,9 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
             </p>
           ) : (
             <p className="mt-1.5 text-sm text-gray-500">
-              A draft can be incomplete, but submitting needs at least {MIN_DESCRIPTION_LENGTH}{' '}
-              characters.
+              {isRevising
+                ? `Your revised description must contain at least ${MIN_DESCRIPTION_LENGTH} characters.`
+                : `A draft can be incomplete, but submitting needs at least ${MIN_DESCRIPTION_LENGTH} characters.`}
             </p>
           )}
         </div>
@@ -275,7 +298,9 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
             <p className={fieldErrorClasses}>{errors.category}</p>
           ) : (
             <p className="mt-1.5 text-sm text-gray-500">
-              Optional while drafting; you will need one to submit.
+              {isRevising
+                ? 'Category remains optional while revising, but it is required to submit.'
+                : 'Optional while drafting; you will need one to submit.'}
             </p>
           )}
         </div>
@@ -301,7 +326,8 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
                     name="idea-visibility"
                     value={option.value}
                     checked={visibility === option.value}
-                    disabled={isSubmitting}
+                    // Fixed once submitted; the server refuses a change too.
+                    disabled={isSubmitting || isRevising}
                     onChange={() => setVisibility(option.value)}
                     className="mt-0.5"
                   />
@@ -327,7 +353,7 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
           className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 motion-safe:transition-colors motion-safe:duration-150 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:bg-brand-300"
         >
           {isSubmitting && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
-          <span>{isSubmitting ? 'Saving…' : isEditing ? 'Save draft' : 'Save draft'}</span>
+          <span>{isSubmitting ? 'Saving…' : isRevising ? 'Save changes' : 'Save draft'}</span>
         </button>
         {onCancel && (
           <button

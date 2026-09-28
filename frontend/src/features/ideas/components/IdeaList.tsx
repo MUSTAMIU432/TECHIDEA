@@ -186,6 +186,11 @@ export function IdeaList({
               {ideas.map((idea) => {
                 const isMine = user?.id === idea.authorId
                 const isDraft = idea.status === 'DRAFT'
+                // Sent back by a reviewer (S3-005): the author revises and
+                // submits again. Authorship is only what decides whether to
+                // *offer* the edit; `updateIdea` checks it again.
+                const isRevisable = idea.status === 'CHANGES_REQUESTED'
+                const canEdit = isMine && (isDraft || isRevisable)
                 return (
                   <li
                     key={idea.id}
@@ -269,19 +274,22 @@ export function IdeaList({
                         control: the server refuses an unlisted move whether or not a
                         button was drawn.
                       */}
-                    {(isMine && isDraft) || idea.availableTransitions.length > 0 ? (
+                    {canEdit || idea.availableTransitions.length > 0 ? (
                       <div className="mt-4 flex flex-wrap gap-2">
-                        {isMine && isDraft && (
+                        {canEdit && (
                           <button
                             type="button"
                             onClick={() => onEdit(idea)}
                             className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
                           >
-                            Edit draft
+                            {isDraft ? 'Edit draft' : 'Revise idea'}
                           </button>
                         )}
                         {idea.availableTransitions.map((target) => {
-                          const label = transitionLabel(target)
+                          const label =
+                            isRevisable && target === 'SUBMITTED'
+                              ? 'Submit again'
+                              : transitionLabel(target)
                           if (label === null) return null
                           return (
                             <button

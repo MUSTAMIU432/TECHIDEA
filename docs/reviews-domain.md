@@ -19,8 +19,15 @@ decision form in the workspace. As built, `completeReview` takes `ideaId` as
 well as `reviewId` (the review must belong to that idea), and the feedback
 rule (D-3) is enforced by the service rather than a database CHECK. Not
 implemented yet: the take-over of a review whose reviewer lost eligibility
-(§5.3, D-2), changes-requested editing and resubmission, notifications and
-audit. §1 describes the code as it was before S3-002.
+(§5.3, D-2), notifications and audit. S3-005 is implemented as §10 describes:
+the author edits a `CHANGES_REQUESTED` idea with the existing `updateIdea`
+(visibility fixed, D-6) and resubmits with the existing `submitIdea`; no
+operation is new. Completed reviews are immutable and are never touched by
+the edit or the resubmission, and resubmission creates no review - the next
+round (n+1, with a snapshot of the revised content) is created only when a
+reviewer calls `startReview`. The optional "refuse submission of `PRIVATE`
+ideas" half of D-6 is not implemented. §1 describes the code as it was before
+S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
 organization bootstrap and through Django admin (staff). No self-service

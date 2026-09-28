@@ -272,7 +272,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     })
     render(<IdeasWorkspace />)
 
-    expect(await screen.findByRole('button', { name: 'Submit for review' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Submit again' })).toBeInTheDocument()
   })
 
   it('never offers the automation hand-off, which leads nowhere yet', async () => {

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import {
+  submitIdeaRequest,
   transitionIdeaRequest,
   type Idea,
   type IdeaFilters,
@@ -98,7 +99,11 @@ export function IdeasWorkspace() {
     setEditing(null)
     setIsCreating(false)
     setNotice(
-      idea.status === 'DRAFT' ? `Draft saved. ${DRAFT_READERS[idea.visibility]}` : 'Idea saved.',
+      idea.status === 'DRAFT'
+        ? `Draft saved. ${DRAFT_READERS[idea.visibility]}`
+        : idea.status === 'CHANGES_REQUESTED'
+          ? 'Changes saved. Use Submit again when the idea is ready for the next review.'
+          : 'Idea saved.',
     )
     reloadList()
   }
@@ -109,7 +114,13 @@ export function IdeasWorkspace() {
     setSubmittingIdeaId(idea.id)
     setSubmittingTarget(target)
     try {
-      const result = await transitionIdeaRequest(idea.id, target)
+      // A resubmission after requested changes (S3-005) is the author's
+      // `submitIdea`, which the server delegates to the same lifecycle move;
+      // it creates no review - a reviewer opens the next round.
+      const result =
+        idea.status === 'CHANGES_REQUESTED' && target === 'SUBMITTED'
+          ? await submitIdeaRequest(idea.id)
+          : await transitionIdeaRequest(idea.id, target)
       if (result.success) {
         setNotice(result.message)
         reloadList()

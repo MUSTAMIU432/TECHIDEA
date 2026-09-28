@@ -28,7 +28,7 @@ export const STATUS_DESCRIPTIONS: Record<IdeaStatus, string> = {
   SUBMITTED: 'Put forward. Waiting for a reviewer to pick it up.',
   UNDER_REVIEW: 'A reviewer is looking at it.',
   CHANGES_REQUESTED:
-    'Sent back to you with changes to make. Its content cannot be edited in this state; submit it again when it is ready.',
+    'Sent back to you with changes to make. Revise it, then submit it again when it is ready for the next review.',
   REJECTED: 'Not going forward.',
   APPROVED: 'Accepted as worth automating.',
   AUTOMATION_PROPOSAL: 'Handed to the automation-opportunity track.',

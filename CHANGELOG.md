@@ -85,6 +85,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `/app/reviews?idea=<id>` to continue a review from an idea card.
   - Existing Ideas tests that made review moves through `transitionIdea` now
     make them through the review path or assert the refusal.
+- S3-005: Changes requested and resubmission —
+  `CHANGES_REQUESTED → author edits → SUBMITTED → a reviewer starts round n+1`,
+  with no new operation.
+  - **`updateIdea`** accepts the author's own `CHANGES_REQUESTED` idea as well
+    as a draft (`ideas.services.EDITABLE_STATUSES`), with the same validation,
+    membership and tenant checks. Visibility is fixed once submitted: a
+    different value is a `visibility` field error (D-6).
+  - **`submitIdea`** resubmits, unchanged: the same lifecycle move and the
+    same submission validation. It creates no review.
+  - **History** — the completed review that asked for changes is never
+    touched; the next round is created only by `startReview`, as round n+1
+    with a snapshot of the revised content. Tested field by field.
+  - **Frontend** — "Revise idea" and "Submit again" on the author's card;
+    the existing `IdeaForm` in a revise mode with the reviewer's feedback
+    above the fields and visibility locked; resubmission via
+    `submitIdeaRequest`, then the list refreshes.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

@@ -267,14 +267,21 @@ def _resolve_visibility(visibility: str | None) -> str | None:
     return normalized
 
 
-def _load_owned_draft(user: User, idea_id: object) -> Idea:
+# The states in which the author may edit an idea's content (S3-005): while it
+# is being written, and while a reviewer has sent it back for changes. Every
+# other state is somebody else's to act on - a submitted or under-review idea
+# is what the reviewer is looking at, and a decided one is history.
+EDITABLE_STATUSES = frozenset({Idea.Status.DRAFT, Idea.Status.CHANGES_REQUESTED})
+
+
+def _load_editable_idea(user: User, idea_id: object) -> Idea:
     """
     The idea identified by `idea_id`, if `user` may edit it right now.
 
     Every refusal below produces the same message, because they are the same
     answer: this operation is not available to you on this id. Covered:
     no such id, another tenant's idea, somebody else's idea in your own
-    organization, and your own idea that is past the draft phase.
+    organization, and your own idea in a state that is not editable.
     """
     # Read through the public selector rather than reaching for a queryset
     # here: this is the only place in the codebase that needs the row behind a
@@ -294,13 +301,10 @@ def _load_owned_draft(user: User, idea_id: object) -> Idea:
             reason='membership_required',
         )
 
-    if idea.status != Idea.Status.DRAFT:
-        # Only a draft's content is editable - in every other state,
-        # `CHANGES_REQUESTED` included. The review transitions shipped in
-        # S2-003 (`ideas/lifecycle.py`) move the status only; editing content
-        # while changes are requested is not implemented, and widening this
-        # check is a deliberate future decision rather than an omission. See
-        # `docs/ideas-domain.md`.
+    if idea.status not in EDITABLE_STATUSES:
+        # The S2-002 wording is kept: the frontend shows it verbatim, and it
+        # still names the common case. A changes-requested idea is editable
+        # too (S3-005) - the author's answer to the review.
         raise IdeaError('Only a draft can be edited.', reason='forbidden')
 
     return idea
@@ -360,22 +364,39 @@ def create_idea(user: User | None, organization_id: object, data: IdeaInput) -> 
 
 def update_idea(user: User | None, idea_id: object, data: IdeaInput) -> Idea:
     """
-    Edit the author's own draft.
+    Edit the author's own draft, or their own idea a reviewer sent back with
+    `CHANGES_REQUESTED` (S3-005).
 
     `data` carries content only. `organization`, `author` and `status` are
     not fields on `IdeaInput`, so there is no code path here that could move
     an idea to another tenant, hand it to another author, or mark it
     submitted by hand - the only way to submit is `submit_idea`.
+
+    Editing never touches a review. The completed review that asked for the
+    changes keeps its own snapshot of what it reviewed, and the next round is
+    opened only when a reviewer starts it.
+
+    **Visibility is fixed once an idea has been submitted**
+    (`docs/reviews-domain.md` §10, D-6). While changes are requested the
+    author edits the content, not who can read it: narrowing an idea under
+    review to `PRIVATE` would hide it, and its own review history, from the
+    reviewers the resubmission is for. The same value is accepted, so a form
+    that sends every field back is not refused for it.
     """
     active_user = _require_active_user(user)
-    idea = _load_owned_draft(active_user, idea_id)
+    idea = _load_editable_idea(active_user, idea_id)
 
     idea.title = _validate_title(data.title)
     idea.description = _validate_description(data.description)
     idea.category = _resolve_category(data.category_id)
 
     visibility = _resolve_visibility(data.visibility)
-    if visibility:
+    if visibility and visibility != idea.visibility:
+        if idea.status != Idea.Status.DRAFT:
+            raise IdeaError(
+                'Who can see an idea is fixed once it has been submitted.',
+                field='visibility',
+            )
         idea.visibility = visibility
 
     # `save()` runs `full_clean()`, so the model's own invariants - the
@@ -499,7 +520,7 @@ def _load_owned_comment(user: User, comment_id: object) -> Comment:
     Covered by one refusal message: no such id, a comment on an idea the caller
     may not read, and somebody else's comment. Authorship is the only way past.
 
-    No membership re-check, unlike `_load_owned_draft`, and the difference is
+    No membership re-check, unlike `_load_editable_idea`, and the difference is
     deliberate rather than an oversight. Editing an *idea* is writing into a
     tenant, so leaving that tenant has to end it. A comment was never a write
     into a tenant in the first place - it follows the idea's own visibility -
@@ -677,12 +698,13 @@ def _load_attachable_idea(user: User, idea_id: object) -> Idea:
     The idea `user` may attach supporting evidence to right now.
 
     Authorship and an active membership - the same two conditions
-    `_load_owned_draft` requires for editing a draft's content - but
+    `_load_editable_idea` requires for editing an idea's content - but
     deliberately **no lifecycle gate**, and that is a considered choice, not
-    an omission. Evidence is not the draft content itself; it accumulates
+    an omission. Evidence is not the content itself; it accumulates
     while an idea is discussed and reviewed, not only while it is being
-    written, so restricting uploads to `DRAFT` (as `_load_owned_draft` does
-    for `update_idea`) would refuse the case this feature mostly exists for -
+    written, so restricting uploads to the editable states (as
+    `_load_editable_idea` does for `update_idea`) would refuse the case this
+    feature mostly exists for -
     attaching a screenshot or a spreadsheet once an idea is already under
     review. This follows the shape S2-006 established for votes
     (`_require_readable_idea`: readability with no status condition) rather
@@ -691,7 +713,7 @@ def _load_attachable_idea(user: User, idea_id: object) -> Idea:
 
     Resolved through `get_idea` first, so an idea the caller cannot even see
     is refused identically to one that does not exist, and only *then* is
-    authorship checked - the same two-step order `_load_owned_draft` and
+    authorship checked - the same two-step order `_load_editable_idea` and
     `_load_discussable_idea` use, so a reviewer or a colleague cannot learn
     "this idea exists but isn't yours to attach to" about something they
     were never shown in the first place.
@@ -702,7 +724,7 @@ def _load_attachable_idea(user: User, idea_id: object) -> Idea:
 
     # Re-checked on every write, not only at creation: leaving the
     # organization has to take the ability to attach evidence to it with you,
-    # the same reasoning `_load_owned_draft` and `create_idea` apply.
+    # the same reasoning `_load_editable_idea` and `create_idea` apply.
     if authorization.get_membership(user, idea.organization_id) is None:
         raise IdeaError(
             'You must be an active member of this organization to work with ideas here.',

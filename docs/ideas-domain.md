@@ -112,14 +112,22 @@ or contradict the model's own invariant. The route back to the author is
 `CHANGES_REQUESTED → SUBMITTED`, without pretending the idea was never
 submitted.
 
-**What the author can change while changes are requested.** Today, the
-content itself is **not** editable in `CHANGES_REQUESTED`: `update_idea`
-accepts a `DRAFT` and nothing else, so the author's available move is to
-re-submit (which re-runs the submission validation) and, independently of the
-lifecycle, to attach further evidence. Editing an idea's content in response
-to requested changes is a future refinement - it widens a write path, so it is
-a deliberate decision for the sprint that owns the review workflow, not
-something S2 does implicitly.
+**What the author can change while changes are requested (S3-005).** The
+content: `update_idea` accepts an idea in `services.EDITABLE_STATUSES` -
+`DRAFT` and `CHANGES_REQUESTED` - for its author, with an active membership,
+and the same validation as a draft. **Visibility is fixed once submitted**:
+in `CHANGES_REQUESTED` a different visibility is refused as a field error,
+because narrowing an idea under review would hide it from its reviewers
+([`reviews-domain.md`](reviews-domain.md) D-6). The author then resubmits
+with the existing `submitIdea` (`CHANGES_REQUESTED → SUBMITTED`, re-running the
+submission validation; `submitted_at` keeps its first value), and may attach
+further evidence at any point. The flow is
+
+    CHANGES_REQUESTED → author edits → SUBMITTED → a reviewer starts round n+1
+
+Nothing in it touches a review: the completed review that asked for the
+changes is immutable and keeps its own snapshot, and resubmission creates no
+review - the next round exists only once a reviewer calls `startReview`.
 
 **The two actors.** Before review begins the lifecycle belongs to the author,
 who must still hold an active membership; from `SUBMITTED` onward it belongs
@@ -549,9 +557,9 @@ anticipate:
   schema: a blank description cannot be acted on by a reviewer, and a
   one-word description is not a problem statement. It is a module constant, so
   changing it is a visible decision.
-- **A submitted idea is no longer editable, by anybody.** `update_idea`
-  refuses anything past `DRAFT` - `CHANGES_REQUESTED` included (see
-  [Lifecycle](#lifecycle)). `submit_idea` is the lifecycle's author move and
+- **A submitted idea is no longer editable, by anybody** - until a reviewer
+  sends it back. `update_idea` refuses everything except `DRAFT` and, since
+  S3-005, `CHANGES_REQUESTED` (see [Lifecycle](#lifecycle)). `submit_idea` is the lifecycle's author move and
   accepts exactly `DRAFT → SUBMITTED` and, since S2-003,
   `CHANGES_REQUESTED → SUBMITTED`; anything else is refused.
 
