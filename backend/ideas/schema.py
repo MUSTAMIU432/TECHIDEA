@@ -55,7 +55,7 @@ service describes what may be *used* today.
 import strawberry
 
 from ideas import lifecycle, selectors, services
-from ideas.models import Attachment, Category, Comment, Idea
+from ideas.models import Attachment, Category, Comment, Idea, IdeaTransition
 
 IdeaStatus = strawberry.enum(Idea.Status, name='IdeaStatus')
 IdeaVisibility = strawberry.enum(Idea.Visibility, name='IdeaVisibility')
@@ -318,6 +318,32 @@ class CommentType:
             content=comment.content,
             created_at=comment.created_at.isoformat(),
             updated_at=comment.updated_at.isoformat(),
+        )
+
+
+@strawberry.type(
+    description=(
+        "One recorded change of an idea's status. `actorId` rather than a "
+        'nested user, like every type an idea can reach.'
+    )
+)
+class IdeaTransitionType:
+    id: strawberry.ID
+    idea_id: strawberry.ID
+    from_status: IdeaStatus
+    to_status: IdeaStatus
+    actor_id: strawberry.ID
+    created_at: str
+
+    @staticmethod
+    def from_model(transition: IdeaTransition) -> 'IdeaTransitionType':
+        return IdeaTransitionType(
+            id=strawberry.ID(str(transition.pk)),
+            idea_id=strawberry.ID(str(transition.idea_id)),
+            from_status=IdeaStatus(transition.from_status),
+            to_status=IdeaStatus(transition.to_status),
+            actor_id=strawberry.ID(str(transition.actor_id)),
+            created_at=transition.created_at.isoformat(),
         )
 
 
@@ -631,6 +657,23 @@ class Query:
     def attachment(self, info: strawberry.Info, id: strawberry.ID) -> AttachmentType | None:
         attachment = selectors.get_attachment(info.context.user, id)
         return AttachmentType.from_model(attachment) if attachment else None
+
+    @strawberry.field(
+        description=(
+            "An idea's lifecycle history, oldest first: every status change, "
+            "who made it and when (S3-007). For the idea's author and the "
+            'reviewers of its organization; an empty list for anybody else, and '
+            'for an idea the caller cannot read or that does not exist. Read-only: '
+            'no operation writes or changes a transition.'
+        )
+    )
+    def idea_transitions(
+        self, info: strawberry.Info, idea_id: strawberry.ID
+    ) -> list[IdeaTransitionType]:
+        return [
+            IdeaTransitionType.from_model(transition)
+            for transition in selectors.list_idea_transitions(info.context.user, idea_id)
+        ]
 
     @strawberry.field(description='Categories available to file an idea under.')
     def categories(self) -> list[CategoryType]:

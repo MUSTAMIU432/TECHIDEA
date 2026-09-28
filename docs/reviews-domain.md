@@ -33,7 +33,12 @@ decisions - no separate mutation or permission - and it ends at `APPROVED`:
 no opportunity or proposal is created, and `APPROVED → AUTOMATION_PROPOSAL`
 stays the existing reviewer transition. A completed review now also refuses
 `delete()`. The author's decision email (§15) was brought forward from
-S3-007 and ships in S3-006, for every decision. §1 describes the code as it
+S3-007 and ships in S3-006, for every decision. S3-007 (audit) is
+implemented as §15 describes (D-10): every successful status change writes
+one append-only `ideas.IdeaTransition` in the same transaction, naming the
+authorized caller as actor, and refused moves are logged with ids only. The
+reviewer submission email (D-11) is deliberately not implemented, per its
+recommendation. §1 describes the code as it
 was before S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
@@ -703,7 +708,31 @@ when, why, and what was reviewed. Two gaps remain that `Review` cannot close:
   `AUTOMATION_PROPOSAL`.
 - **Refused attempts** are not recorded anywhere.
 
-Recommendation (S3-007): one append-only **`IdeaTransition`** row per
+**Implemented in S3-007**, with one deviation noted below. What exists:
+
+- `ideas.IdeaTransition(idea, from_status, to_status, actor, created_at)`,
+  written by `ideas.lifecycle` only - `transition_idea` (author moves, the
+  hand-off) and `apply_review_transition` (start and decisions) - after the
+  status is saved, inside the same transaction. A refused or rolled-back move
+  leaves no row; a successful one cannot commit without its row.
+- The actor is the caller the lifecycle authorized: neither function takes an
+  actor argument, and no mutation carries one.
+- Append-only: `save()` refuses to rewrite a row, `delete()` refuses, the admin
+  is read-only, and there is no service or mutation that writes one. CHECK
+  constraints refuse unknown statuses and a "move" to the same status. The
+  idea's own cascade still removes its trail with it.
+- Read through `ideaTransitions(ideaId)` / `ideas.selectors.list_idea_transitions`,
+  for the same readers as the review history (the author and the
+  organization's reviewers); anybody else, `PUBLIC` readers included, gets an
+  empty list.
+- Refused moves are logged by `ideas.lifecycle` at INFO with ids and the
+  refusal reason only.
+- **Deviation:** no `review` foreign key. Setting it would make `ideas` depend
+  on `reviews`, reversing §2's dependency direction; the review a move belongs
+  to is recoverable from the idea and the time. Ideas moved before S3-007
+  have no backfilled history.
+
+The recommendation it implements: one append-only **`IdeaTransition`** row per
 successful status change, written inside `ideas.lifecycle` in the same
 transaction as the status change. Fields: `idea`, `from_status`,
 `to_status`, `actor` (`PROTECT`), `created_at`, and an optional `review` FK.
@@ -724,7 +753,12 @@ Required notifications:
 | Review completed (any decision) | idea author | email |
 | Idea submitted or resubmitted | eligible reviewers of the organization | email, optional ([D-11](#20-open-product-decisions)) |
 
-**Implemented in S3-006** for the first row (the second is not): `reviews/notifications.py`
+The second row is **deliberately not implemented** (D-11, decided in S3-007):
+the review queue is the channel for new submissions, and emailing every
+reviewer on every submission would need recipient rules and opt-outs this
+sprint does not have.
+
+**Implemented in S3-006** for the first row: `reviews/notifications.py`
 and the `reviews/email/review_decision.txt` template, subject "Your idea has
 been reviewed", body with the idea's title, the decision, a next step for
 changes requested, and a link to `FRONTEND_URL/app/ideas` when that is set.

@@ -59,11 +59,13 @@ why the transition writes `status` and `submitted_at` together and lets
 `save()` check the pair.
 """
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
 from ideas import selectors
-from ideas.models import Idea
+from ideas.models import Idea, IdeaTransition
 from ideas.services import (
     IdeaError,
     _require_active_user,
@@ -72,6 +74,8 @@ from ideas.services import (
 )
 from identity.models import User
 from organizations import authorization
+
+logger = logging.getLogger(__name__)
 
 # The two kinds of actor, named so the matrix below reads as a rule rather than
 # as a bare boolean.
@@ -272,7 +276,7 @@ def available_transitions(user: User | None, idea: Idea) -> list[str]:
     ]
 
 
-def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
+def _transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
     """
     Move an idea to `to_status`, if the lifecycle permits it and this actor may.
 
@@ -342,13 +346,42 @@ def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
         if idea.status == Idea.Status.DRAFT and idea.submitted_at is None:
             idea.submitted_at = timezone.now()
 
+        from_status = idea.status
         idea.status = normalized_target
         # `save()` runs `full_clean()`, so the model's own
         # status/submitted_at invariant is checked on this path like every
         # other write.
         idea.save()
+        _record_transition(idea, from_status, active_user)
 
     return idea
+
+
+def _record_transition(idea: Idea, from_status: str, actor: User) -> None:
+    """
+    Append the audit row for a status change that has just been saved (S3-007).
+
+    Called by both write paths, inside the transaction that saved the status,
+    so the row and the change commit together or not at all. `actor` is the
+    caller the lifecycle has just authorized - never a value from a request.
+    """
+    IdeaTransition.objects.create(
+        idea=idea, from_status=from_status, to_status=idea.status, actor=actor
+    )
+
+
+def _log_refusal(user: User | None, idea_id: object, to_status: str, exc: IdeaError) -> None:
+    """
+    A refused move, recorded in the log rather than the database (D-10): ids and
+    the refusal reason only, never content, so the log is safe to ship.
+    """
+    logger.info(
+        'Refused idea transition (user=%s, idea=%s, to=%s, reason=%s).',
+        getattr(user, 'pk', None),
+        idea_id,
+        to_status,
+        exc.reason,
+    )
 
 
 REVIEW_OWNED_MESSAGE = (
@@ -356,7 +389,7 @@ REVIEW_OWNED_MESSAGE = (
 )
 
 
-def apply_review_transition(user: User, idea: Idea, to_status: str) -> Idea:
+def _apply_review_transition(user: User, idea: Idea, to_status: str) -> Idea:
     """
     Make one review-owned move on an idea the caller has already locked.
 
@@ -382,6 +415,40 @@ def apply_review_transition(user: User, idea: Idea, to_status: str) -> Idea:
     if not _actor_may(user, idea, membership, normalized_target):
         raise IdeaError('You are not allowed to make that change to this idea.')
 
+    from_status = idea.status
     idea.status = normalized_target
     idea.save()
+    # In the caller's transaction, alongside the `Review` it writes: a
+    # completion that rolls back takes this row with it.
+    _record_transition(idea, from_status, user)
     return idea
+
+
+def transition_idea(user: User | None, idea_id: object, to_status: str) -> Idea:
+    """
+    Move an idea to `to_status`, if the lifecycle permits it and this actor may.
+
+    See `_transition_idea` for the rules and the order of the refusals. This
+    wrapper adds only the audit of refusals: a successful move is recorded as
+    an `IdeaTransition` inside the transaction, a refused one in the log.
+    """
+    try:
+        return _transition_idea(user, idea_id, to_status)
+    except IdeaError as exc:
+        _log_refusal(user, idea_id, to_status, exc)
+        raise
+
+
+def apply_review_transition(user: User, idea: Idea, to_status: str) -> Idea:
+    """
+    Make one review-owned move on an idea the caller has already locked.
+
+    See `_apply_review_transition` for the contract. Like `transition_idea`,
+    a refusal is logged; a success is recorded as an `IdeaTransition` in the
+    caller's transaction.
+    """
+    try:
+        return _apply_review_transition(user, idea, to_status)
+    except IdeaError as exc:
+        _log_refusal(user, idea.pk, to_status, exc)
+        raise

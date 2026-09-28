@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from django.db.models import Count, Exists, IntegerField, OuterRef, Q, QuerySet, Subquery
 from django.db.models.functions import Coalesce
 
-from ideas.models import Attachment, Category, Comment, Idea, Vote
+from ideas.models import Attachment, Category, Comment, Idea, IdeaTransition, Vote
 from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
@@ -670,3 +670,29 @@ def vote_count_for(idea: Idea) -> int:
     and this function is not a second place where it could be forgotten.
     """
     return Vote.objects.filter(idea=idea).aggregate(total=Count('*'))['total'] or 0
+
+
+def list_idea_transitions(user: User | None, idea_id: object) -> list[IdeaTransition]:
+    """
+    One idea's lifecycle history (S3-007), oldest first, for whoever may read it.
+
+    The same readers as the idea's review history, for the same reason: every
+    row names the member who made the move, and a `PUBLIC` idea is readable by
+    the whole platform. So the history is shown to
+
+    - the idea's **author**, whose idea it is, and
+    - **reviewers of the idea's organization** (`lifecycle.is_reviewer`: an
+      active member holding `idea.review` there, not the author),
+
+    and to nobody else - an empty list, which is also the answer for an idea
+    the caller cannot read or that does not exist, so the id reveals nothing.
+    """
+    # Imported here: `ideas.lifecycle` imports this module.
+    from ideas import lifecycle
+
+    idea = get_idea(user, idea_id)
+    if idea is None:
+        return []
+    if idea.author_id != user.pk and not lifecycle.is_reviewer(user, idea):
+        return []
+    return list(IdeaTransition.objects.filter(idea=idea).order_by('created_at', 'pk'))

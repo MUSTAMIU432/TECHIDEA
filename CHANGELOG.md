@@ -120,6 +120,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     the same reviewer (one decision), immutability, the hand-off, the email
     (content, on-commit only, never on refusal or rollback, failures logged),
     and the GraphQL path.
+- S3-007: Lifecycle audit trail (D-10).
+  - **`ideas.IdeaTransition`** (migration `ideas/0002`) — one append-only row
+    per successful status change: idea, from, to, actor, time. Written only by
+    `ideas.lifecycle` (`transition_idea`, `apply_review_transition`) inside the
+    transaction that changes the status, so a refused or rolled-back move
+    leaves no row and a successful one always has one. The actor is the
+    authorized caller, never an input. Rows refuse `save()` over an existing
+    row and `delete()`; the admin is read-only; CHECK constraints refuse
+    unknown statuses and no-op moves. No link to the review (ideas does not
+    depend on reviews); no backfill for earlier moves.
+  - **`ideaTransitions(ideaId)`** — read-only history for the idea's author
+    and the reviewers of its organization, like the review history; empty for
+    everybody else, `PUBLIC` readers included. No mutation.
+  - Refused transitions are logged with ids and the refusal reason only.
+  - Review history (`Review`) is unchanged and kept alongside: the review is
+    the evaluation, the transition is the lifecycle record.
+  - Reviewer emails on submission (D-11) are deliberately not implemented,
+    per the architecture's recommendation; documented.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

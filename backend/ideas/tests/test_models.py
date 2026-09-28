@@ -87,7 +87,17 @@ class TestAppBoundary:
         """
         model_names = {model.__name__ for model in apps.get_app_config('ideas').get_models()}
 
-        assert model_names == {'Category', 'Idea', 'Comment', 'Vote', 'Attachment'}
+        # `IdeaTransition` (S3-007) is the lifecycle's own audit trail, decided
+        # in `docs/reviews-domain.md` D-10 to live here because the lifecycle is
+        # its only writer - not a later domain's entity.
+        assert model_names == {
+            'Category',
+            'Idea',
+            'Comment',
+            'Vote',
+            'Attachment',
+            'IdeaTransition',
+        }
 
     def test_no_attachment_field_stores_file_bytes_in_postgresql(self):
         """

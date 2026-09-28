@@ -58,7 +58,8 @@ infrastructure app (not a business domain), and four business domain apps —
 `identity`, `organizations`, `ideas` and `reviews` (models, reviewer
 eligibility, the review queue and history, starting and deciding reviews,
 resubmission after changes are requested, and the author's decision email,
-S3-002 to S3-006; audit is not implemented yet). The rest are introduced
+S3-002 to S3-006, and the lifecycle audit trail `ideas.IdeaTransition`,
+S3-007). The rest are introduced
 incrementally in later sprints.
 
 ### API (target — foundation implemented)

@@ -12,13 +12,14 @@ decisions, automation opportunities, requirements, proposals, developers,
 projects, deployment or impact - those are later sprints, and a change to
 their vocabulary must never require a migration of these tables.
 
-Five entities:
+Six entities:
 
     Category     a platform-wide, reusable classification of ideas.
     Idea         the submission itself, and the tenant boundary.
     Comment      a discussion reply on one idea.
     Vote         one member's single "this is worth doing" signal.
     Attachment    metadata for a file held in object storage.
+    IdeaTransition  one recorded status change: the lifecycle's audit trail (S3-007).
 
 Design notes that are not obvious from the field lists
 -------------------------------------------------------
@@ -535,3 +536,79 @@ class Attachment(models.Model):
 
     def __str__(self) -> str:
         return f'Attachment(idea={self.idea_id}, filename={self.filename})'
+
+
+class IdeaTransition(models.Model):
+    """
+    One successful change of an idea's status: the lifecycle's audit trail
+    (S3-007, `docs/reviews-domain.md` D-10).
+
+    Written by `ideas.lifecycle` and nothing else, in the same transaction as
+    the status change it records - `transition_idea` for the author's moves and
+    the hand-off, `apply_review_transition` for the moves a review makes - so a
+    status change without its row, or a row without its change, cannot be
+    committed. It records *that* the status moved, who moved it and when; *why*
+    (the criteria, the feedback, the snapshot) is the `reviews.Review` the move
+    belongs to, which is a different record for a different purpose.
+
+    **Append-only.** `save()` refuses to rewrite an existing row and `delete()`
+    refuses outright; there is no service or mutation that changes one, and the
+    admin is read-only. The only removal is the database cascade that removes
+    the whole idea.
+
+    **`actor` is the authenticated caller** the lifecycle authorized, never an
+    input: no operation takes an actor argument from a client. `PROTECT`, for
+    the reason on `reviews.Review.reviewer` - users are deactivated, not
+    deleted, and an audit record must not disappear with an account.
+
+    There is no link to the review. `ideas` does not depend on `reviews`, and
+    the review a move belongs to is recoverable from the idea and the time.
+    """
+
+    idea = models.ForeignKey(
+        Idea,
+        on_delete=models.CASCADE,
+        related_name='transitions',
+        db_index=False,  # Prefix of `ideas_trans_idea_created_idx` below.
+    )
+    from_status = models.CharField(max_length=32, choices=Idea.Status.choices)
+    to_status = models.CharField(max_length=32, choices=Idea.Status.choices)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='idea_transitions',
+        help_text='The authenticated member who made the move.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['created_at', 'pk']
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.CheckConstraint(
+                condition=models.Q(from_status__in=dict(IDEA_STATUS_CHOICES)),
+                name='idea_transition_from_is_known',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(to_status__in=dict(IDEA_STATUS_CHOICES)),
+                name='idea_transition_to_is_known',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(from_status=models.F('to_status')),
+                name='idea_transition_changes_status',
+            ),
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=['idea', 'created_at'], name='ideas_trans_idea_created_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.idea_id}: {self.from_status} -> {self.to_status}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError('A recorded transition cannot be changed.')
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('A recorded transition cannot be deleted.')
