@@ -37,6 +37,8 @@ const DRAFT: Idea = {
   discussionOpen: true,
   voteCount: 0,
   viewerHasVoted: false,
+  viewerCanStartReview: false,
+  viewerActiveReviewId: null,
 }
 
 function renderForm(props: Partial<React.ComponentProps<typeof IdeaForm>> = {}) {

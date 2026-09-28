@@ -9,9 +9,11 @@ must be made before implementation starts.
 permission, the Reviewer role, the lifecycle gate switched to the permission
 (§6), the `reviews` app with `Review` and `ReviewCriterionAssessment` and
 their constraints (§3, §17), and `reviews.eligibility` (`can_review`,
-`can_start_review`). Everything from §13 onward (queue, claiming, decisions,
-changes-requested, notifications, audit) is not implemented yet. §1 describes
-the code as it was before S3-002.
+`can_start_review`). S3-003 is implemented: the read side of §13 and §14
+(`reviewQueue`, `ideaReviews`, `viewerCanReviewIn`, the two `IdeaType`
+capability fields, the `/app/reviews` workspace and the review history on
+idea cards). Claiming, decisions, changes-requested, notifications and audit
+are not implemented yet. §1 describes the code as it was before S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
 organization bootstrap and through Django admin (staff). No self-service
@@ -220,8 +222,12 @@ code that changes `Idea.status`; the reviews service calls it inside its own
 transaction so that a review and the status change it causes commit together
 or not at all.
 
-Dependency direction: `reviews → ideas → organizations → identity`. Ideas
-never imports reviews.
+Dependency direction: `reviews → ideas → organizations → identity`. The Ideas
+*domain* (models, services, selectors, lifecycle) never imports reviews. The
+one exception is the Ideas GraphQL adapter, which reads
+`reviews.eligibility`/`reviews.selectors` to resolve the two viewer
+capability fields this section places on `IdeaType` (§13); it is an adapter
+composing two domains for the viewer, not Ideas depending on Reviews.
 
 ---
 
@@ -584,8 +590,16 @@ The smallest coherent API, merged into `graphql_api/schema.py` as
 
 | Field | Returns | Authorization |
 | ----- | ------- | ------------- |
-| `reviewQueue(organizationId: ID!, page: Int, pageSize: Int)` | `IdeaPage` (existing type) | eligible reviewer in that organization; otherwise an empty page |
+| `reviewQueue(organizationId: ID!, offset: Int, limit: Int)` | `IdeaPage` (existing type) | eligible reviewer in that organization; otherwise an empty page |
 | `ideaReviews(ideaId: ID!)` | `[ReviewType!]!`, ordered by round | [§12](#12-security-model) review read rule; otherwise `[]` |
+| `viewerCanReviewIn(organizationId: ID!)` | `Boolean!` | answers only about the caller; `false` for a non-member or unknown organization |
+
+`reviewQueue` pages with `offset`/`limit`, the project's existing convention
+(`ideas.pagination`, which `PageInfo` reports), rather than the
+`page`/`pageSize` this table first named (corrected in S3-003).
+`viewerCanReviewIn` was added in S3-003: the queue answers a non-reviewer with
+an empty page, and the workspace needs to tell "not a reviewer here" apart
+from "nothing to review".
 
 **Additions to `IdeaType`** (computed per viewer, like
 `availableTransitions`; convenience, never the control):

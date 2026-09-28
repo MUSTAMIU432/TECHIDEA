@@ -188,6 +188,18 @@ export interface Idea {
    */
   voteCount: number
   viewerHasVoted: boolean
+  /**
+   * Review capabilities for *this viewer* (S3-003), computed by the server from
+   * the Reviews domain's eligibility rule. Convenience, never a control: the
+   * server asks again when a review is actually claimed.
+   *
+   * - `viewerCanStartReview`: a reviewer in the idea's organization who can
+   *   read it and did not write it, on an idea waiting in `SUBMITTED`.
+   * - `viewerActiveReviewId`: this viewer's own in-progress review, if any.
+   *   Never another reviewer's.
+   */
+  viewerCanStartReview: boolean
+  viewerActiveReviewId: string | null
 }
 
 /** The writable content of an idea. Mirrors the backend's `IdeaInput`. */
@@ -213,7 +225,8 @@ const CATEGORY_FIELDS = `
   description
 `
 
-const IDEA_FIELDS = `
+/** Exported so the review queue (S3-003) asks for exactly the same idea shape. */
+export const IDEA_FIELDS = `
   id
   title
   description
@@ -228,6 +241,8 @@ const IDEA_FIELDS = `
   discussionOpen
   voteCount
   viewerHasVoted
+  viewerCanStartReview
+  viewerActiveReviewId
   category { ${CATEGORY_FIELDS} }
 `
 
@@ -270,7 +285,7 @@ const IDEA_QUERY = `
   }
 `
 
-const PAGE_INFO_FIELDS = `
+export const PAGE_INFO_FIELDS = `
   offset
   limit
   totalCount

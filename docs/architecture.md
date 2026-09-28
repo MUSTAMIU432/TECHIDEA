@@ -55,9 +55,10 @@ Expected future domains:
 
 Implemented: the Django project, split settings, the `graphql_api`
 infrastructure app (not a business domain), and four business domain apps —
-`identity`, `organizations`, `ideas` and `reviews` (models and reviewer
-eligibility only, S3-002). The rest are introduced incrementally in later
-sprints.
+`identity`, `organizations`, `ideas` and `reviews` (models, reviewer
+eligibility and the read-only review queue and history, S3-002/S3-003;
+claiming and decisions are not implemented yet). The rest are introduced
+incrementally in later sprints.
 
 ### API (target — foundation implemented)
 

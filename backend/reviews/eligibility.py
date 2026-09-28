@@ -31,6 +31,25 @@ they call into this module rather than living in it.
 from ideas import lifecycle, selectors
 from ideas.models import Idea
 from identity.models import User
+from organizations import authorization
+
+
+def is_reviewer_in(user: User | None, organization_id: object) -> bool:
+    """
+    Whether `user` reviews for `organization_id` at all: an active user with
+    an active membership there that holds `idea.review`.
+
+    The organization-level half of `can_review`, for the questions that are
+    about an organization rather than one idea - whether to show somebody the
+    review queue, and whether to fill it. Per-idea rules (authorship,
+    visibility) are not here, because there is no idea: the queue applies them
+    as filters, and `can_review` applies them to a single idea.
+
+    `False` for a malformed or unknown organization id, exactly as for one the
+    user is not in, so the answer cannot be used to probe for organizations.
+    """
+    membership = authorization.get_membership(user, organization_id)
+    return authorization.membership_has_permission(membership, authorization.IDEA_REVIEW)
 
 
 def can_review(user: User | None, idea: Idea | None) -> bool:
@@ -49,13 +68,14 @@ def can_review(user: User | None, idea: Idea | None) -> bool:
 
 def can_start_review(user: User | None, idea: Idea | None) -> bool:
     """
-    Whether `user` may claim `idea` for review right now: eligible, and the
-    idea is waiting in `SUBMITTED`.
+    Whether `user` is currently eligible to start a review of `idea`:
+    eligible to review it, and the idea is waiting in `SUBMITTED`.
 
-    A predicate only, for the UI's "Start review" (S3-003). Claiming itself
-    (S3-004) locks the idea and asks again, because this answer can be stale by
-    the time the request arrives. No in-progress check is needed here: a review
-    is only ever open while its idea is `UNDER_REVIEW`, so a `SUBMITTED` idea
-    has none.
+    A capability predicate only, reported to clients as
+    `IdeaType.viewerCanStartReview`. Nothing in S3-003 starts a review; the
+    start-review operation, when it becomes available (S3-004), locks the idea
+    and asks this question again, because this answer can be stale by the time
+    a request arrives. No in-progress check is needed here: a review is only
+    ever open while its idea is `UNDER_REVIEW`, so a `SUBMITTED` idea has none.
     """
     return idea is not None and idea.status == Idea.Status.SUBMITTED and can_review(user, idea)

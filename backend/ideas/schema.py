@@ -121,6 +121,51 @@ class IdeaType:
     # than an obviously missing one.
     vote_count: int
     viewer_has_voted: bool
+    # The row and the viewer this type was built from, for the review
+    # capability fields below. Private: never part of the schema.
+    _idea: strawberry.Private[Idea]
+    _viewer: strawberry.Private[object]
+
+    # Review capabilities (S3-003). Resolved lazily rather than in
+    # `from_model`, so the cost is only paid by a query that asks for them,
+    # and both answer from the status alone - with no query - for every idea
+    # that could not have one: only a `SUBMITTED` idea can be claimed and only
+    # an `UNDER_REVIEW` one has a review in progress.
+    #
+    # This is the one place the Ideas GraphQL adapter reads the Reviews
+    # domain. The Ideas *domain* (models, services, selectors, lifecycle)
+    # never imports Reviews; the adapter composes the two for the viewer,
+    # which is what `docs/reviews-domain.md` §13 places on `IdeaType`.
+    @strawberry.field(
+        description=(
+            'Whether the current viewer is eligible to start a review of this '
+            'idea: a reviewer in its organization who can read it and did not '
+            'write it, on an idea waiting in SUBMITTED. A capability flag only; '
+            'the operation that starts a review is not available yet, and it '
+            'will check eligibility again when it is.'
+        )
+    )
+    def viewer_can_start_review(self) -> bool:
+        from reviews import eligibility
+
+        precomputed = getattr(self._idea, 'viewer_can_start_review', None)
+        if precomputed is not None:
+            # Set by `reviews.selectors.review_queue`, which established it
+            # for the whole page in the queue's own filters.
+            return precomputed
+        return eligibility.can_start_review(self._viewer, self._idea)
+
+    @strawberry.field(
+        description=(
+            "The id of the current viewer's own in-progress review of this "
+            "idea, or null. Never reveals another reviewer's review."
+        )
+    )
+    def viewer_active_review_id(self) -> strawberry.ID | None:
+        from reviews import selectors as review_selectors
+
+        review_id = review_selectors.active_review_id_for(self._viewer, self._idea)
+        return strawberry.ID(str(review_id)) if review_id is not None else None
 
     @staticmethod
     def from_model(idea: Idea, user=None) -> 'IdeaType':
@@ -141,6 +186,8 @@ class IdeaType:
             ],
             discussion_open=lifecycle.discussion_is_open(idea),
             **_vote_state_fields(idea, user),
+            _idea=idea,
+            _viewer=user,
         )
 
 

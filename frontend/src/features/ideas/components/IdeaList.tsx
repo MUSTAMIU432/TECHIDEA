@@ -16,6 +16,7 @@ import {
 } from '../utils/lifecycle'
 import { IdeaAttachments } from './IdeaAttachments'
 import { IdeaDiscussion } from './IdeaDiscussion'
+import { IdeaReviewSection } from '../../reviews/components/IdeaReviewSection'
 import { IdeaVoteButton } from './IdeaVoteButton'
 import { IdeaFiltersBar } from './IdeaFiltersBar'
 import { IdeaPagination } from './IdeaPagination'
@@ -103,6 +104,7 @@ export function IdeaList({
   // there is no shared "one section open" rule between the two - each has
   // its own single-open-at-a-time state instead.
   const [openAttachmentsId, setOpenAttachmentsId] = useState<string | null>(null)
+  const [openReviewsId, setOpenReviewsId] = useState<string | null>(null)
   const { categories } = useCategories()
   const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
     activeOrganization?.id ?? null,
@@ -322,6 +324,19 @@ export function IdeaList({
                       open={openAttachmentsId === idea.id}
                       onToggle={() =>
                         setOpenAttachmentsId((current) => (current === idea.id ? null : idea.id))
+                      }
+                    />
+                    {/*
+                        Review history (S3-003), for the author once the idea
+                        is put forward and for reviewers - fetched only while
+                        open, like the two sections above.
+                      */}
+                    <IdeaReviewSection
+                      idea={idea}
+                      viewerId={user?.id ?? null}
+                      open={openReviewsId === idea.id}
+                      onToggle={() =>
+                        setOpenReviewsId((current) => (current === idea.id ? null : idea.id))
                       }
                     />
                   </li>

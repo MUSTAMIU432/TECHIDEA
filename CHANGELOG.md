@@ -37,6 +37,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     email" mutation would reveal which emails have accounts to anyone who
     creates an organization; members are added through Django admin until a
     consent-based invitation flow exists.
+- S3-003: Review queue and workspace — read-only; nothing is claimed or
+  decided yet.
+  - **`reviewQueue(organizationId, offset, limit)`** — one organization's
+    `SUBMITTED` ideas, oldest submission first, for a reviewer there: never the
+    caller's own, never one they cannot read, never another tenant's (a
+    `PUBLIC` idea included). Everybody else gets an empty page. Built on
+    `list_organization_ideas` plus the existing pagination and vote
+    annotations, at a fixed number of queries per page.
+  - **`ideaReviews(ideaId)`** — every round for a reviewer of the idea's
+    organization, completed rounds for its author, nothing for anybody else,
+    `PUBLIC` readers included. Reached only through an idea the caller can
+    read; there is no query by review id. `submissionSnapshot` is for
+    reviewers only; `reviewerId` is an id, never a nested user.
+  - **`viewerCanReviewIn(organizationId)`**, and **`IdeaType.viewerCanStartReview`
+    / `viewerActiveReviewId`** — per-viewer capability flags from
+    `reviews.eligibility`, resolved lazily and without a query for ideas whose
+    status rules them out.
+  - **Frontend** — `/app/reviews`: the queue with loading, empty, error and
+    paging states, and the selected idea's content, evidence and review
+    history. Idea cards gain a collapsed review-history section for the author
+    and for reviewers. The Ideas page links to the queue for reviewers.
+  - **Docs** — `reviewQueue` pages with `offset`/`limit`, the project's
+    convention, not the `page`/`pageSize` the S3-001 table named; the Ideas
+    GraphQL adapter (not the Ideas domain) reads Reviews for the capability
+    fields.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

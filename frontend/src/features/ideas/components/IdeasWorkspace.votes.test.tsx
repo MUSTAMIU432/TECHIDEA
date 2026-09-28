@@ -49,6 +49,8 @@ function idea(overrides: Partial<Idea> = {}): Idea {
     discussionOpen: true,
     voteCount: 0,
     viewerHasVoted: false,
+    viewerCanStartReview: false,
+    viewerActiveReviewId: null,
     ...overrides,
   }
 }

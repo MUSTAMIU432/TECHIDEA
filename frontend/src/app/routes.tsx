@@ -10,6 +10,7 @@ import { DashboardPage } from '../routes/DashboardPage'
 import { IdeasPage } from '../routes/IdeasPage'
 import { HomePage } from '../routes/HomePage'
 import { NotFoundPage } from '../routes/NotFoundPage'
+import { ReviewsPage } from '../routes/ReviewsPage'
 
 /**
  * Route tree for the app. Future business domains (identity, organizations,
@@ -62,6 +63,14 @@ export const router = createBrowserRouter([
         element: (
           <OrganizationProvider>
             <IdeasPage />
+          </OrganizationProvider>
+        ),
+      },
+      {
+        path: 'reviews',
+        element: (
+          <OrganizationProvider>
+            <ReviewsPage />
           </OrganizationProvider>
         ),
       },

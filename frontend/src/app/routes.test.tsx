@@ -25,6 +25,14 @@ vi.mock('../features/ideas/api/ideasApi', () => ({
   submitIdeaRequest: vi.fn(),
 }))
 
+// The Reviews feature's API (S3-003), mocked for the same reason: both
+// `/app/ideas` (the queue link) and `/app/reviews` ask it on mount.
+vi.mock('../features/reviews/api/reviewsApi', () => ({
+  viewerCanReviewInRequest: vi.fn(async () => false),
+  reviewQueueRequest: vi.fn(),
+  ideaReviewsRequest: vi.fn(async () => []),
+}))
+
 vi.mock('../features/identity/auth/authApi', () => ({
   loginRequest: vi.fn(),
   googleLoginRequest: vi.fn(),
@@ -135,6 +143,29 @@ describe('route tree', () => {
     // Inherits `RequireAuth` by being an `/app` child: an ideas screen
     // reachable without a session would be a screen whose every write the
     // server refuses.
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { level: 1, name: 'Welcome back' })).toBeInTheDocument(),
+    )
+  })
+
+  it('renders the reviews page at /app/reviews when authenticated', async () => {
+    mockedRefresh.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+    })
+    mockedMe.mockResolvedValue(USER)
+
+    renderRoutes(router.routes, '/app/reviews')
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review submitted ideas.' }),
+    ).toBeInTheDocument()
+  })
+
+  it('redirects /app/reviews to /auth when there is no authenticated session', async () => {
+    renderRoutes(router.routes, '/app/reviews')
+
     await waitFor(() =>
       expect(screen.getByRole('heading', { level: 1, name: 'Welcome back' })).toBeInTheDocument(),
     )

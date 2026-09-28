@@ -2,25 +2,17 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import { useAuth } from '../features/identity/auth/AuthContext'
 import { OrganizationSwitcher } from '../features/organizations/components/OrganizationSwitcher'
-import { useOrganization } from '../features/organizations/context/useOrganization'
-import { IdeasWorkspace } from '../features/ideas/components/IdeasWorkspace'
-import { useCanReview } from '../features/reviews/hooks/useCanReview'
+import { ReviewsWorkspace } from '../features/reviews/components/ReviewsWorkspace'
 
 /**
- * The Ideas area at `/app/ideas`.
+ * The review area at `/app/reviews` (S3-003).
  *
- * An `/app` child, so it inherits `RequireAuth` and mounts inside the existing
- * `OrganizationProvider` - which is what supplies the active organization the
- * ideas belong to. There is deliberately no organization picker on this page:
- * the switcher in the header is the one the whole authenticated app shares, so
- * a second one here could point the screen at an organization the user is not
- * in, and the server would refuse every write anyway.
+ * An `/app` child like `/app/ideas`, so it inherits `RequireAuth` and takes
+ * its organization from the shared `OrganizationProvider` and header switcher.
  */
-export function IdeasPage() {
+export function ReviewsPage() {
   const navigate = useNavigate()
   const { user, logout } = useAuth()
-  const { activeOrganization } = useOrganization()
-  const canReview = useCanReview(activeOrganization?.id ?? null)
 
   function handleLogout() {
     void logout()
@@ -36,16 +28,10 @@ export function IdeasPage() {
               Automation Platform
             </p>
             <p className="mt-0.5 text-sm text-gray-500">
-              Ideas
-              {/* Offered, not granted: the queue is authorized by the server. */}
-              {canReview && (
-                <>
-                  {' · '}
-                  <Link to="/app/reviews" className="font-medium text-brand-700 hover:underline">
-                    Review queue
-                  </Link>
-                </>
-              )}
+              Reviews ·{' '}
+              <Link to="/app/ideas" className="font-medium text-brand-700 hover:underline">
+                Ideas
+              </Link>
             </p>
           </div>
           <div className="flex items-center gap-4">
@@ -65,15 +51,15 @@ export function IdeasPage() {
       <main className="mx-auto max-w-6xl px-6 py-10">
         <div className="max-w-2xl">
           <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">
-            Put a problem forward.
+            Review submitted ideas.
           </h1>
           <p className="mt-3 text-base leading-7 text-gray-600">
-            Describe something that should be automated. Save it as a draft while you think it
-            through, then submit it when it is ready to be looked at.
+            Ideas your organization has put forward, oldest first. Open one to read it, its evidence
+            and its review history.
           </p>
         </div>
 
-        <IdeasWorkspace />
+        <ReviewsWorkspace />
       </main>
     </div>
   )

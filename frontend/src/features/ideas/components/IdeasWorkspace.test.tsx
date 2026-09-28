@@ -48,6 +48,8 @@ const DRAFT: Idea = {
   discussionOpen: true,
   voteCount: 0,
   viewerHasVoted: false,
+  viewerCanStartReview: false,
+  viewerActiveReviewId: null,
 }
 
 const SOMEONE_ELSES: typeof DRAFT = {
