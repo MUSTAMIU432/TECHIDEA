@@ -45,6 +45,11 @@ interface Answer {
 
 const FAILED = 'We could not reach the server. Please try again.'
 
+// One shared empty list rather than a fresh `[]` per render: `useIdeaVotes`
+// treats a new `ideas` array as a new answer from the server, so the fallback
+// must keep one identity until a real answer replaces it.
+const NO_IDEAS: Idea[] = []
+
 export function useIdeaDiscovery(
   organizationId: string | null,
   filters: IdeaFilters,
@@ -63,10 +68,13 @@ export function useIdeaDiscovery(
   // answer in state is the answer being waited for is decided by *comparing*
   // during render, rather than by writing a fresh "loading" state into an
   // effect - which is a second render to express something knowable already,
-  // and would make the list flash an empty panel on every keystroke. And a
-  // late answer for a query nobody is waiting for any more is simply ignored
-  // when it arrives, which is what keeps two in-flight searches from settling
-  // in the wrong order.
+  // and would make the list flash an empty panel on every keystroke.
+  //
+  // A late answer for a query nobody is waiting for any more is discarded by
+  // the effect's cleanup below, not by this comparison. The comparison only
+  // says whether the answer in state is current; it cannot stop a stale
+  // response from *replacing* a current one, which is what an older request
+  // settling after a newer one would otherwise do (S2-008).
   const key = JSON.stringify([
     organizationId,
     search,
@@ -85,15 +93,26 @@ export function useIdeaDiscovery(
     // rather than from an empty list, so there is no answer to clear.
     if (organizationId === null) return
 
+    // Set when this query is superseded - by new filters, a new page, or a
+    // reload - so its answer, success or failure, is dropped on arrival and
+    // can neither replace nor wipe the newer one.
+    let cancelled = false
+
     organizationIdeasRequest(organizationId, { search, categoryId, status, offset, limit })
       .then((page) => {
+        if (cancelled) return
         setAnswer({ key, ideas: page.items, pageInfo: page.pageInfo })
         setErrorKey(null)
       })
       .catch(() => {
+        if (cancelled) return
         setAnswer(null)
         setErrorKey(key)
       })
+
+    return () => {
+      cancelled = true
+    }
     // `reloadToken` is a trigger, not an input: it is the way to say "same
     // query, go and ask again" after a write. It changes nothing about the
     // request, so the linter is right that the effect does not read it.
@@ -107,7 +126,7 @@ export function useIdeaDiscovery(
     // The last answer, not necessarily the current one: a refresh keeps the
     // rows on screen while it runs, so the reader is not shown an empty panel
     // between one keystroke and the next.
-    ideas: (answer?.ideas ?? []) as Idea[],
+    ideas: answer?.ideas ?? NO_IDEAS,
     pageInfo: (answer?.pageInfo ?? null) as IdeaPageInfo | null,
     loading: !current && !failed,
     error: failed ? FAILED : null,

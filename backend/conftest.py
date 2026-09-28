@@ -31,3 +31,17 @@ def _clear_cache():
     yield
     for cache in caches.all():
         cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _fast_password_hasher(settings):
+    """
+    Use a cheap password hasher in tests.
+
+    Django's default PBKDF2 hasher runs ~1M iterations per hash, and every
+    user a test creates or logs in pays for it - enough to leave the suite
+    CPU-bound for 20+ minutes. Production hashing is unaffected; a test that
+    asserts on the real hasher overrides this through the same `settings`
+    fixture.
+    """
+    settings.PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']

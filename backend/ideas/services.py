@@ -295,9 +295,12 @@ def _load_owned_draft(user: User, idea_id: object) -> Idea:
         )
 
     if idea.status != Idea.Status.DRAFT:
-        # S2-002 owns DRAFT -> SUBMITTED and nothing else, so a submitted
-        # idea is not editable here. The Sprint 3 review transitions
-        # (CHANGES_REQUESTED -> a new draft, for instance) will widen this.
+        # Only a draft's content is editable - in every other state,
+        # `CHANGES_REQUESTED` included. The review transitions shipped in
+        # S2-003 (`ideas/lifecycle.py`) move the status only; editing content
+        # while changes are requested is not implemented, and widening this
+        # check is a deliberate future decision rather than an omission. See
+        # `docs/ideas-domain.md`.
         raise IdeaError('Only a draft can be edited.', reason='forbidden')
 
     return idea
@@ -740,6 +743,24 @@ def _load_owned_attachment(user: User, attachment_id: object) -> Attachment:
     return attachment
 
 
+def authorize_attachment_upload(user: User | None, idea_id: object) -> Idea:
+    """
+    Whether `user` may attach evidence to `idea_id`, decided *before* the
+    upload itself is looked at (S2-008).
+
+    Exactly the gate `upload_attachment` applies - it calls the same two
+    functions - exposed on its own so `ideas/views.py` can refuse an
+    unauthenticated or unauthorized caller before it touches
+    `request.FILES`. Reading that attribute is what makes Django parse the
+    multipart body (and spool a large file to temporary disk), so asking this
+    first means a caller who could never have uploaded does not get to make
+    the server do that work. `upload_attachment` still re-applies the gate
+    itself: this is an early exit, not a replacement for it.
+    """
+    active_user = _require_active_user(user)
+    return _load_attachable_idea(active_user, idea_id)
+
+
 def upload_attachment(user: User | None, idea_id: object, uploaded_file) -> Attachment:
     """
     Attach `uploaded_file` to an idea `user` owns, as supporting evidence.
@@ -789,7 +810,13 @@ def upload_attachment(user: User | None, idea_id: object, uploaded_file) -> Atta
     try:
         saved_key = storage.save_object(storage_key, uploaded_file)
     except storage.AttachmentStorageError as exc:
-        raise IdeaError('The file could not be stored. Please try again.') from exc
+        # An explicit reason, not `IdeaError`'s `'forbidden'` default: this is
+        # the storage tier failing, not a refusal, and `ideas/views.py` maps it
+        # to a server error rather than to the 404 an authorization refusal
+        # gets (S2-008).
+        raise IdeaError(
+            'The file could not be stored. Please try again.', reason='storage_unavailable'
+        ) from exc
 
     try:
         return Attachment.objects.create(

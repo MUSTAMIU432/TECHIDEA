@@ -180,8 +180,8 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
         </h2>
         <p className="mt-1 text-sm leading-6 text-gray-600">
           {isEditing
-            ? 'A draft can be saved half-finished. It becomes visible to your reviewers only once you submit it.'
-            : 'Describe a problem worth automating. Saving keeps it private to you as a draft.'}
+            ? 'A draft can be saved half-finished. Submitting puts it forward for review; it does not change who can see it.'
+            : 'Describe a problem worth automating. Saving keeps it as a draft only you can edit; who can read it is set by its visibility below.'}
         </p>
       </div>
 
@@ -313,8 +313,9 @@ export function IdeaForm({ organizationId, idea = null, onSaved, onCancel }: Ide
           </div>
           {errors.visibility && <p className={fieldErrorClasses}>{errors.visibility}</p>}
           <p id={messageId} className="mt-1.5 text-sm text-gray-500">
-            A new idea is private until you widen it. This is never changed by anything the server
-            does on your behalf.
+            A new idea is private until you widen it. Submitting does not change who can see it, and
+            a reviewer can only review an idea they can see - choose before you submit, because
+            visibility can only be changed while the idea is a draft.
           </p>
         </fieldset>
       </div>

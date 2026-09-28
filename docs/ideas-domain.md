@@ -98,9 +98,18 @@ up before it can be resolved, which is what the `UNDER_REVIEW` state records.
 
 **Nothing returns to `DRAFT`.** A draft is by definition an idea with no
 `submitted_at`, so moving back to it would have to either erase an audit fact
-or contradict the model's own invariant. The route back is
-`CHANGES_REQUESTED`, which the author edits as a draft in spirit without
-pretending it was never submitted.
+or contradict the model's own invariant. The route back to the author is
+`CHANGES_REQUESTED → SUBMITTED`, without pretending the idea was never
+submitted.
+
+**What the author can change while changes are requested.** Today, the
+content itself is **not** editable in `CHANGES_REQUESTED`: `update_idea`
+accepts a `DRAFT` and nothing else, so the author's available move is to
+re-submit (which re-runs the submission validation) and, independently of the
+lifecycle, to attach further evidence. Editing an idea's content in response
+to requested changes is a future refinement - it widens a write path, so it is
+a deliberate decision for the sprint that owns the review workflow, not
+something S2 does implicitly.
 
 **The two actors.** Before review begins the lifecycle belongs to the author,
 who must still hold an active membership; from `SUBMITTED` onward it belongs
@@ -169,6 +178,20 @@ are in `ideas/selectors.py` and a test asserts they agree for every
 `visibility` defaults to `PRIVATE`, so a new submission is visible to nobody
 but its author until somebody deliberately widens it. Code that forgets to
 consider visibility at all therefore leaks nothing.
+
+**Visibility and status are independent.** Submitting an idea does not change
+who can read it, and nothing in the lifecycle widens (or narrows) visibility.
+Two consequences follow, both intended and both pinned by
+`ideas/tests/test_integration_security.py`:
+
+- An `ORGANIZATION` or `PUBLIC` *draft* is readable by its readers before it is
+  submitted. Drafts are only author-only when they are `PRIVATE`.
+- A `PRIVATE` idea stays author-only after it is submitted. A reviewer can
+  only act on an idea they can read (see [Transition matrix](#transition-matrix-implemented-s2-003)),
+  so a submitted `PRIVATE` idea cannot be picked up for review until its
+  author widens its visibility — which `updateIdea` only allows while it is a
+  draft. The frontend says so next to the visibility picker; it does not
+  change visibility on the author's behalf.
 
 ### DEPARTMENT is a reserved value, not a missing feature
 
@@ -514,10 +537,11 @@ anticipate:
   schema: a blank description cannot be acted on by a reviewer, and a
   one-word description is not a problem statement. It is a module constant, so
   changing it is a visible decision.
-- **A submitted idea is no longer editable, by anybody.** `update_idea` and
-  `submit_idea` both refuse anything past `DRAFT`. Sprint 3 introduces
-  `CHANGES_REQUESTED`, which is the route back to a draft; until it exists,
-  refusing is the only answer that is not a lie about what `SUBMITTED` means.
+- **A submitted idea is no longer editable, by anybody.** `update_idea`
+  refuses anything past `DRAFT` - `CHANGES_REQUESTED` included (see
+  [Lifecycle](#lifecycle)). `submit_idea` is the lifecycle's author move and
+  accepts exactly `DRAFT → SUBMITTED` and, since S2-003,
+  `CHANGES_REQUESTED → SUBMITTED`; anything else is refused.
 
 ### Attachments (implemented, S2-007)
 
@@ -545,6 +569,26 @@ the vote shape (readability/authorship with no status condition) applied to
 a *write* rule instead of a read one, and it is written down here for the
 same reason S2-006's no-lifecycle-gate decision was: it is easy to "fix"
 into a copy of a stricter neighbor's rule, and the fix would be wrong.
+
+**The upload endpoint's answers (S2-008).** `POST /ideas/<id>/attachments/`
+authenticates and authorizes *before* it reads `request.FILES` (which is what
+makes Django parse the multipart body), so a caller who could never upload is
+refused without the application processing the file:
+
+| Outcome | Status |
+| ------- | ------ |
+| No valid token (anonymous, expired, or a deactivated account) | 401 |
+| Idea unknown, unreadable, or not the caller's own | 404 - one answer, so the endpoint is not an existence oracle |
+| The author, without an active membership any more | 403 |
+| No file, or a file that fails validation (type, content, size, name) | 400, with `field: "file"` |
+| The storage backend failed | 502 |
+| Stored | 201 |
+
+A field-scoped refusal is always 400, never 404: before S2-008 validation and
+storage failures fell through to `IdeaError`'s default `'forbidden'` reason
+and were reported as a missing idea. A body-size ceiling on the bytes the web
+server reads off the socket is a reverse-proxy concern and is not configured
+in this repository.
 
 **The client never chooses the storage key, the content type, or a directory
 component of the filename.**
@@ -876,7 +920,8 @@ the typed request functions, `context/`-free hooks read them, and
 | S2-005 | `add_comment`/`update_comment`/`delete_comment`, `CommentType`/`CommentPage`, `comments`/`createComment`/`updateComment`/`deleteComment`, `IdeaType.discussionOpen`, the discussion UI — implemented |
 | S2-006 | `vote_for_idea`/`remove_vote`, `IdeaVoteState`, `voteIdea`/`removeVote`, `IdeaType.voteCount`/`viewerHasVoted` (annotated, no N+1), the vote control — implemented |
 | S2-007 | `upload_attachment`/`delete_attachment`, `ideas/storage.py`, `ideas/attachments.py` (file validation), `attachments`/`attachment`/`deleteAttachment`, the HTTP upload/download endpoints (`ideas/views.py`), the evidence UI — implemented |
-| S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
+| S2-008 | Integration and security hardening: cross-feature/two-tenant security tests, upload authenticates before reading the body, storage failures reported as 502, frontend stale-response and vote-state fixes — implemented |
+| S3 | Review workflow beyond the S2-003 transitions: review queue/dashboard, reviewer assignment, reasons on a review decision, editing content while changes are requested |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 
 Not modelled here, and not to be added under this domain: review dashboards,

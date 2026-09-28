@@ -185,6 +185,79 @@ class TestUploadView:
         assert response.status_code == 401
         assert Attachment.objects.count() == 0
 
+    def test_an_unauthenticated_request_with_no_file_is_401_not_400(self, client, world):
+        """
+        S2-008 regression. The view used to read `request.FILES` before
+        anything else, so an anonymous request with no file was told
+        "Choose a file to attach." (400) rather than that it is not signed in.
+        """
+        idea = make_idea(world['organization'], world['author'])
+
+        response = client.post(f'/ideas/{idea.pk}/attachments/', data={})
+
+        assert response.status_code == 401
+        assert response.json()['success'] is False
+
+    @pytest.mark.parametrize('caller', [None, 'colleague_token', 'outsider_token'])
+    def test_the_body_is_never_parsed_for_a_caller_who_may_not_upload(
+        self, client, world, settings, monkeypatch, caller
+    ):
+        """
+        S2-008 regression. Authentication and authorization run before the
+        view reads `request.FILES`, which is what makes Django parse the
+        multipart body (and spool a large file to temporary disk). A spy on
+        that parse proves an anonymous or unauthorized caller - here with a
+        body far over the size limit - is refused without the application
+        processing the upload at all.
+
+        What this cannot prove is that no bytes were read off the socket: the
+        test client hands the view a body that is already in memory, and a
+        real server reads the request before routing it. Bounding *that* is a
+        reverse-proxy body limit, outside this codebase.
+        """
+        from django.http.request import HttpRequest
+
+        parses = []
+        original = HttpRequest._load_post_and_files
+
+        def spy(request):
+            parses.append(request.path)
+            return original(request)
+
+        monkeypatch.setattr(HttpRequest, '_load_post_and_files', spy)
+        settings.ATTACHMENT_MAX_UPLOAD_BYTES = 16
+        idea = make_idea(world['organization'], world['author'])
+
+        response = upload_pdf(
+            client, idea.pk, world[caller] if caller else None, content=PDF_BYTES * 100
+        )
+
+        assert response.status_code in (401, 404)
+        assert response.json()['success'] is False
+        assert parses == []
+        assert Attachment.objects.count() == 0
+
+    def test_an_authorized_upload_still_parses_and_validates_the_body(
+        self, client, world, monkeypatch
+    ):
+        """The control for the test above: the spy does see a real upload."""
+        from django.http.request import HttpRequest
+
+        parses = []
+        original = HttpRequest._load_post_and_files
+
+        def spy(request):
+            parses.append(request.path)
+            return original(request)
+
+        monkeypatch.setattr(HttpRequest, '_load_post_and_files', spy)
+        idea = make_idea(world['organization'], world['author'])
+
+        response = upload_pdf(client, idea.pk, world['author_token'])
+
+        assert response.status_code == 201
+        assert parses == [f'/ideas/{idea.pk}/attachments/']
+
     def test_a_missing_file_field_is_refused(self, client, world):
         idea = make_idea(world['organization'], world['author'])
 
@@ -206,6 +279,12 @@ class TestUploadView:
             content=b'MZ' + b'\x00' * 32,
         )
 
+        # A validation failure, not an authorization one - S2-008 (this file
+        # used to accept whatever status code fell out of the authorization
+        # reason mapping, which happened to be 404 for every unset reason;
+        # see `test_a_validation_failure_is_never_reported_as_not_found`
+        # below for why that is wrong).
+        assert response.status_code == 400
         assert response.json()['success'] is False
         assert Attachment.objects.count() == 0
 
@@ -215,8 +294,32 @@ class TestUploadView:
 
         response = upload_pdf(client, idea.pk, world['author_token'])
 
+        assert response.status_code == 400
         assert response.json()['success'] is False
         assert Attachment.objects.count() == 0
+
+    def test_a_validation_failure_is_never_reported_as_not_found(self, client, world):
+        """
+        S2-008 regression. `services.upload_attachment` re-raises every
+        validation failure (`AttachmentValidationError`) as an `IdeaError`
+        with a `field` set and no explicit `reason`, which used to default
+        to `'forbidden'` - the same reason an authorization refusal uses.
+        `ideas/views.py` translated `'forbidden'` to HTTP 404, so a rejected
+        file type or an oversized file was indistinguishable, at the HTTP
+        level, from an idea that does not exist. A field-scoped refusal is a
+        bad request, never a missing resource, and the two must not share a
+        status code.
+        """
+        idea = make_idea(world['organization'], world['author'])
+
+        response = upload_pdf(
+            client, idea.pk, world['author_token'], filename='notes.bin', content=b'x'
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body['success'] is False
+        assert body['field'] == 'file'
 
     def test_a_path_traversal_filename_is_sanitized_not_written_outside_storage(
         self, client, world

@@ -85,15 +85,25 @@ export function useAttachments(ideaId: string | null): AttachmentGallery {
   useEffect(() => {
     if (key === null) return
 
+    // A superseded fetch - the same idea reloaded after an upload or a
+    // delete - must not settle over the newer one. See `useComments`.
+    let cancelled = false
+
     attachmentsRequest(key)
       .then((page) => {
+        if (cancelled) return
         setAnswer({ key, attachments: page.items, pageInfo: page.pageInfo })
         setErrorKey(null)
       })
       .catch(() => {
+        if (cancelled) return
         setAnswer(null)
         setErrorKey(key)
       })
+
+    return () => {
+      cancelled = true
+    }
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [key, reloadToken])
 

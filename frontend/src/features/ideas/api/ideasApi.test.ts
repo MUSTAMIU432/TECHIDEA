@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { graphqlClient } from '../../../graphql/client'
 import { setAccessToken } from '../../../graphql/tokenStore'
@@ -10,6 +10,7 @@ import {
   createIdeaRequest,
   deleteAttachmentRequest,
   deleteCommentRequest,
+  BLOB_URL_LIFETIME_MS,
   downloadAttachmentRequest,
   ideaRequest,
   ideasRequest,
@@ -817,8 +818,15 @@ describe('ideasApi', () => {
   })
 
   describe('downloadAttachmentRequest', () => {
+    // Fake timers throughout, so the scheduled revocation of a blob URL never
+    // outlives the test that created it.
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
     afterEach(() => {
       setAccessToken(null)
+      vi.useRealTimers()
     })
 
     it('fetches the attachments download URL with the bearer token', async () => {
@@ -841,7 +849,36 @@ describe('ideasApi', () => {
       const headers = init.headers as Record<string, string>
       expect(headers.Authorization).toBe('Bearer a-token')
       expect(createObjectURL).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the blob URL alive past the click, then revokes it', async () => {
+      // Regression (S2-008): the URL used to be revoked synchronously after
+      // `click()`, which some browsers treat as cancelling a download they
+      // have only just started.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('%PDF-1.4', { status: 200 })),
+      )
+      const createObjectURL = vi.fn(() => 'blob:mock-url')
+      const revokeObjectURL = vi.fn()
+      vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+      const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {
+        // At the moment the browser is asked to download, the URL is live.
+        expect(revokeObjectURL).not.toHaveBeenCalled()
+      })
+
+      await downloadAttachmentRequest(ATTACHMENT)
+
+      expect(click).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(BLOB_URL_LIFETIME_MS - 1)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+
+      // ...and it is not leaked: it is released once the lifetime is up.
+      vi.advanceTimersByTime(1)
       expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+      click.mockRestore()
     })
 
     it('throws on a failed download rather than returning a payload', async () => {

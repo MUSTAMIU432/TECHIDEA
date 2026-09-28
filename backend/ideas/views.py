@@ -51,11 +51,35 @@ _STATUS_BY_REASON = {
     'unauthenticated': 401,
     'forbidden': 404,
     'membership_required': 403,
+    # The storage tier failed, which is the server's problem and not the
+    # caller's - 502 for the same reason `download_attachment_view` answers a
+    # storage failure with one. Never 404: the idea exists and the caller may
+    # attach to it (S2-008).
+    'storage_unavailable': 502,
 }
 
 
 def _error_response(exc: services.IdeaError) -> JsonResponse:
-    status = _STATUS_BY_REASON.get(exc.reason, 400)
+    """
+    The HTTP status for one refused upload.
+
+    A field-scoped refusal is checked *first*, ahead of `exc.reason` - and
+    that order is the fix, not an optimization. `services.upload_attachment`
+    re-raises every validation failure (a bad extension, a mismatched magic
+    number, an oversized or empty file) as an `IdeaError` carrying `field`
+    and no explicit `reason`, which leaves `reason` at `IdeaError`'s own
+    default, `'forbidden'` - the exact value an authorization refusal uses.
+    Read through `_STATUS_BY_REASON` alone, a rejected file type was
+    reported as 404, indistinguishable from an idea that does not exist,
+    which is wrong twice over: it is not a missing resource, and this
+    endpoint's 404 is supposed to mean specifically that (see
+    `download_attachment_view`). Every field-level refusal in this domain
+    (`services.py`'s validators throughout) is a statement about the input,
+    never about whether something exists, so it is always a 400 regardless
+    of `reason` - S2-008's
+    `test_a_validation_failure_is_never_reported_as_not_found` pins this.
+    """
+    status = 400 if exc.field is not None else _STATUS_BY_REASON.get(exc.reason, 400)
     return JsonResponse(
         {'success': False, 'message': exc.message, 'field': exc.field}, status=status
     )
@@ -91,8 +115,25 @@ def upload_attachment_view(request: HttpRequest, idea_id: int) -> HttpResponse:
     or disguised upload - happens in `ideas.services.upload_attachment`; this
     view's whole job is translating an `UploadedFile` in and a JSON payload
     out.
+
+    **Authenticate and authorize before touching the body** (S2-008). The
+    multipart body is parsed lazily, the first time `request.FILES` is read,
+    so everything that does not need the file runs first: the token, then
+    whether this caller may attach to this idea at all. An anonymous or
+    unauthorized caller is therefore refused (401/403/404) without Django
+    parsing its body or spooling a large file to temporary disk, and never
+    sees a "choose a file" 400 that would answer a question it had no
+    standing to ask. Nothing here can stop the web server reading the bytes
+    off the socket - a body-size limit belongs at the proxy - but the
+    application does no work with them. `services.upload_attachment`
+    re-applies the same gate, so this is an early exit, not the control.
     """
     user = get_authenticated_user(request)
+
+    try:
+        services.authorize_attachment_upload(user, idea_id)
+    except services.IdeaError as exc:
+        return _error_response(exc)
 
     uploaded_file: UploadedFile | None = request.FILES.get('file')
     if uploaded_file is None:

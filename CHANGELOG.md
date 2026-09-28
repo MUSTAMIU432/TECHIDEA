@@ -376,6 +376,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     thumbnails or previews, versioning, per-attachment access grants beyond
     the idea's own visibility, and any AI processing of attachment content —
     those are later work, not omissions.
+- S2-008: Ideas domain integration, security and hardening — an audit of
+  S2-001 through S2-007 as one system, with fixes limited to what it found.
+  No P0 (security or tenant-isolation) defect was found. No new feature, no
+  API contract change, no migration and no new lifecycle state.
+  - **Security/integration tests** — `ideas/tests/test_integration_security.py`
+    walks attack paths across features rather than within one: two
+    organizations in both directions, GraphQL and the attachment HTTP
+    endpoints answering every (reader, idea) pair identically, another
+    tenant's `PUBLIC` idea being readable but not attachable, `DEPARTMENT`
+    staying author-only for every attachment operation, an attachment id
+    borrowed under a different readable idea's URL, former members, a still-
+    valid token for a deactivated account, a `PRIVATE` idea staying invisible
+    to reviewers after submission, and comments/votes/attachments of an
+    unreadable idea being unreachable by their own ids.
+  - **Upload endpoint** — authenticates and authorizes *before* reading
+    `request.FILES`, so an anonymous or unauthorized caller is refused without
+    Django parsing the multipart body (anonymous with no file is now 401, not
+    400). Validation failures are 400 and a storage failure is 502; both used
+    to fall through `IdeaError`'s default `'forbidden'` reason to 404.
+  - **Frontend** — discovery, discussion and evidence fetches discard a
+    superseded response, so an older request settling last (or failing) can no
+    longer replace or wipe the current answer; vote controls take the
+    server's numbers again whenever the list is re-fetched instead of pinning
+    the last vote response; the download blob URL is revoked on a timer rather
+    than synchronously after `click()`; and the copy no longer claims drafts
+    are always private or that submitting changes who can see an idea.
+  - **Documented, deliberately unchanged** — content is not editable in
+    `CHANGES_REQUESTED` (`update_idea` stays draft-only; a future refinement),
+    and a submitted `PRIVATE` idea cannot be reviewed because visibility and
+    status are independent. Stale docstrings in `ideas/models.py` and the
+    sprint table in `docs/ideas-domain.md` were corrected.
 - S2-006: Voting and engagement — the `Vote` model S2-001 designed, as
   `vote_for_idea`/`remove_vote` in `ideas/services.py`, `voteIdea`/`removeVote`
   and `IdeaVoteState` in the GraphQL schema, and a vote control on the

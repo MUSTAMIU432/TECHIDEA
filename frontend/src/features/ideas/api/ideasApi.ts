@@ -73,7 +73,11 @@ export const SELECTABLE_VISIBILITIES: ReadonlyArray<{
   label: string
   hint: string
 }> = [
-  { value: 'PRIVATE', label: 'Only me', hint: 'Nobody else can see this, not even your team.' },
+  {
+    value: 'PRIVATE',
+    label: 'Only me',
+    hint: 'Nobody else can see this, not even your team or a reviewer - so it cannot be reviewed.',
+  },
   {
     value: 'ORGANIZATION',
     label: 'My organization',
@@ -877,8 +881,11 @@ export async function uploadAttachmentRequest(
  * A plain `<a href>` cannot carry the `Authorization` header this endpoint
  * requires, so the bytes are fetched here (with the header, like every other
  * authenticated request this app makes) and turned into a blob URL the
- * browser downloads from - revoked immediately after, so nothing lingers in
- * memory once the download has started.
+ * browser downloads from. The URL is revoked on a timer rather than straight
+ * after `click()`: the click only *starts* the download, and some browsers
+ * read the blob asynchronously, so revoking synchronously can cancel it
+ * (S2-008). The timer still bounds how long the blob is held, so nothing
+ * lingers.
  *
  * Throws on any failure (a refusal, a network error) rather than returning a
  * payload: unlike the metadata operations above, there is no partial
@@ -886,6 +893,14 @@ export async function uploadAttachmentRequest(
  * file or with an HTTP error, and a caller shows the same transport-failure
  * message for either.
  */
+/**
+ * How long a download's blob URL outlives the click that starts it. Long
+ * enough for any browser to have begun reading the blob - FileSaver.js settled
+ * on the same 40 seconds - and short enough that a file is not held in memory
+ * for the rest of the session.
+ */
+export const BLOB_URL_LIFETIME_MS = 40_000
+
 export async function downloadAttachmentRequest(attachment: IdeaAttachment): Promise<void> {
   const token = getAccessToken()
   const response = await fetch(`${env.apiBaseUrl}${attachment.downloadUrl}`, {
@@ -909,6 +924,7 @@ export async function downloadAttachmentRequest(attachment: IdeaAttachment): Pro
     link.click()
     document.body.removeChild(link)
   } finally {
-    URL.revokeObjectURL(url)
+    // Scheduled in `finally` so the blob is released even if the click threw.
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_LIFETIME_MS)
   }
 }

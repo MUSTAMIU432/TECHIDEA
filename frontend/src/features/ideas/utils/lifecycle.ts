@@ -24,10 +24,11 @@ export const STATUS_LABELS: Record<IdeaStatus, string> = {
 }
 
 export const STATUS_DESCRIPTIONS: Record<IdeaStatus, string> = {
-  DRAFT: 'Only you can see this, and only you can edit it.',
+  DRAFT: 'Only you can edit this. Who can read it is set by its visibility.',
   SUBMITTED: 'Put forward. Waiting for a reviewer to pick it up.',
   UNDER_REVIEW: 'A reviewer is looking at it.',
-  CHANGES_REQUESTED: 'Sent back to you with changes to make. Edit and submit again.',
+  CHANGES_REQUESTED:
+    'Sent back to you with changes to make. Its content cannot be edited in this state; submit it again when it is ready.',
   REJECTED: 'Not going forward.',
   APPROVED: 'Accepted as worth automating.',
   AUTOMATION_PROPOSAL: 'Handed to the automation-opportunity track.',

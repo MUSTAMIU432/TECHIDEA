@@ -186,12 +186,13 @@ class Idea(models.Model):
         """
         The submission lifecycle.
 
-        Only the vocabulary is established here. Sprint 2 implements
-        `DRAFT -> SUBMITTED`; the review transitions
-        (`SUBMITTED -> UNDER_REVIEW -> CHANGES_REQUESTED|REJECTED|APPROVED`)
-        and `APPROVED -> AUTOMATION_PROPOSAL` are Sprint 3's, and they are
-        already named so no later migration is needed to say what an idea in
-        review *is*.
+        Only the vocabulary is established here; which status may follow
+        which, and who may make the move, is `ideas/lifecycle.py`'s transition
+        matrix. All of it shipped in Sprint 2: `DRAFT -> SUBMITTED` in S2-002,
+        and the review transitions
+        (`SUBMITTED -> UNDER_REVIEW -> CHANGES_REQUESTED|REJECTED|APPROVED`,
+        `CHANGES_REQUESTED -> SUBMITTED`) and `APPROVED -> AUTOMATION_PROPOSAL`
+        in S2-003.
         """
 
         (
@@ -471,13 +472,23 @@ class Attachment(models.Model):
     Metadata for a file attached to an idea. **The bytes are not here.**
 
     This row is a pointer, not a container: `storage_key` is the object's key
-    in an S3-compatible bucket and the file's bytes live there, served by a
-    short-lived signed URL. No `FileField`, no `BinaryField`, no base64 in a
-    `TextField` - the reason is not taste but the storage tier: PostgreSQL is
-    the transactional tier, and attachments are large, immutable blobs whose
-    read pattern (stream a whole file, rarely) and backup/replication profile
-    (every backup, every replica, forever) are exactly what a row-oriented
-    database is worst at.
+    in the attachment storage backend and the file's bytes live there. No
+    `FileField`, no `BinaryField`, no base64 in a `TextField` - the reason is
+    not taste but the storage tier: PostgreSQL is the transactional tier, and
+    attachments are large, immutable blobs whose read pattern (stream a whole
+    file, rarely) and backup/replication profile (every backup, every replica,
+    forever) are exactly what a row-oriented database is worst at.
+
+    S2-001 established this boundary; S2-007 built the flow on it. The bytes
+    arrive by an HTTP `multipart/form-data` upload and leave by an HTTP
+    download (`ideas/views.py`), both re-authorized per request from the
+    bearer token - there is no signed URL and no presigned browser-to-bucket
+    upload. They are written through
+    Django's storage abstraction (`ideas/storage.py`, the
+    `STORAGES['attachments']` setting) under a key the server generates
+    (`ideas.storage.generate_storage_key`), never one derived from the
+    client's filename. The default backend is the local filesystem; moving to
+    object storage is a settings change, not a change to this model.
 
     `storage_key` is unique so two attachments cannot silently point at the
     same object, which would make deleting one of them a data-loss event that
@@ -486,10 +497,6 @@ class Attachment(models.Model):
     `idea` is the only link; organization is deliberately *not* duplicated
     onto the row. It is reachable through `attachment.idea.organization`, and
     a second copy would be free to disagree with the idea it belongs to.
-
-    S2-001 establishes this boundary only. The upload flow itself
-    (presigned POST from the browser straight to object storage, then this row
-    written from the confirmed key) is a later sprint.
     """
 
     idea = models.ForeignKey(

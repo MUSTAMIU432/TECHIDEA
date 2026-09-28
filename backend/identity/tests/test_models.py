@@ -76,7 +76,10 @@ class TestUserModel:
                 password=VALID_PASSWORD,
             )
 
-    def test_password_is_hashed_not_stored_in_plaintext(self):
+    def test_password_is_hashed_not_stored_in_plaintext(self, settings):
+        # The suite-wide fast hasher (conftest.py) is swapped back for the
+        # production default so this asserts on the real algorithm.
+        settings.PASSWORD_HASHERS = ['django.contrib.auth.hashers.PBKDF2PasswordHasher']
         user = _make_user(password=VALID_PASSWORD)
 
         assert user.password != VALID_PASSWORD

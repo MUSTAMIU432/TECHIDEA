@@ -5,6 +5,7 @@ import {
   type Idea,
   type IdeaFilters,
   type IdeaStatus,
+  type IdeaVisibility,
 } from '../api/ideasApi'
 import { useDebouncedCallback } from '../../../lib/useDebouncedCallback'
 import { useOrganization } from '../../organizations/context/useOrganization'
@@ -45,6 +46,18 @@ import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
  * - a transport failure: the request never reached a decision, so it is
  *   reported as itself rather than as "your idea was not accepted".
  */
+/**
+ * Who can read a just-saved draft, in words. Derived from the idea's own
+ * visibility rather than assumed: a draft is only author-only when it is
+ * `PRIVATE`, and saving or submitting never changes that (S2-008).
+ */
+const DRAFT_READERS: Record<IdeaVisibility, string> = {
+  PRIVATE: 'Only you can see it.',
+  ORGANIZATION: 'Members of this organization can read it.',
+  PUBLIC: 'Anyone signed in to the platform can read it.',
+  DEPARTMENT: 'Only you can see it.',
+}
+
 export function IdeasWorkspace() {
   const { activeOrganization } = useOrganization()
   const [editing, setEditing] = useState<Idea | null>(null)
@@ -85,9 +98,7 @@ export function IdeasWorkspace() {
     setEditing(null)
     setIsCreating(false)
     setNotice(
-      idea.status === 'DRAFT'
-        ? 'Draft saved. Only you can see it until you submit it.'
-        : 'Idea saved.',
+      idea.status === 'DRAFT' ? `Draft saved. ${DRAFT_READERS[idea.visibility]}` : 'Idea saved.',
     )
     reloadList()
   }
@@ -128,7 +139,8 @@ export function IdeasWorkspace() {
           </h2>
         </div>
         <p className="max-w-md text-sm leading-6 text-gray-600">
-          File a problem worth automating. Drafts stay private to you; submitting puts it forward.
+          File a problem worth automating. Submitting puts it forward for review; who can see it is
+          its visibility, which submitting does not change.
         </p>
       </div>
 

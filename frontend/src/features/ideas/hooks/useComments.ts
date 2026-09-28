@@ -118,15 +118,28 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
     // rather than as an empty discussion.
     if (key === null) return
 
+    // A reload after a write re-runs this effect for the *same* discussion,
+    // so comparing keys cannot tell the two fetches apart: without this, the
+    // older one settling last would put back a discussion missing the comment
+    // just posted, or its failure would replace fresh contents with an error
+    // (S2-008). Same guard as `useIdeaDiscovery`.
+    let cancelled = false
+
     commentsRequest(key)
       .then((page) => {
+        if (cancelled) return
         setAnswer({ key, comments: page.items, pageInfo: page.pageInfo })
         setErrorKey(null)
       })
       .catch(() => {
+        if (cancelled) return
         setAnswer(null)
         setErrorKey(key)
       })
+
+    return () => {
+      cancelled = true
+    }
     // `reloadToken` is a trigger rather than an input: it is how a successful
     // write says "there is no page to update, go and ask again". The linter is
     // right that the effect does not read it.

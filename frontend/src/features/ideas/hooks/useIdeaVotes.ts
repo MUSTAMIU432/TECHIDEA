@@ -36,6 +36,30 @@ export function useIdeaVotes(ideas: Idea[]): {
 } {
   const [overrides, setOverrides] = useState<Record<string, Partial<IdeaVoteControl>>>({})
 
+  // A new `ideas` array is a new answer from the server, and the server is
+  // authoritative (S2-008). The numbers a vote response wrote are the server's
+  // too, but they are only the *latest* server word until the list is fetched
+  // again - after that, keeping them would pin a count other people have since
+  // changed for as long as the list is mounted. So a fresh answer drops every
+  // override's numbers and keeps only what is still true of this client: a
+  // request in flight, and an error the reader has not dismissed yet.
+  //
+  // Adjusted during render, React's pattern for state derived from a prop
+  // change, so there is never a paint that shows the stale numbers against
+  // the fresh list. This relies on the caller keeping one array identity per
+  // answer - `useIdeaDiscovery` does, including for its empty fallback.
+  const [seededFrom, setSeededFrom] = useState(ideas)
+  if (seededFrom !== ideas) {
+    setSeededFrom(ideas)
+    setOverrides((previous) => {
+      const kept: Record<string, Partial<IdeaVoteControl>> = {}
+      for (const [ideaId, { pending, error }] of Object.entries(previous)) {
+        if (pending || error) kept[ideaId] = { pending, error }
+      }
+      return kept
+    })
+  }
+
   // Seeded from the ideas the list was given, so the control renders the
   // server's numbers from the first paint and there is no request per idea.
   // Declared before `toggle`, which reads it to know what a click means.

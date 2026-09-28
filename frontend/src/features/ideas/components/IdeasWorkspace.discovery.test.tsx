@@ -492,6 +492,72 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
     expect(screen.getByText('Resolved second')).toBeInTheDocument()
   })
 
+  it('discards a stale answer that settles after the current one', async () => {
+    // S2-008 regression. The test above resolves both requests with the same
+    // row, so a stale answer overwriting the current one looked identical and
+    // went unnoticed. Here the two answers differ.
+    render(<IdeasWorkspace />)
+    await screen.findByText('Automate the invoice run')
+
+    const requests: { resolve: (value: IdeaPage) => void }[] = []
+    listMock.mockImplementation(
+      () =>
+        new Promise<IdeaPage>((resolve) => {
+          requests.push({ resolve })
+        }),
+    )
+
+    // Request A, then request B, both in flight.
+    fireEvent.change(categorySelect(), { target: { value: '4' } })
+    fireEvent.change(statusSelect(), { target: { value: 'REJECTED' } })
+    await waitFor(() => expect(requests.length).toBe(2))
+    const [a, b] = requests
+
+    // B settles first and is shown.
+    await act(async () => {
+      b.resolve(page([idea({ id: '9', title: 'Current answer' })]))
+    })
+    expect(await screen.findByText('Current answer')).toBeInTheDocument()
+
+    // A settles afterwards and must be discarded.
+    await act(async () => {
+      a.resolve(page([idea({ id: '8', title: 'Stale answer' })]))
+    })
+    expect(screen.getByText('Current answer')).toBeInTheDocument()
+    expect(screen.queryByText('Stale answer')).not.toBeInTheDocument()
+    // And the list is settled, not left looking busy.
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull()
+  })
+
+  it('does not let a stale request’s failure wipe the current answer', async () => {
+    render(<IdeasWorkspace />)
+    await screen.findByText('Automate the invoice run')
+
+    const requests: { resolve: (value: IdeaPage) => void; reject: (reason: unknown) => void }[] = []
+    listMock.mockImplementation(
+      () =>
+        new Promise<IdeaPage>((resolve, reject) => {
+          requests.push({ resolve, reject })
+        }),
+    )
+
+    fireEvent.change(categorySelect(), { target: { value: '4' } })
+    fireEvent.change(statusSelect(), { target: { value: 'REJECTED' } })
+    await waitFor(() => expect(requests.length).toBe(2))
+    const [a, b] = requests
+
+    await act(async () => {
+      b.resolve(page([idea({ id: '9', title: 'Current answer' })]))
+    })
+    await act(async () => {
+      a.reject(new Error('Failed to fetch'))
+    })
+
+    expect(screen.getByText('Current answer')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull()
+  })
+
   it('reports a failed page as a failure, not as an empty result', async () => {
     mockContext(pagedPage([idea()], 137))
     render(<IdeasWorkspace />)
