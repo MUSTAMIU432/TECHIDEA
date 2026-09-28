@@ -279,12 +279,12 @@ password reset and email confirmation), the organizations tier (create an
 organization, switch between them, see members and roles), and the first
 Ideas slice (file an idea, edit your own draft, submit it for review, move it
 through review, browse ideas by category, search and status over a paged list,
-read and write the discussion on any idea, and vote for the ideas worth
-doing).
-Reviews, projects, notifications, attachments and everything else in that
-direction do not exist yet. Within Identity, what is still missing is an
-authenticated Google-account-linking flow: Google sign-in authenticates or
-provisions, and never links to an existing account by email.
+read and write the discussion on any idea, vote for the ideas worth doing,
+and attach supporting evidence to your own idea).
+Reviews, projects, notifications and everything else in that direction do
+not exist yet. Within Identity, what is still missing is an authenticated
+Google-account-linking flow: Google sign-in authenticates or provisions, and
+never links to an existing account by email.
 
 Two things the reset and confirmation flows deliberately do **not** do on this
 side, because the backend is the authority for both:
@@ -358,6 +358,27 @@ Two things the Ideas area deliberately does **not** do on this side:
   append-only in reading order, so a post, an edit or a delete updates the
   thread in place — the reader keeps their filters and their page, and a second
   submission in the same tick is dropped rather than duplicated.
+- It does not fetch an idea's attachments until that section is opened, for
+  the same reason as the discussion above, and independently of it - opening
+  one does not open or close the other.
+- It does not decide who may upload or delete an attachment. The controls
+  render only where `idea.authorId` matches the signed-in user - a courtesy,
+  since the server enforces authorship regardless - while *download* is
+  offered to every reader who can see the section at all, because reading an
+  idea's evidence follows the idea's own visibility, not its authorship.
+- It does not send a file through the GraphQL client. `uploadAttachmentRequest`
+  and `downloadAttachmentRequest` are the two functions in `ideasApi.ts` that
+  call `fetch` directly - a multipart upload and a streamed download are not
+  GraphQL operations - attaching the same bearer token `graphqlClient` does,
+  read fresh from `tokenStore` on every call.
+- It does not trust its own file-type or size check as the security boundary.
+  A courtesy check (extension, non-zero size, 10 MB) rejects an
+  obviously-doomed file before a round trip; the server's own message is
+  what is shown for anything that check lets through, including a renamed
+  executable this client's check cannot see through.
+- It does not render an uploaded filename as anything but text, and it does
+  not re-fetch the ideas list after an upload or a delete, for the same
+  reason votes and comments do not: neither changes what discovery returned.
 
 On organizations specifically: what exists is the data model, the
 authorization rules and a deliberately small UI - there is no

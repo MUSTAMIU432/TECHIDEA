@@ -230,8 +230,9 @@ refusal Sprint 1 made for cross-tenant organization reads.
 ## Storage boundary
 
 Attachment **bytes are never stored in PostgreSQL**. `Attachment` is a
-pointer: `storage_key` is the object's key in an S3-compatible bucket, and
-the file is served by a short-lived signed URL.
+pointer: `storage_key` is the object's key in whatever backend
+`ideas/storage.py` is configured to use, and the bytes themselves live
+there.
 
 The reason is the storage tier, not taste. PostgreSQL is the transactional
 tier; attachments are large, immutable blobs whose read pattern (stream a
@@ -247,9 +248,26 @@ nothing in the database would flag.
 attachment is `idea__organization_id`; a second copy of the tenant on the row
 would be free to disagree with the idea it belongs to.
 
-S2-001 establishes the boundary only. The upload flow itself - a presigned
-POST from the browser straight to object storage, then the metadata row
-written from the confirmed key - is later work.
+**As implemented (S2-007).** Upload and download go *through* this server,
+not straight between the browser and the bucket: the browser `POST`s the
+file to `ideas/views.py::upload_attachment_view`, which validates it and
+writes it to `storages['attachments']`
+(`config/settings/base.py`'s `STORAGES` entry) via `ideas/storage.py`, and
+downloads stream back through `download_attachment_view` the same way. This
+is a deliberate, current-scale choice rather than the final design: today
+the only backend actually installed and configured is Django's own
+filesystem `Storage` (see `ATTACHMENTS_STORAGE_BACKEND` in
+`backend/.env.example`), and there is no object-storage bucket, no signed-URL
+mechanism and no `django-storages` dependency in this codebase to route
+around. `ideas/storage.py` is written so that changes: every read and write
+goes through Django's pluggable `Storage` API rather than a filesystem path
+or a client library, so pointing `ATTACHMENTS_STORAGE_BACKEND` at an
+installed object-storage backend later is a settings change, not a rewrite
+of `ideas/services.py` or `ideas/views.py`. Presigned, direct-to-bucket
+upload/download (skipping this server for the bytes) is a reasonable next
+step once such a backend exists, and is exactly the kind of change this
+abstraction was built to absorb - it is not implemented now because there is
+no bucket yet to presign a URL against.
 
 ## Database design
 
@@ -316,6 +334,8 @@ update_comment(user, comment_id, content) -> Comment
 delete_comment(user, comment_id) -> None
 vote_for_idea(user, idea_id) -> Vote
 remove_vote(user, idea_id) -> None
+upload_attachment(user, idea_id, uploaded_file) -> Attachment
+delete_attachment(user, attachment_id) -> None
 ```
 
 `create_idea` must require an active membership in the target organization
@@ -499,6 +519,102 @@ anticipate:
   `CHANGES_REQUESTED`, which is the route back to a draft; until it exists,
   refusing is the only answer that is not a lie about what `SUBMITTED` means.
 
+### Attachments (implemented, S2-007)
+
+The S2-001 `Attachment` model is used exactly as designed - see [Storage
+boundary](#storage-boundary) for the object-storage side of this. What S2-007
+adds is the operations, the authorization rule, and the file itself never
+touching PostgreSQL or GraphQL.
+
+| Operation | Requires |
+| --------- | -------- |
+| `upload_attachment(user, idea_id, uploaded_file)` | The idea's own **author**, with an active membership - not merely being able to read the idea |
+| `delete_attachment(user, attachment_id)` | The same, resolved through the attachment's idea |
+| Listing (`attachments(ideaId)`) and download | Anyone who can **read** the idea - the looser, comment/vote-shaped rule |
+
+**Upload and delete require authorship, not readability - the one rule this
+domain had not yet had to state.** Every prior write in this app (comments,
+votes) followed *readability*, deliberately, because participation and
+interest both follow what a reader is shown. Evidence is different: it is
+closer to editing the idea than to responding to it, so `_load_attachable_idea`
+in `ideas/services.py` requires the same two conditions `update_idea` does -
+authorship and an active membership - while deliberately **not** requiring
+`update_idea`'s `DRAFT`-only lifecycle gate, because evidence accumulates
+throughout review, not only while an idea is still being written. This is
+the vote shape (readability/authorship with no status condition) applied to
+a *write* rule instead of a read one, and it is written down here for the
+same reason S2-006's no-lifecycle-gate decision was: it is easy to "fix"
+into a copy of a stricter neighbor's rule, and the fix would be wrong.
+
+**The client never chooses the storage key, the content type, or a directory
+component of the filename.**
+
+- The storage key (`ideas.storage.generate_storage_key`) is built from the
+  idea's own id and a random token - never from anything the client sends -
+  which is the actual path-traversal defense, not a validation the key is
+  checked against afterwards.
+- The recorded content type (`ideas.attachments.canonical_content_type`) is
+  derived from the file's validated extension and confirmed against its own
+  leading bytes; the browser's `Content-Type` claim on the upload is never
+  read as data. This is "do not trust the browser-provided MIME type" as a
+  structural fact rather than a check that could be forgotten.
+- The display filename (`ideas.attachments.safe_display_filename`) is
+  reduced to its last path segment on both separator styles before anything
+  else touches it, so a client-supplied `../../etc/passwd.pdf` is stored and
+  shown as `passwd.pdf` and never becomes a path anywhere in this stack.
+
+**Two independent checks gate what file type is accepted**, because they
+defend against different lies: an explicit extension allow-list (PDF; PNG,
+JPEG, GIF, WebP; CSV, TXT; DOC, DOCX, XLS, XLSX - deliberately nothing
+executable or script-shaped), and the file's own leading bytes checked
+against the signature the extension claims (`ideas.attachments.
+validate_content`). A renamed executable is caught by the second check even
+when the first would have let it through; a set of "dangerous" signatures
+(`MZ`, ELF, a shebang, Mach-O/Java) is refused for *every* extension,
+including ones with no signature of their own to check (CSV, TXT), as
+defense in depth. Size is capped by `ATTACHMENT_MAX_UPLOAD_BYTES` (10 MB by
+default), checked against the upload's own measured size, never a
+client-supplied header.
+
+**Not idempotent**, on both operations - matching `add_comment`/
+`delete_comment`'s shape rather than the votes' toggle shape. Uploading twice
+produces two attachments (there is no "this is the same evidence" identity to
+collapse them by); deleting twice refuses the second time, because the
+attachment named by the second call is no longer there. The one place this
+domain still had to decide a race: a database failure *after* a successful
+storage write is met by deleting the just-written, now-orphaned object
+(`ideas.services.upload_attachment`); a storage failure *after* a successful
+database delete is logged and left as an orphaned object rather than
+resurrecting a database row the caller was already told is gone
+(`ideas.services.delete_attachment`) - the database, not the storage
+backend, is this domain's source of truth for whether an attachment exists.
+
+**GraphQL is metadata and lifecycle only; the bytes are HTTP.** `attachments
+(ideaId)`, `attachment(id)` and `deleteAttachment(id)` follow this schema's
+existing conventions exactly - `AttachmentType` carries `uploaderId`, never an
+embedded uploader, for the same reason `CommentType` carries `authorId` alone.
+There is no `addAttachment`/`createAttachment` mutation and never will be:
+binary content does not fit a JSON-in/JSON-out GraphQL operation, and forcing
+it through one would mean base64-encoding a file into a string field,
+inflating it by a third for no benefit. `ideas/views.py` is the HTTP surface
+instead - `POST /ideas/<idea_id>/attachments/` to upload,
+`GET /ideas/<idea_id>/attachments/<attachment_id>/download/` to stream back -
+authenticated by the same `Authorization: Bearer` header every GraphQL
+request carries, through the same `identity.authentication.
+get_authenticated_user`. `AttachmentType.downloadUrl` is a relative path
+into that second endpoint, not a full URL and not a signed one: nothing
+about the path is secret, because the endpoint re-authenticates and
+re-authorizes the request itself when the client fetches it, from the same
+header - see [Storage boundary](#storage-boundary) for why a signed URL is
+not yet the right call at this project's scale.
+
+**Download is never rendered inline.** `Content-Disposition: attachment`
+unconditionally, for every content type this domain accepts, images
+included. An uploaded file is never trusted content, and an HTML or SVG file
+rendered inline in this app's own origin would be exactly the injection this
+line exists to refuse; forcing a download is the one rule that makes an
+allow-list of "safe to render inline" content types unnecessary.
+
 ## Selector layer (implemented, S2-002; discovery in S2-004)
 
 Reads live in `ideas/selectors.py`, separate from writes, so the visibility
@@ -643,12 +759,19 @@ Intended operations:
 | `organizationIdeas(organizationId, filters)` | `submitIdea(id)` |
 | `categories` | `addComment(input)` |
 | `comments(ideaId)` | `updateComment(input)` / `deleteComment(id)` |
-| | `voteIdea(id)` / `removeVote(id)` — implemented in S2-006 |
+| `attachments(ideaId)` / `attachment(id)` — implemented in S2-007 | `voteIdea(id)` / `removeVote(id)` — implemented in S2-006 |
+| | `deleteAttachment(id)` — implemented in S2-007 |
 
 The frontend will need `submittedAt` and `status` on the idea type to render
 a draft, so both are exposed; the three review-only statuses are exposed as
 enum values from the start so the frontend's union type is not wrong by
 omission.
+
+There is deliberately no `addAttachment`/`createAttachment` mutation, in
+S2-007 or ever: binary content does not fit a JSON-in/JSON-out GraphQL
+operation. Uploading and downloading an attachment's bytes are the one
+HTTP surface Ideas has beyond `/graphql/` - see [Attachments](#attachments-implemented-s2-007)
+and `ideas/views.py`.
 
 ## Frontend boundary (implemented, S2-002/S2-004)
 
@@ -656,8 +779,9 @@ omission.
 frontend/src/features/ideas/
     api/          ideasApi.ts - the documents and typed request functions
     components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination,
-                  IdeaDiscussion, IdeaVoteButton, IdeasWorkspace
-    hooks/        useIdeaDiscovery, useCategories, useComments, useIdeaVotes
+                  IdeaDiscussion, IdeaVoteButton, IdeaAttachments, IdeasWorkspace
+    hooks/        useIdeaDiscovery, useCategories, useComments, useIdeaVotes,
+                  useAttachments
 ```
 
 The data loading moved into `hooks/` in S2-004, and for a specific reason
@@ -705,6 +829,20 @@ backend rule rather than a free choice:
   votes, so there is nothing to roll back and a failure leaves the number
   exactly where it was. The in-flight guard is a `useRef`, not module state,
   because state cannot be read synchronously from a click handler.
+- **Attachments are a disclosure too, fetched only while open** - the same
+  reasoning as the discussion, and independent of it: a reader can open
+  either, both, or neither. `useAttachments` splices an upload onto the end
+  of the loaded list and filters a delete out of it, the same append/remove
+  shape `useComments` uses, and never re-fetches the ideas list either way.
+  Upload and delete controls render only when `idea.authorId === user.id` -
+  a courtesy, since the server enforces authorship regardless - and every
+  reader who can see the section at all (because they can read the idea) is
+  offered download. `uploadAttachmentRequest`/`downloadAttachmentRequest` are
+  the two functions in `ideasApi.ts` that call `fetch` directly instead of
+  going through `graphqlClient`, because a multipart upload and a streamed
+  download are not GraphQL operations - see `ideas/views.py`'s docstring for
+  the backend half of that split. Both attach the same bearer token
+  `graphqlClient` does, read fresh from `tokenStore` on every call.
 
 This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
@@ -737,6 +875,7 @@ the typed request functions, `context/`-free hooks read them, and
 | S2-004 | `list_discoverable_ideas`, `IdeaFiltersInput`, `IdeaPage`, `ideas/pagination.py`, category/search/status filters, the discovery UI — implemented |
 | S2-005 | `add_comment`/`update_comment`/`delete_comment`, `CommentType`/`CommentPage`, `comments`/`createComment`/`updateComment`/`deleteComment`, `IdeaType.discussionOpen`, the discussion UI — implemented |
 | S2-006 | `vote_for_idea`/`remove_vote`, `IdeaVoteState`, `voteIdea`/`removeVote`, `IdeaType.voteCount`/`viewerHasVoted` (annotated, no N+1), the vote control — implemented |
+| S2-007 | `upload_attachment`/`delete_attachment`, `ideas/storage.py`, `ideas/attachments.py` (file validation), `attachments`/`attachment`/`deleteAttachment`, the HTTP upload/download endpoints (`ideas/views.py`), the evidence UI — implemented |
 | S3 | Review workflow: `UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 

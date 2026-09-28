@@ -1,11 +1,16 @@
 """
-Writing ideas: create, edit, submit (S2-002), and commenting on them (S2-005).
+Writing ideas: create, edit, submit (S2-002), commenting on them (S2-005),
+voting on them (S2-006), and attaching supporting evidence to them (S2-007).
 
 The review workflow's queue is a later sprint; this module does not stub it,
 does not half-implement it, and does not define the vocabulary it would use.
 S2-006 added the vote operations, which follow this module's existing rule
 that the client is never trusted with ownership: the voter is the
-authenticated user and the idea is authorized and then used.
+authenticated user and the idea is authorized and then used. S2-007's
+attachment operations follow the same rule for the uploader, and additionally
+never trust the client with the storage key (`ideas/storage.py` generates
+it) or with the file's declared type (`ideas/attachments.py` derives and
+confirms it from the bytes instead).
 
 Who may do what
 ---------------
@@ -78,16 +83,20 @@ that does not exist - produces the same `IdeaError` with the same message
 three operations into a probe for which idea ids are real.
 """
 
+import logging
 from dataclasses import dataclass
 
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 
-from ideas import selectors
-from ideas.models import Category, Comment, Idea, Vote
+from ideas import attachments as attachment_rules
+from ideas import selectors, storage
+from ideas.models import Attachment, Category, Comment, Idea, Vote
 from identity.models import User
 from organizations import authorization
 from organizations.authorization import AuthorizationError
 from organizations.models import Membership
+
+logger = logging.getLogger(__name__)
 
 
 class IdeaError(AuthorizationError):
@@ -655,3 +664,173 @@ def remove_vote(user: User | None, idea_id: object) -> None:
     # removes *your* vote and can never touch anybody else's, so a vote for
     # another user on the same idea is not even a row this statement can name.
     Vote.objects.filter(idea=idea, user=active_user).delete()
+
+
+# --- attachments (S2-007) -----------------------------------------------------------
+
+
+def _load_attachable_idea(user: User, idea_id: object) -> Idea:
+    """
+    The idea `user` may attach supporting evidence to right now.
+
+    Authorship and an active membership - the same two conditions
+    `_load_owned_draft` requires for editing a draft's content - but
+    deliberately **no lifecycle gate**, and that is a considered choice, not
+    an omission. Evidence is not the draft content itself; it accumulates
+    while an idea is discussed and reviewed, not only while it is being
+    written, so restricting uploads to `DRAFT` (as `_load_owned_draft` does
+    for `update_idea`) would refuse the case this feature mostly exists for -
+    attaching a screenshot or a spreadsheet once an idea is already under
+    review. This follows the shape S2-006 established for votes
+    (`_require_readable_idea`: readability with no status condition) rather
+    than the shape S2-005 established for comments (closed on rejection):
+    an idea's own evidence, like interest in it, outlives its review state.
+
+    Resolved through `get_idea` first, so an idea the caller cannot even see
+    is refused identically to one that does not exist, and only *then* is
+    authorship checked - the same two-step order `_load_owned_draft` and
+    `_load_discussable_idea` use, so a reviewer or a colleague cannot learn
+    "this idea exists but isn't yours to attach to" about something they
+    were never shown in the first place.
+    """
+    idea = selectors.get_idea(user, idea_id)
+    if idea is None or idea.author_id != user.pk:
+        raise IdeaError('Idea is unavailable.', reason='forbidden')
+
+    # Re-checked on every write, not only at creation: leaving the
+    # organization has to take the ability to attach evidence to it with you,
+    # the same reasoning `_load_owned_draft` and `create_idea` apply.
+    if authorization.get_membership(user, idea.organization_id) is None:
+        raise IdeaError(
+            'You must be an active member of this organization to work with ideas here.',
+            reason='membership_required',
+        )
+
+    return idea
+
+
+def _load_owned_attachment(user: User, attachment_id: object) -> Attachment:
+    """
+    The attachment `user` may delete right now, or a refusal.
+
+    The gate is the *idea's* authorship, not the attachment's uploader,
+    though today the two are always the same person: `upload_attachment`
+    only ever accepts a file from an idea's own author (see
+    `_load_attachable_idea`), so there is no second contributor whose
+    uploads this idea's author would otherwise be deleting. Written this way
+    rather than checking `attachment.uploaded_by_id` so the rule has one
+    statement - "the author of this idea controls its evidence" - instead of
+    two that happen to agree only because of how upload is gated.
+
+    One refusal message for no such id, an attachment on another tenant's
+    idea, and somebody else's idea's attachment alike - the same shape
+    `_load_owned_comment` uses, so an attachment id is not an oracle for any
+    of the three.
+    """
+    attachment = selectors.get_attachment(user, attachment_id)
+    if attachment is None or attachment.idea.author_id != user.pk:
+        raise IdeaError('Attachment is unavailable.', reason='forbidden')
+
+    if authorization.get_membership(user, attachment.idea.organization_id) is None:
+        raise IdeaError(
+            'You must be an active member of this organization to work with ideas here.',
+            reason='membership_required',
+        )
+
+    return attachment
+
+
+def upload_attachment(user: User | None, idea_id: object, uploaded_file) -> Attachment:
+    """
+    Attach `uploaded_file` to an idea `user` owns, as supporting evidence.
+
+    `uploaded_file` is a Django `UploadedFile` (from `request.FILES`,
+    `ideas/views.py`'s only caller) - its `.name` is the display filename the
+    browser sent, `.size` is measured by Django from the actual request body
+    (not a header the client could lie about), and `.content_type` is **never
+    read here**: this domain's own content type is derived from the file's
+    validated extension and confirmed against its leading bytes, exactly the
+    way `ideas.attachments`'s module docstring explains, so a browser's
+    `multipart/form-data` claim never becomes stored data.
+
+    The storage key is generated here, from the idea's own id, and is never a
+    value `uploaded_file` or its caller supplies - see
+    `ideas.storage.generate_storage_key`. That is the actual defense against
+    a client choosing an arbitrary key or walking one attachment's bytes onto
+    another's.
+
+    **Ordering, and what happens if a step fails.** Validation runs entirely
+    before anything touches storage, so a rejected file never reaches it.
+    The object is then written to storage *before* the database row is
+    created: if the row's own validation or the database itself then fails,
+    the just-written object is deleted so storage and the database do not
+    end up disagreeing about an attachment that was never actually recorded.
+    The reverse order - row first, object second - would leave a *readable*
+    attachment whose bytes do not exist the moment the storage write failed,
+    which is a worse inconsistency than a storage object nothing points to.
+    """
+    active_user = _require_active_user(user)
+    idea = _load_attachable_idea(active_user, idea_id)
+
+    try:
+        display_name = attachment_rules.safe_display_filename(uploaded_file.name)
+        extension = attachment_rules.resolve_extension(display_name)
+        attachment_rules.validate_size(uploaded_file.size)
+
+        head = uploaded_file.read(attachment_rules.SNIFF_BYTES)
+        uploaded_file.seek(0)
+        attachment_rules.validate_content(extension, head)
+    except attachment_rules.AttachmentValidationError as exc:
+        raise IdeaError(exc.message, field=exc.field) from exc
+
+    content_type = attachment_rules.canonical_content_type(extension)
+    storage_key = storage.generate_storage_key(idea.pk, extension)
+
+    try:
+        saved_key = storage.save_object(storage_key, uploaded_file)
+    except storage.AttachmentStorageError as exc:
+        raise IdeaError('The file could not be stored. Please try again.') from exc
+
+    try:
+        return Attachment.objects.create(
+            idea=idea,
+            uploaded_by=active_user,
+            filename=display_name,
+            content_type=content_type,
+            size=uploaded_file.size,
+            storage_key=saved_key,
+        )
+    except DatabaseError:
+        # The row never made it in, so nothing refers to the object that was
+        # just written - clean it up rather than leaving an orphan storage
+        # never has to know it must reconcile.
+        storage.delete_object(saved_key)
+        raise
+
+
+def delete_attachment(user: User | None, attachment_id: object) -> None:
+    """
+    Remove one of the caller's own idea's attachments - both the metadata row
+    and its storage object.
+
+    **Not idempotent**, deliberately matching `delete_comment`'s shape rather
+    than the votes' toggle shape: an attachment is a distinct piece of
+    evidence, not a per-user flag, so "delete it again" names something that
+    is no longer there, and `_load_owned_attachment` refuses it the same way
+    a second `deleteComment` on an already-deleted comment is refused.
+
+    **Database row first, storage object second.** Deleting the row and then
+    best-effort deleting the object (`storage.delete_object` never raises for
+    a missing or already-gone key, and logs rather than raising for a genuine
+    backend failure) means a storage-side failure here leaves an orphaned
+    object with nothing pointing to it - wasted space, cleaned up later - not
+    a database row that still claims to exist while its bytes are already
+    gone. The reverse order would risk exactly that worse outcome if the
+    database delete then failed after the object was already removed.
+    """
+    active_user = _require_active_user(user)
+    attachment = _load_owned_attachment(active_user, attachment_id)
+
+    storage_key = attachment.storage_key
+    attachment.delete()
+    storage.delete_object(storage_key)

@@ -22,9 +22,12 @@ email address in its payload would publish it platform-wide. An id is enough
 for the client to answer the only question it asks - "is this mine?" - which
 is what decides whether to offer "Edit" and "Submit".
 
-Comments (S2-005) and votes (S2-006) follow the same rules as everything else
-here. No attachments appear: that is a later sprint, and the types are not
-stubbed, so nothing in this schema promises a surface that does not work.
+Comments (S2-005), votes (S2-006) and attachments (S2-007) follow the same
+rules as everything else here. `AttachmentType` is the one exception to
+"nothing here decides anything" in one narrow sense: it carries no binary
+content and there is no mutation that accepts any - GraphQL is metadata and
+lifecycle only, and `ideas/views.py` is where an upload or a download
+actually happens. See that module's docstring for the split.
 
 Paging is offset-based and bounded: a page defaults to
 `ideas.pagination.DEFAULT_PAGE_SIZE` rows and is clamped to
@@ -52,7 +55,7 @@ service describes what may be *used* today.
 import strawberry
 
 from ideas import lifecycle, selectors, services
-from ideas.models import Category, Comment, Idea
+from ideas.models import Attachment, Category, Comment, Idea
 
 IdeaStatus = strawberry.enum(Idea.Status, name='IdeaStatus')
 IdeaVisibility = strawberry.enum(Idea.Visibility, name='IdeaVisibility')
@@ -323,6 +326,84 @@ class UpdateCommentInput:
     comment: CommentInput
 
 
+def _attachment_download_path(idea_id: object, attachment_id: object) -> str:
+    """
+    The HTTP path that streams one attachment's bytes.
+
+    A relative path, not an absolute URL: this process does not reliably know
+    its own public origin (that is a deployment concern - reverse proxies,
+    multiple hostnames), and the frontend already knows the API's base origin
+    from the same configuration it uses to reach `/graphql/` (see
+    `frontend/src/lib/env.ts`). Building the full URL is therefore the
+    client's job; this is the one thing only the server can supply - the
+    path itself, from `ideas/views.py`'s URL configuration - and it is
+    supplied by the same query that already proved the caller may read this
+    attachment, not looked up separately.
+
+    Carries no token and needs none: the endpoint re-authenticates and
+    re-authorizes the request itself, from the same `Authorization: Bearer`
+    header every other request already carries (see `ideas/views.py`).
+    Nothing about the path is secret, so it is not a signed URL and does not
+    need to be one - see `docs/ideas-domain.md` for why that is the right
+    call at this project's current scale rather than a shortcut.
+    """
+    return f'/ideas/{idea_id}/attachments/{attachment_id}/download/'
+
+
+@strawberry.type(
+    description=(
+        "One idea's supporting evidence: a file the idea's own author "
+        'attached. Carries `uploaderId` and no uploader object, for the same '
+        "reason `CommentType` carries `authorId` and no author - an idea's "
+        'evidence is exactly as readable as the idea itself, which for a '
+        "PUBLIC idea is the whole platform, and embedding a member's email "
+        'there would publish it platform-wide.\n\n'
+        '`downloadUrl` is a path, not a signed URL - see '
+        '`ideas/views.py`, which re-authorizes the request itself when the '
+        'client fetches it. There is no field for the storage key: it is an '
+        'internal implementation detail this schema never exposes.'
+    )
+)
+class AttachmentType:
+    id: strawberry.ID
+    idea_id: strawberry.ID
+    uploader_id: strawberry.ID
+    filename: str
+    content_type: str
+    size: int
+    created_at: str
+    download_url: str
+
+    @staticmethod
+    def from_model(attachment: Attachment) -> 'AttachmentType':
+        return AttachmentType(
+            id=strawberry.ID(str(attachment.pk)),
+            idea_id=strawberry.ID(str(attachment.idea_id)),
+            uploader_id=strawberry.ID(str(attachment.uploaded_by_id)),
+            filename=attachment.filename,
+            content_type=attachment.content_type,
+            size=attachment.size,
+            created_at=attachment.created_at.isoformat(),
+            download_url=_attachment_download_path(attachment.idea_id, attachment.pk),
+        )
+
+
+@strawberry.type(description="One page of an idea's supporting evidence, oldest first.")
+class AttachmentPage:
+    items: list[AttachmentType]
+    # The same `PageInfo` every other page in this schema uses - see
+    # `CommentPage`'s note on why a second pagination shape would be a second
+    # set of conventions to get wrong.
+    page_info: PageInfo
+
+
+@strawberry.type(description='Result of deleting an attachment.')
+class DeleteAttachmentPayload:
+    success: bool
+    message: str
+    field: str | None = None
+
+
 def _vote_state_fields(idea: Idea, user) -> dict:
     """
     `voteCount`/`viewerHasVoted` for an idea, from the row if it has them.
@@ -465,6 +546,44 @@ class Query:
                 has_previous_page=page.has_previous_page,
             ),
         )
+
+    @strawberry.field(
+        description=(
+            "One idea's supporting evidence, oldest first. Answers an empty "
+            'page for an idea the caller may not read - the same answer as for '
+            'an idea that does not exist, exactly like `comments`.'
+        )
+    )
+    def attachments(
+        self,
+        info: strawberry.Info,
+        idea_id: strawberry.ID,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> AttachmentPage:
+        page = selectors.list_attachments(info.context.user, idea_id, offset=offset, limit=limit)
+        return AttachmentPage(
+            items=[AttachmentType.from_model(attachment) for attachment in page.items],
+            page_info=PageInfo(
+                offset=page.offset,
+                limit=page.limit,
+                total_count=page.total_count,
+                has_next_page=page.has_next_page,
+                has_previous_page=page.has_previous_page,
+            ),
+        )
+
+    @strawberry.field(
+        description=(
+            'One attachment, by id, if the caller may read the idea it '
+            'belongs to. Null for an unknown id and for an attachment on an '
+            'idea the caller may not read alike, so the id is not an oracle '
+            'for either.'
+        )
+    )
+    def attachment(self, info: strawberry.Info, id: strawberry.ID) -> AttachmentType | None:
+        attachment = selectors.get_attachment(info.context.user, id)
+        return AttachmentType.from_model(attachment) if attachment else None
 
     @strawberry.field(description='Categories available to file an idea under.')
     def categories(self) -> list[CategoryType]:
@@ -732,3 +851,26 @@ class Mutation:
             if state
             else None,
         )
+
+    @strawberry.mutation(
+        description=(
+            "Delete one of the caller's own idea's attachments - both the "
+            'metadata and its stored bytes. There is no upload mutation here: '
+            'binary content never travels through GraphQL - see '
+            '`ideas/views.py` for the HTTP endpoint that accepts an upload and '
+            '`AttachmentType.downloadUrl` for the one that serves it back. '
+            'Requires idea authorship, the same rule '
+            '`updateIdea`/`submitIdea` use, not merely being able to read the '
+            'idea.'
+        )
+    )
+    def delete_attachment(
+        self, info: strawberry.Info, id: strawberry.ID
+    ) -> DeleteAttachmentPayload:
+        try:
+            services.delete_attachment(info.context.user, id)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return DeleteAttachmentPayload(success=False, message=message, field=field)
+
+        return DeleteAttachmentPayload(success=True, message='Attachment deleted.')

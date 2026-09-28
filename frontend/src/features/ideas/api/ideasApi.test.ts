@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { graphqlClient } from '../../../graphql/client'
+import { setAccessToken } from '../../../graphql/tokenStore'
 import {
+  attachmentsRequest,
   categoriesRequest,
   commentsRequest,
   createCommentRequest,
   createIdeaRequest,
+  deleteAttachmentRequest,
   deleteCommentRequest,
+  downloadAttachmentRequest,
   ideaRequest,
   ideasRequest,
   organizationIdeasRequest,
@@ -15,7 +19,9 @@ import {
   transitionIdeaRequest,
   updateCommentRequest,
   updateIdeaRequest,
+  uploadAttachmentRequest,
   voteIdeaRequest,
+  type IdeaAttachment,
 } from './ideasApi'
 
 /**
@@ -651,5 +657,202 @@ describe('ideasApi', () => {
     // This client cannot enumerate who supported an idea, and does not try:
     // the domain has no policy for that aggregate.
     expect(request.query).not.toMatch(/voters|whoVoted|votes\s*\{/)
+  })
+
+  // --- attachments (S2-007) --------------------------------------------------
+
+  const ATTACHMENT: IdeaAttachment = {
+    id: 'a1',
+    ideaId: '1',
+    uploaderId: '7',
+    filename: 'evidence.pdf',
+    contentType: 'application/pdf',
+    size: 2048,
+    createdAt: '2026-03-01T09:00:00.000Z',
+    downloadUrl: '/ideas/1/attachments/a1/download/',
+  }
+
+  it('lists an ideas attachments, oldest first, through GraphQL', async () => {
+    const fetchMock = stubFetch({
+      attachments: { items: [ATTACHMENT], pageInfo: PAGE_INFO },
+    })
+
+    const page = await attachmentsRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('Attachments')
+    expect(request.variables).toEqual({ ideaId: '1' })
+    expect(page.items).toEqual([ATTACHMENT])
+  })
+
+  it('carries the download URL but never the storage key', async () => {
+    const fetchMock = stubFetch({
+      attachments: { items: [ATTACHMENT], pageInfo: PAGE_INFO },
+    })
+
+    await attachmentsRequest('1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.query).toContain('downloadUrl')
+    expect(request.query.toLowerCase()).not.toContain('storagekey')
+  })
+
+  it('deletes an attachment by id', async () => {
+    const fetchMock = stubFetch({
+      deleteAttachment: { success: true, message: 'Attachment deleted.', field: null },
+    })
+
+    const result = await deleteAttachmentRequest('a1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.operationName).toBe('DeleteAttachment')
+    expect(request.variables).toEqual({ id: 'a1' })
+    expect(result.success).toBe(true)
+  })
+
+  it('returns a refused deletion as a payload, not a throw', async () => {
+    stubFetch({
+      deleteAttachment: {
+        success: false,
+        message: 'Attachment is unavailable.',
+        field: null,
+      },
+    })
+
+    const result = await deleteAttachmentRequest('a1')
+
+    expect(result.success).toBe(false)
+    expect(result.message).toBe('Attachment is unavailable.')
+  })
+
+  it('carries no upload mutation - uploads are HTTP, not GraphQL', async () => {
+    const fetchMock = stubFetch({ ideas: { items: [], pageInfo: PAGE_INFO } })
+
+    await ideasRequest()
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.query).not.toMatch(/addAttachment|createAttachment|uploadAttachment/i)
+  })
+
+  describe('uploadAttachmentRequest', () => {
+    function stubHttp(status: number, body: unknown) {
+      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+        Response.json(body, { status }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      return fetchMock
+    }
+
+    afterEach(() => {
+      setAccessToken(null)
+    })
+
+    it('POSTs the file as multipart form data to the ideas attachment endpoint', async () => {
+      setAccessToken('a-token', new Date(Date.now() + 60_000).toISOString())
+      const fetchMock = stubHttp(201, {
+        success: true,
+        message: 'Attachment uploaded.',
+        field: null,
+        attachment: ATTACHMENT,
+      })
+      const file = new File(['%PDF-1.4'], 'evidence.pdf', { type: 'application/pdf' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toMatch(/\/ideas\/1\/attachments\/$/)
+      expect(init.method).toBe('POST')
+      expect(init.body).toBeInstanceOf(FormData)
+      expect((init.body as FormData).get('file')).toBe(file)
+      expect(result.success).toBe(true)
+      expect(result.attachment).toEqual(ATTACHMENT)
+    })
+
+    it('attaches the bearer token from tokenStore, not a captured value', async () => {
+      setAccessToken('fresh-token', new Date(Date.now() + 60_000).toISOString())
+      const fetchMock = stubHttp(201, {
+        success: true,
+        message: 'ok',
+        field: null,
+        attachment: ATTACHMENT,
+      })
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      await uploadAttachmentRequest('1', file)
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      const headers = init.headers as Record<string, string>
+      expect(headers.Authorization).toBe('Bearer fresh-token')
+    })
+
+    it('sends no Authorization header when signed out', async () => {
+      const fetchMock = stubHttp(401, {
+        success: false,
+        message: 'You must be signed in to work with ideas.',
+        field: null,
+      })
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      await uploadAttachmentRequest('1', file)
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      const headers = (init.headers ?? {}) as Record<string, string>
+      expect(headers.Authorization).toBeUndefined()
+    })
+
+    it('returns a business refusal as a payload, not a throw', async () => {
+      stubHttp(400, {
+        success: false,
+        message: 'That file type is not supported.',
+        field: 'file',
+      })
+      const file = new File(['x'], 'script.exe', { type: 'application/octet-stream' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.success).toBe(false)
+      expect(result.field).toBe('file')
+    })
+  })
+
+  describe('downloadAttachmentRequest', () => {
+    afterEach(() => {
+      setAccessToken(null)
+    })
+
+    it('fetches the attachments download URL with the bearer token', async () => {
+      // A string body, not a `Blob`: jsdom's `Blob` does not implement
+      // `.stream()`, which the real `Response` constructor needs - a test
+      // environment limitation, not something this test is asserting about.
+      const fetchMock = vi.fn(
+        async (_url: string, _init?: RequestInit) => new Response('%PDF-1.4', { status: 200 }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const createObjectURL = vi.fn(() => 'blob:mock-url')
+      const revokeObjectURL = vi.fn()
+      vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+      setAccessToken('a-token', new Date(Date.now() + 60_000).toISOString())
+
+      await downloadAttachmentRequest(ATTACHMENT)
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toContain(ATTACHMENT.downloadUrl)
+      const headers = init.headers as Record<string, string>
+      expect(headers.Authorization).toBe('Bearer a-token')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    })
+
+    it('throws on a failed download rather than returning a payload', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 404 })),
+      )
+
+      await expect(downloadAttachmentRequest(ATTACHMENT)).rejects.toThrow(
+        'Could not download this attachment.',
+      )
+    })
   })
 })

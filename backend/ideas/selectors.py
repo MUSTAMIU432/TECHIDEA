@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from django.db.models import Count, Exists, IntegerField, OuterRef, Q, QuerySet, Subquery
 from django.db.models.functions import Coalesce
 
-from ideas.models import Category, Comment, Idea, Vote
+from ideas.models import Attachment, Category, Comment, Idea, Vote
 from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
@@ -555,6 +555,101 @@ def vote_state_for(user: User | None, idea: Idea) -> IdeaVoteState | None:
         vote_count=vote_count_for(idea),
         viewer_has_voted=Vote.objects.filter(idea=idea, user=user).exists(),
     )
+
+
+# --- attachments (S2-007) ------------------------------------------------------------
+
+
+def get_attachment(user: User | None, attachment_id: object) -> Attachment | None:
+    """
+    One attachment `user` may read, or `None`.
+
+    Read through the attachment's idea, exactly the way `get_comment` reads
+    through a comment's: `idea__in=_visible_idea_ids(user)` is
+    `can_view_idea` applied to the parent, so an attachment can never be
+    readable on an idea that is not. `None` covers no such id, an id
+    belonging to an idea in another tenant, and an attachment on an idea not
+    shared with this reader - identically, so an attachment id cannot be used
+    to find out which ideas exist.
+    """
+    if user is None or not user.is_active:
+        return None
+
+    try:
+        normalized_id = int(str(attachment_id))
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        Attachment.objects.select_related('idea', 'idea__organization', 'uploaded_by')
+        .filter(pk=normalized_id, idea__in=_visible_idea_ids(user))
+        .first()
+    )
+
+
+def get_idea_attachment(
+    user: User | None, idea_id: object, attachment_id: object
+) -> Attachment | None:
+    """
+    One attachment `user` may read, *and* that names `idea_id` as its idea.
+
+    The one caller of this is `ideas/views.py`'s download view, which is
+    reached with both ids in the URL - so "this attachment exists, but
+    belongs to a different idea from the one in the URL" must not resolve to
+    the attachment anyway (the download link for one idea's evidence must not
+    also work as a link for another attachment sharing its id space by
+    accident, and no idea's page ever renders a link naming a mismatched
+    pair). Resolving `idea_id` through `get_idea` first, then filtering
+    `idea_id=idea.pk` rather than trusting the caller's pairing, is what
+    makes that structural rather than a check to remember.
+    """
+    idea = get_idea(user, idea_id)
+    if idea is None:
+        return None
+
+    try:
+        normalized_id = int(str(attachment_id))
+    except (TypeError, ValueError):
+        return None
+
+    return (
+        Attachment.objects.select_related('idea').filter(pk=normalized_id, idea_id=idea.pk).first()
+    )
+
+
+def list_attachments(
+    user: User | None,
+    idea_id: object,
+    *,
+    offset: object = 0,
+    limit: object = None,
+) -> Page[Attachment]:
+    """
+    One page of an idea's supporting evidence, oldest first.
+
+    Exactly `list_comments`' shape, for exactly the same reason: an idea the
+    caller may not read is an **empty page**, not an error, so an attachment
+    listing cannot be a better oracle than the idea it hangs from. Ordered by
+    `created_at, pk` - upload order, not a ranking - with the primary key as
+    tie-breaker for the same microsecond-collision reason every other list in
+    this module uses one.
+
+    `select_related('uploaded_by')` is what keeps a page of many attachments
+    at one query for the page plus one for the count, rather than one extra
+    query per row to resolve who uploaded each one.
+    """
+    if user is None or not user.is_active:
+        return empty_page(offset, limit)
+
+    idea = get_idea(user, idea_id)
+
+    queryset = (
+        Attachment.objects.select_related('uploaded_by')
+        .filter(idea_id=idea.pk if idea is not None else None)
+        .order_by('created_at', 'pk')
+    )
+
+    return paginate(queryset, offset=offset, limit=limit)
 
 
 def vote_count_for(idea: Idea) -> int:

@@ -20,9 +20,24 @@ from django.urls import path
 
 from config.views import health
 from graphql_api.views import graphql_view
+from ideas.views import download_attachment_view, upload_attachment_view
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('health/', health, name='health'),
     path('graphql/', graphql_view, name='graphql'),
+    # Attachment binary transfer (S2-007) - the one HTTP surface for Ideas
+    # beyond GraphQL, and only for the bytes themselves. See
+    # `ideas/views.py`'s module docstring for why these two exist outside
+    # GraphQL and everything else about an attachment does not.
+    path(
+        'ideas/<int:idea_id>/attachments/',
+        upload_attachment_view,
+        name='idea-attachment-upload',
+    ),
+    path(
+        'ideas/<int:idea_id>/attachments/<int:attachment_id>/download/',
+        download_attachment_view,
+        name='idea-attachment-download',
+    ),
 ]

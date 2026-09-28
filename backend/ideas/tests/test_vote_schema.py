@@ -672,17 +672,19 @@ class TestSchemaSurface:
         for name in ('votes(', 'voters(', 'ideaVotes(', 'voteByUser(', 'whoVoted'):
             assert name not in sdl, name
 
-    def test_there_is_no_attachment_or_proposal_operation(self, world):
+    def test_there_is_no_proposal_or_matching_operation(self, world):
         """
-        S2-007 and later sprints. Asserted at the schema level so a future
-        change cannot quietly widen the surface this sprint owns.
+        S2-007's own surface is asserted present, not absent, by
+        `test_attachment_schema.py`. What belongs here is later sprints:
+        asserted absent so a future change cannot quietly widen the surface
+        this sprint owns. `addAttachment` is deliberately not in this list
+        either way - there never was one, and never will be: uploads are
+        binary and go through `ideas/views.py`'s HTTP endpoint, not GraphQL.
         """
         from graphql_api.schema import schema
 
         sdl = str(schema)
         for name in (
-            'addAttachment',
-            'attachments(',
             'createProposal',
             'proposals(',
             'developerProfile',

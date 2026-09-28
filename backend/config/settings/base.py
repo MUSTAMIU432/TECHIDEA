@@ -294,6 +294,57 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 
+# Attachment object storage (S2-007)
+# ---------------------------------------------------------------------------------
+# `ideas.storage` is the only module that ever calls `storages['attachments']`
+# directly - see its module docstring. Everything below exists so that module
+# never has to know whether it is writing to the local disk or to an
+# object-storage bucket.
+#
+# `ATTACHMENTS_STORAGE_BACKEND` names a Django `Storage` subclass by import
+# path, exactly like Django's own `STORAGES` setting expects. The default is
+# the filesystem backend that ships with Django, which is what every local
+# and CI environment uses today - there is no object-storage backend
+# installed or configured in this codebase yet, and this file does not
+# pretend otherwise. A deployment that has actually provisioned one (S3,
+# GCS, Azure Blob, ...) installs the matching driver package (e.g.
+# `django-storages`) and points this at its backend class; that backend then
+# reads its own settings (bucket name, region, credentials, ...) the way it
+# normally does. No code in `ideas/` changes either way - the swap is
+# entirely a settings/environment concern, which is the point of routing
+# every attachment read/write through Django's pluggable storage registry
+# instead of touching a path or a client library directly.
+#
+# `location` is only meaningful to the filesystem backend (it is where the
+# accepted files actually live on disk) and is omitted for anything else, so
+# switching backends never leaves a stale, backend-specific option behind for
+# the new backend to trip over.
+ATTACHMENTS_STORAGE_BACKEND = env(
+    'ATTACHMENTS_STORAGE_BACKEND', default='django.core.files.storage.FileSystemStorage'
+)
+_ATTACHMENTS_STORAGE_OPTIONS: dict = {}
+if ATTACHMENTS_STORAGE_BACKEND == 'django.core.files.storage.FileSystemStorage':
+    _ATTACHMENTS_STORAGE_OPTIONS['location'] = str(BASE_DIR / 'media' / 'attachments')
+
+STORAGES = {
+    # Django's own defaults (https://docs.djangoproject.com/en/5.2/ref/settings/#storages) -
+    # spelled out explicitly because defining `STORAGES` at all overrides them.
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+    'attachments': {
+        'BACKEND': ATTACHMENTS_STORAGE_BACKEND,
+        'OPTIONS': _ATTACHMENTS_STORAGE_OPTIONS,
+    },
+}
+
+# The hard ceiling on one uploaded file, enforced server-side in
+# `ideas.attachments.validate_size` before anything is read into storage - a
+# client-side check is a courtesy, never the boundary. 10 MB comfortably fits
+# the supported evidence types (a PDF, a screenshot, a spreadsheet) without
+# letting a single idea's evidence become a multi-gigabyte liability.
+ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=10 * 1024 * 1024)
+
+
 # CORS
 # Only the GraphQL API is meant to be called from the browser app. The
 # allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a wildcard).

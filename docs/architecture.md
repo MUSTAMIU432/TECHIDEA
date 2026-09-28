@@ -92,17 +92,26 @@ rather than being scattered across business domain apps, and its output
 will be treated as a recommendation subject to human validation. No AI
 functionality exists yet.
 
-### Storage (target — boundary implemented, no object store yet)
+### Storage (target — filesystem today, object storage later)
 
 Object storage (e.g. S3-compatible) for files, rather than storing large
 binary content in PostgreSQL.
 
-S2-001 implements the *boundary*: `ideas.Attachment` stores only metadata
+S2-001 implemented the *boundary*: `ideas.Attachment` stores only metadata
 (`storage_key`, `filename`, `content_type`, `size`) and holds no file
-column of any kind, so attachments cannot end up in PostgreSQL by accident
-— see [`ideas-domain.md`](ideas-domain.md#storage-boundary). The bucket
-itself, the presigned-upload flow and signed download URLs are not
-implemented yet.
+column of any kind, so attachments cannot end up in PostgreSQL by accident.
+S2-007 implemented the operations on top of it - upload, download, listing,
+deletion - routed through Django's pluggable `Storage` API
+(`ideas/storage.py`, `config/settings/base.py`'s `STORAGES['attachments']`)
+rather than a filesystem path or a client library hardcoded into
+`ideas/services.py`. What is actually configured today is Django's own
+filesystem backend; no object-storage bucket, no `django-storages`
+dependency and no presigned/signed-URL mechanism exist in this codebase —
+switching to one is a settings change (`ATTACHMENTS_STORAGE_BACKEND`) once a
+bucket and its driver package are actually provisioned, not a rewrite of the
+domain. See [`ideas-domain.md`](ideas-domain.md#storage-boundary) for the
+full design and the reasoning for going through this server rather than
+straight to a bucket at the current scale.
 
 ### Security (target — partly implemented)
 
@@ -427,7 +436,8 @@ on it until that tier exists - see
 implemented its first vertical slice end to end — file an idea, edit it as a
 draft, submit it — S2-003 added the lifecycle and the server-side read policy,
 S2-004 added categories and discovery, S2-005 added comments and discussion,
-and S2-006 added voting. Attachment uploads are still not started.
+S2-006 added voting, and S2-007 added attachments and their upload/download
+endpoints.
 
 **Authorization is Sprint 1's, unchanged.** `ideas` adds no permission code and
 no `permissions.py`. Filing an idea requires an *active membership* in the
@@ -528,8 +538,8 @@ Google-account-linking flow.
 Sprint 2 starts the core business domain with the `ideas` app. Its
 architecture and schema (S2-001), creation and submission (S2-002), lifecycle
 and visibility (S2-003), categories and discovery (S2-004), comments and
-discussion (S2-005) and voting (S2-006) exist. The review *queue* is Sprint 3
-and is not started. Every other business domain is
+discussion (S2-005), voting (S2-006) and attachments (S2-007) exist. The
+review *queue* is Sprint 3 and is not started. Every other business domain is
 not started.
 
 ### Implemented (Sprint 2)
@@ -543,9 +553,10 @@ not started.
 | Categories and discovery | `list_discoverable_ideas` as the single read path, with `IdeaFilters` (category, status, search) that can only **narrow** what the visibility filter allowed, and `ideas/pagination.py` for bounded offset paging. `ideas`/`organizationIdeas` return an `IdeaPage`; there is no `visibility` or `authorId` filter to send | S2-004 |
 | Comments and discussion | `add_comment`/`update_comment`/`delete_comment` behind a `comments(ideaId)` query that filters by the idea's own visibility, so a comment is never more readable than the idea it is on. Edit and delete are author-only, with no elevated path and no new permission code | S2-005 |
 | Voting & engagement | One vote per user per idea, enforced by a service check *and* the `unique_vote_per_user_idea` constraint. Voting is gated on idea visibility only, with no lifecycle condition - a vote is interest in the idea, not participation in a review. `voteCount`/`viewerHasVoted` are annotated onto the discovery page, so a page of ideas costs no extra queries | S2-006 |
-| Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
+| Attachments & supporting evidence | `upload_attachment`/`delete_attachment`, gated on idea **authorship** (not merely readability) with no lifecycle condition. The storage key, recorded content type and display filename are all server-derived, never client-supplied; file type is checked by an extension allow-list *and* the file's own leading bytes. Binary transfer is HTTP (`ideas/views.py`), never GraphQL; metadata, listing and deletion are GraphQL (`attachments`/`attachment`/`deleteAttachment`) | S2-007 |
+| Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one or to add/remove its attachments. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
 | Idea visibility | The `PUBLIC`/`ORGANIZATION`/`DEPARTMENT`/`PRIVATE` vocabulary, defaulting to `PRIVATE` (fail closed) | S2-001 |
-| Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL | S2-001 |
+| Storage boundary | `Attachment` as metadata only; attachment bytes can never be stored in PostgreSQL. Filesystem storage today, swappable for object storage via `ATTACHMENTS_STORAGE_BACKEND` | S2-001, operations in S2-007 |
 | Domain documentation | [`ideas-domain.md`](ideas-domain.md) | S2-001 |
 
 See [`ideas-domain.md`](ideas-domain.md) for the entities, the
@@ -598,10 +609,14 @@ How these are used day to day: [`development.md`](development.md),
 - Review *management*: the lifecycle transitions exist and work, but there is
   no review queue, no reviewer assignment, no reasons recorded against a
   `CHANGES_REQUESTED` idea, and no dashboard of any kind
-- Attachments (S2-007), including their *bytes* and upload flow. Also: a
-  ranking or scoring of the votes that now exist, any "who voted" listing,
+- A ranking or scoring of the votes that now exist, any "who voted" listing,
   threaded comment replies, comment moderation and soft delete, and rate
-  limiting — this project has no throttling mechanism to extend
+  limiting — this project has no throttling mechanism to extend. Also: an
+  actual object-storage bucket for attachments (S2-007 implemented the
+  operations against Django's filesystem backend; see
+  [Storage](#storage-target--filesystem-today-object-storage-later)),
+  presigned/signed attachment URLs, and any AI processing of attachment
+  content
 - A discovery *algorithm*: there is no ranking, recommendation, trending or
   social feed. S2-004 filters and pages what a reader may see; it does not
   decide what they should see, and no engagement data is collected
@@ -615,9 +630,11 @@ How these are used day to day: [`development.md`](development.md),
   a role-management or permission-editor UI, and logout-everywhere
 - Redis + Celery background processing
 - AI gateway
-- The object storage bucket, presigned uploads and signed downloads
-  (the attachment metadata boundary is implemented; see
-  [Storage](#storage-target--boundary-implemented-no-object-store-yet))
+- The object storage bucket itself, and a presigned/signed-URL upload or
+  download path (S2-007 implemented the attachment metadata boundary *and*
+  the upload/download operations, routed through this server against
+  Django's filesystem storage backend; see
+  [Storage](#storage-target--filesystem-today-object-storage-later))
 - Audit logging
 - React Query in the frontend
 - Deployment automation and any deployed environment (development, staging,

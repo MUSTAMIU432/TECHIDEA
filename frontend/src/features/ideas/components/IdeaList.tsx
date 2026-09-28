@@ -14,6 +14,7 @@ import {
   transitionLabel,
   visibilityLabel as visibilityLabelFor,
 } from '../utils/lifecycle'
+import { IdeaAttachments } from './IdeaAttachments'
 import { IdeaDiscussion } from './IdeaDiscussion'
 import { IdeaVoteButton } from './IdeaVoteButton'
 import { IdeaFiltersBar } from './IdeaFiltersBar'
@@ -97,6 +98,11 @@ export function IdeaList({
   // discussion cannot outlive the results it belongs to. And one at a time
   // keeps a page from accumulating twenty open threads.
   const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null)
+  // Independent of the discussion toggle above: a reader may want to see an
+  // idea's evidence without opening its discussion, or both at once, so
+  // there is no shared "one section open" rule between the two - each has
+  // its own single-open-at-a-time state instead.
+  const [openAttachmentsId, setOpenAttachmentsId] = useState<string | null>(null)
   const { categories } = useCategories()
   const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
     activeOrganization?.id ?? null,
@@ -301,6 +307,21 @@ export function IdeaList({
                       open={openDiscussionId === idea.id}
                       onToggle={() =>
                         setOpenDiscussionId((current) => (current === idea.id ? null : idea.id))
+                      }
+                    />
+                    {/*
+                        Supporting evidence (S2-007), collapsed and fetched
+                        only while open - the same reasoning as the
+                        discussion above. Rendered after it so a card's
+                        layout stays predictable: status, then discussion,
+                        then evidence, in the order S2-005 and S2-007
+                        shipped.
+                      */}
+                    <IdeaAttachments
+                      idea={idea}
+                      open={openAttachmentsId === idea.id}
+                      onToggle={() =>
+                        setOpenAttachmentsId((current) => (current === idea.id ? null : idea.id))
                       }
                     />
                   </li>

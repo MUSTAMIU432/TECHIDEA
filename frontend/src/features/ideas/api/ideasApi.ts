@@ -32,6 +32,8 @@
  */
 
 import { graphqlClient } from '../../../graphql/client'
+import { getAccessToken } from '../../../graphql/tokenStore'
+import { env } from '../../../lib/env'
 
 /**
  * The submission lifecycle, mirroring the backend's `IdeaStatus` enum.
@@ -708,4 +710,205 @@ export async function removeVoteRequest(id: string): Promise<VoteMutationResult>
     { id },
   )
   return data.removeVote
+}
+
+/**
+ * Attachments & supporting evidence (S2-007).
+ *
+ * The one place in this domain where GraphQL is *not* the whole story:
+ *
+ * - **Metadata, listing and deletion are GraphQL**, exactly like everything
+ *   else here - `attachments(ideaId)`, `attachment(id)` and
+ *   `deleteAttachment(id)` follow this file's existing conventions.
+ * - **The bytes are HTTP**, on two endpoints this client calls with a plain
+ *   `fetch` rather than through `graphqlClient`: `graphql-request` is a
+ *   GraphQL client and has no multipart-upload or streamed-download
+ *   support, and there is no second GraphQL client introduced to get it -
+ *   see `uploadAttachmentRequest`/`downloadAttachmentRequest` below. Both
+ *   send the same `Authorization: Bearer <token>` header `graphqlClient`
+ *   attaches automatically, read directly from the same `tokenStore` - one
+ *   authentication mechanism for the whole app, on two transports.
+ * - **The server decides the storage key, the content type and the display
+ *   filename's safety.** This client never invents any of the three; it
+ *   sends the raw file and renders back exactly what the server answers.
+ */
+
+/** One piece of supporting evidence attached to an idea. */
+export interface IdeaAttachment {
+  id: string
+  ideaId: string
+  uploaderId: string
+  /**
+   * Safe to render as text. The server has already reduced whatever the
+   * uploader's browser sent to a bare name with no directory component -
+   * see the backend's `ideas.attachments.safe_display_filename` - so this
+   * client does not re-sanitize it, but it is still rendered as text, never
+   * as markup.
+   */
+  filename: string
+  contentType: string
+  size: number
+  createdAt: string
+  /**
+   * A path, not a full URL - see the backend's
+   * `ideas.schema._attachment_download_path`. `downloadAttachmentRequest`
+   * resolves it against `env.apiBaseUrl`.
+   */
+  downloadUrl: string
+}
+
+export interface IdeaAttachmentPage {
+  items: IdeaAttachment[]
+  pageInfo: IdeaPageInfo
+}
+
+/** Every attachment mutation payload carries this shape. */
+export interface AttachmentMutationResult {
+  success: boolean
+  message: string
+  field: string | null
+}
+
+/** The server's answer to an upload attempt - a payload, not a thrown error. */
+export interface UploadAttachmentResult {
+  success: boolean
+  message: string
+  field: string | null
+  attachment: IdeaAttachment | null
+}
+
+const ATTACHMENT_FIELDS = `
+  id
+  ideaId
+  uploaderId
+  filename
+  contentType
+  size
+  createdAt
+  downloadUrl
+`
+
+const ATTACHMENTS_QUERY = `
+  query Attachments($ideaId: ID!, $offset: Int, $limit: Int) {
+    attachments(ideaId: $ideaId, offset: $offset, limit: $limit) {
+      items { ${ATTACHMENT_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const DELETE_ATTACHMENT_MUTATION = `
+  mutation DeleteAttachment($id: ID!) {
+    deleteAttachment(id: $id) { success message field }
+  }
+`
+
+/**
+ * One page of an idea's supporting evidence, oldest first.
+ *
+ * An unreadable idea is an empty page rather than an error - the same rule
+ * `commentsRequest` follows, for the same reason: this client has no way to
+ * tell "you may not read this" from "there is nothing here", and must not
+ * try to.
+ */
+export async function attachmentsRequest(
+  ideaId: string,
+  filters: { offset?: number; limit?: number } = {},
+): Promise<IdeaAttachmentPage> {
+  const data = await graphqlClient.request<{ attachments: IdeaAttachmentPage }>(ATTACHMENTS_QUERY, {
+    ideaId,
+    ...(filters.offset !== undefined ? { offset: filters.offset } : {}),
+    ...(filters.limit !== undefined ? { limit: filters.limit } : {}),
+  })
+  return data.attachments
+}
+
+/**
+ * Delete one of the signed-in user's own idea's attachments. Refused for
+ * anyone else's, including a colleague who could read it - the server's
+ * rule, not this client's to soften.
+ */
+export async function deleteAttachmentRequest(id: string): Promise<AttachmentMutationResult> {
+  const data = await graphqlClient.request<{ deleteAttachment: AttachmentMutationResult }>(
+    DELETE_ATTACHMENT_MUTATION,
+    { id },
+  )
+  return data.deleteAttachment
+}
+
+/**
+ * Upload `file` as supporting evidence on `ideaId`.
+ *
+ * Plain `fetch`, not `graphqlClient`: this is a `multipart/form-data` POST
+ * to an HTTP endpoint, not a GraphQL document. `credentials: 'include'`
+ * matches `graphqlClient`'s own config (the refresh-token cookie flows the
+ * same way here), and the bearer token is read fresh from `tokenStore` on
+ * every call rather than captured once, for the same reason `graphqlClient`'s
+ * `headers` is a function.
+ *
+ * Never throws for a business refusal - a `success: false` response is
+ * returned like any other payload here, so a caller handles it the same way
+ * it handles a refused GraphQL mutation. A thrown error means the request
+ * never reached a decision (the network, the server being down), which is a
+ * different fact.
+ */
+export async function uploadAttachmentRequest(
+  ideaId: string,
+  file: File,
+): Promise<UploadAttachmentResult> {
+  const body = new FormData()
+  body.append('file', file)
+
+  const token = getAccessToken()
+  const response = await fetch(`${env.apiBaseUrl}/ideas/${ideaId}/attachments/`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body,
+  })
+
+  const payload = (await response.json()) as UploadAttachmentResult
+  return payload
+}
+
+/**
+ * Fetch `attachment`'s bytes and hand the browser a save-as download.
+ *
+ * A plain `<a href>` cannot carry the `Authorization` header this endpoint
+ * requires, so the bytes are fetched here (with the header, like every other
+ * authenticated request this app makes) and turned into a blob URL the
+ * browser downloads from - revoked immediately after, so nothing lingers in
+ * memory once the download has started.
+ *
+ * Throws on any failure (a refusal, a network error) rather than returning a
+ * payload: unlike the metadata operations above, there is no partial
+ * "business failure" shape to report here - the server answers with the
+ * file or with an HTTP error, and a caller shows the same transport-failure
+ * message for either.
+ */
+export async function downloadAttachmentRequest(attachment: IdeaAttachment): Promise<void> {
+  const token = getAccessToken()
+  const response = await fetch(`${env.apiBaseUrl}${attachment.downloadUrl}`, {
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+
+  if (!response.ok) {
+    throw new Error('Could not download this attachment.')
+  }
+
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = attachment.filename
+    // Never appended visibly and never left in the DOM: this is a one-shot
+    // trigger for the browser's own download UI, not a rendered element.
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
 }

@@ -291,6 +291,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     limiting on comment writes — this project has no throttling mechanism, and
     introducing one here would be a new security framework for a single
     operation.
+- S2-007: Attachments & supporting evidence — the `Attachment` model S2-001
+  designed, as `upload_attachment`/`delete_attachment` in `ideas/services.py`,
+  file validation in `ideas/attachments.py`, a pluggable object-storage
+  abstraction in `ideas/storage.py`, `attachments`/`attachment`/
+  `deleteAttachment` in the GraphQL schema, two HTTP endpoints for the binary
+  transfer GraphQL cannot carry (`ideas/views.py`), and an evidence section
+  on the `/app/ideas` cards. No migration: the S2-001 `Attachment` model
+  already had every field this needed.
+  - **GraphQL is metadata and lifecycle; HTTP is bytes.** `attachments
+    (ideaId)`, `attachment(id)` and `deleteAttachment(id)` follow this
+    schema's existing conventions; there is no `addAttachment` mutation and
+    never will be, because a multipart upload and a streamed download are
+    not JSON-in/JSON-out operations. `POST /ideas/<id>/attachments/` and
+    `GET /ideas/<id>/attachments/<id>/download/` authenticate with the same
+    `Authorization: Bearer` header every GraphQL request carries.
+  - **Upload and delete require idea *authorship*, not merely
+    readability** — the first write in this domain where the two differ.
+    Comments and votes follow readability because participation and interest
+    both follow what a reader is shown; evidence is closer to editing the
+    idea than to responding to it. Deliberately **no lifecycle gate**
+    either, unlike a draft's own content (`update_idea` is `DRAFT`-only):
+    evidence accumulates throughout review, so this follows the shape
+    S2-006 established for votes (readable/authored, any status) rather
+    than S2-002's draft-only edit rule or S2-005's discussion-closes-on-
+    rejection rule. Listing and download stay readability-gated, the same
+    as comments and votes, so every reader who can see an idea can see and
+    fetch its evidence even though only its author can add or remove any.
+  - **The client chooses nothing that matters for safety.** The storage key
+    (`ideas.storage.generate_storage_key`) is built from the idea's id and a
+    random token, never from client input — the actual path-traversal
+    defense, not a check run against one. The recorded content type
+    (`ideas.attachments.canonical_content_type`) is derived from the file's
+    validated extension and confirmed against its own leading bytes; the
+    browser's `Content-Type` claim is never read as data. The display
+    filename is reduced to its last path segment on both separator styles
+    before anything else touches it.
+  - **Two independent file-type checks.** An explicit extension allow-list
+    (PDF; PNG/JPEG/GIF/WebP; CSV/TXT; DOC/DOCX/XLS/XLSX — nothing executable
+    or script-shaped), and the file's own leading bytes checked against the
+    signature its extension claims, so a renamed `.exe` wearing a `.pdf`
+    name is still refused. A denylist of dangerous signatures (`MZ`, ELF, a
+    shebang, Mach-O/Java) is checked against *every* upload regardless of
+    extension, including the two extensions (CSV, TXT) with no positive
+    signature of their own. Size is capped by `ATTACHMENT_MAX_UPLOAD_BYTES`
+    (10 MB default), checked against the upload's own measured size.
+  - **Not idempotent, on either operation** — matching `add_comment`/
+    `delete_comment`'s shape, not the votes' toggle shape. Uploading twice
+    creates two attachments; deleting twice refuses the second time, because
+    there is nothing left for it to name. The one race actually handled: a
+    database failure *after* a successful storage write deletes the
+    now-orphaned object rather than leaving it unreferenced; a storage
+    failure *after* a successful database delete is logged and left as an
+    orphan rather than resurrecting a row the caller was already told is
+    gone — the database, not the storage backend, is authoritative for
+    whether an attachment exists.
+  - **Storage is a pluggable abstraction, not a hardcoded filesystem path.**
+    `ideas/storage.py` calls only `django.core.files.storage`'s registry
+    (`STORAGES['attachments']`, `config/settings/base.py`); today that
+    resolves to Django's own filesystem backend (the only one installed),
+    and nothing in `ideas/services.py` or `ideas/views.py` would need to
+    change to point it at an object-storage backend later —
+    `ATTACHMENTS_STORAGE_BACKEND` is a settings/environment change once one
+    is actually provisioned. Download and upload go through this server for
+    the same reason: no bucket exists yet to presign a URL against.
+  - **Never rendered inline.** `Content-Disposition: attachment`
+    unconditionally, for every accepted content type including images — an
+    uploaded file is never trusted content, and this is the one rule that
+    makes an allow-list of "safe to render inline" types unnecessary.
+  - **Frontend:** a collapsed "Supporting evidence" section per idea card,
+    fetched only while open, independent of the discussion disclosure next
+    to it. Upload and delete controls render only for the idea's own author
+    (`idea.authorId === user.id`) — a courtesy, since the server enforces
+    authorship regardless — and download is offered to every reader who can
+    see the section. A courtesy client-side check (extension, non-zero size,
+    10 MB) rejects an obviously-doomed file before a round trip; the server's
+    own message is what is shown for anything that check lets through.
+    `uploadAttachmentRequest`/`downloadAttachmentRequest` are the only two
+    functions in `ideasApi.ts` that call `fetch` directly instead of
+    `graphqlClient`, attaching the same bearer token read fresh from
+    `tokenStore`. Neither an upload nor a delete re-fetches the ideas list.
+  - Not implemented, and deliberately: an actual object-storage bucket,
+    presigned/signed upload or download URLs, virus/malware scanning,
+    thumbnails or previews, versioning, per-attachment access grants beyond
+    the idea's own visibility, and any AI processing of attachment content —
+    those are later work, not omissions.
 - S2-006: Voting and engagement — the `Vote` model S2-001 designed, as
   `vote_for_idea`/`remove_vote` in `ideas/services.py`, `voteIdea`/`removeVote`
   and `IdeaVoteState` in the GraphQL schema, and a vote control on the
