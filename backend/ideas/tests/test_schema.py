@@ -174,7 +174,10 @@ def idea_input(**overrides):
 
 
 def create_complete_via_api(gql, ada, **overrides):
-    """A draft that satisfies every submission rule: title, description, category."""
+    """
+    A draft that satisfies every submission rule: title, description,
+    category, and a visibility reviewers can read (S3-008, D-6).
+    """
     category = Category.objects.create(name=f'Category {Category.objects.count() + 1}')
     result = run(
         gql,
@@ -183,7 +186,9 @@ def create_complete_via_api(gql, ada, **overrides):
         {
             'input': {
                 'organizationId': str(ada['organization'].pk),
-                'idea': idea_input(categoryId=str(category.pk), **overrides),
+                'idea': idea_input(
+                    categoryId=str(category.pk), **{'visibility': 'ORGANIZATION', **overrides}
+                ),
             }
         },
         bearer=ada['token'],

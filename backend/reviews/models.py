@@ -50,10 +50,10 @@ from django.db import models
 
 from ideas.models import Idea
 
-# The decision values *are* the idea statuses a completed review moves its idea
-# to, taken from the idea's own enum so the two cannot drift: a
+# The decisions a reviewer records *are* the idea statuses a completed review
+# moves its idea to, taken from the idea's own enum so the two cannot drift: a
 # `CHANGES_REQUESTED` review leaves its idea in `CHANGES_REQUESTED`, and so on.
-REVIEW_DECISION_CHOICES = tuple(
+LIFECYCLE_DECISION_CHOICES = tuple(
     (value, label)
     for value, label in Idea.Status.choices
     if value
@@ -63,6 +63,14 @@ REVIEW_DECISION_CHOICES = tuple(
         Idea.Status.REJECTED,
     )
 )
+
+# The one decision that is not a verdict and moves no status (S3-008,
+# `docs/reviews-domain.md` §5.3, D-2): an open review whose reviewer is no
+# longer eligible, closed when another reviewer takes the idea over. Written
+# only by `reviews.services.start_review`, never by a reviewer's choice.
+WITHDRAWN_DECISION_CHOICE = ('withdrawn', 'Withdrawn')
+
+REVIEW_DECISION_CHOICES = (*LIFECYCLE_DECISION_CHOICES, WITHDRAWN_DECISION_CHOICE)
 
 REVIEW_CRITERION_CHOICES = (
     ('problem_clarity', 'Problem clarity'),
@@ -87,7 +95,12 @@ class Review(models.Model):
     Opened when a reviewer claims a submitted idea (`SUBMITTED ->
     UNDER_REVIEW`, S3-004) and completed, once, when they record a decision.
     `round` is 1 for an idea's first review and increases by one for each
-    review after a resubmission.
+    review after it - a resubmission's, or a take-over's.
+
+    A take-over (S3-008) completes the open round as `WITHDRAWN`: its
+    `reviewer` is who held it, `completed_at` when it was released, and the
+    next round, opened in the same transaction, names who took it over. It has
+    no assessments and no feedback, because nobody decided anything.
     """
 
     class Decision(models.TextChoices):
@@ -95,6 +108,7 @@ class Review(models.Model):
             CHANGES_REQUESTED,
             REJECTED,
             APPROVED,
+            WITHDRAWN,
         ) = REVIEW_DECISION_CHOICES
 
     idea = models.ForeignKey(
@@ -114,7 +128,7 @@ class Review(models.Model):
         help_text='The member accountable for this review.',
     )
     round = models.PositiveSmallIntegerField(
-        help_text="1 for an idea's first review, then one more per resubmission.",
+        help_text="1 for an idea's first review, then one more per resubmission or take-over.",
     )
     # Null rather than Django's usual blank string: "no decision yet" is a
     # genuine absence, and `review_decided_iff_completed` pairs it with a null

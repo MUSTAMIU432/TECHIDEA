@@ -110,11 +110,15 @@ class TestReview:
         assert review.is_completed
 
     def test_the_decisions_are_the_idea_statuses_they_lead_to(self):
+        # Plus `WITHDRAWN` (S3-008): a take-over, which leads to no status and
+        # is deliberately not one.
         assert set(Review.Decision.values) == {
             Idea.Status.CHANGES_REQUESTED,
             Idea.Status.APPROVED,
             Idea.Status.REJECTED,
+            Review.Decision.WITHDRAWN,
         }
+        assert Review.Decision.WITHDRAWN not in Idea.Status.values
 
     def test_the_author_cannot_be_the_reviewer(self, world):
         with pytest.raises(ValidationError):

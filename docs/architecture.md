@@ -58,9 +58,9 @@ infrastructure app (not a business domain), and four business domain apps —
 `identity`, `organizations`, `ideas` and `reviews` (models, reviewer
 eligibility, the review queue and history, starting and deciding reviews,
 resubmission after changes are requested, and the author's decision email,
-S3-002 to S3-006, and the lifecycle audit trail `ideas.IdeaTransition`,
-S3-007). The rest are introduced
-incrementally in later sprints.
+S3-002 to S3-006, the lifecycle audit trail `ideas.IdeaTransition`, S3-007,
+and the take-over of a stalled review and the reviewable-visibility rule for
+submission, S3-008). The rest are introduced incrementally in later sprints.
 
 ### API (target — foundation implemented)
 
@@ -515,11 +515,14 @@ together cannot both apply — the second waits and then finds a status that no
 longer permits its move.
 
 **Submitting ends editability, not the author's access.** A submitted idea is
-refused by `updateIdea` - by its own author, in its own organization - until
-the review workflow introduces the `CHANGES_REQUESTED` route back to a draft.
-No part of the review *management* is implemented: there is no review queue, no
-reviewer assignment, no reason text, and nothing acts on an idea once it
-reaches `AUTOMATION_PROPOSAL`.
+refused by `updateIdea` - by its own author, in its own organization - except
+in `CHANGES_REQUESTED`, where the author revises the content (not the
+visibility) and resubmits (S3-005). Only an `ORGANIZATION` or `PUBLIC` idea
+can be submitted, because a reviewer can only review what they can read
+(S3-008, [`reviews-domain.md`](reviews-domain.md) D-6); a `PRIVATE` draft
+stays private until its author widens it. Review is queue-based self-claim
+with no assignment entity; nothing acts on an idea once it reaches
+`AUTOMATION_PROPOSAL`.
 
 See [`ideas-domain.md`](ideas-domain.md) for the entity design and the
 reasoning behind each decision above.
@@ -546,9 +549,14 @@ Google-account-linking flow.
 Sprint 2 starts the core business domain with the `ideas` app. Its
 architecture and schema (S2-001), creation and submission (S2-002), lifecycle
 and visibility (S2-003), categories and discovery (S2-004), comments and
-discussion (S2-005), voting (S2-006) and attachments (S2-007) exist. The
-review *queue* is Sprint 3 and is not started. Every other business domain is
-not started.
+discussion (S2-005), voting (S2-006) and attachments (S2-007) exist.
+
+Sprint 3 adds the `reviews` app (S3-001 to S3-008): the `idea.review`
+permission and Reviewer role, the review queue, starting and deciding a
+review with five fixed criteria, changes requested and resubmission,
+approval, the author's decision email, the `ideas.IdeaTransition` lifecycle
+audit trail, and the take-over of a review whose reviewer lost eligibility.
+Every other business domain is not started.
 
 ### Implemented (Sprint 2)
 
@@ -558,6 +566,18 @@ not started.
 | Idea lifecycle | The `DRAFT`/`SUBMITTED`/`UNDER_REVIEW`/`CHANGES_REQUESTED`/`REJECTED`/`APPROVED`/`AUTOMATION_PROPOSAL` vocabulary, enforced at the database as well as by `choices` | S2-001 |
 | Idea creation and submission | `createIdea`/`updateIdea`/`submitIdea`, `idea`/`ideas`/`organizationIdeas`/`categories` queries, tenant- and visibility-filtered selectors, and the `/app/ideas` UI | S2-002 |
 | Idea lifecycle | The seven-pair transition matrix in `ideas/lifecycle.py` behind a single `transitionIdea` mutation, with the per-viewer `availableTransitions` field. No mutation and no write input can set a status | S2-003 |
+
+### Implemented (Sprint 3)
+
+| Area | What exists | Task |
+| ---- | ----------- | ---- |
+| Reviewer eligibility | `idea.review` permission, Owner and Reviewer roles, `reviews.eligibility` | S3-002 |
+| Review queue and history | `reviewQueue`, `ideaReviews`, `viewerCanReviewIn`, the `IdeaType` review capability fields, `/app/reviews` | S3-003 |
+| Review operations | `startReview` / `completeReview`; review-owned moves closed on `transitionIdea` | S3-004 |
+| Revision | Edit and resubmit in `CHANGES_REQUESTED`, visibility fixed after submission | S3-005 |
+| Approval and notification | Approval through `completeReview`; the author's decision email on commit | S3-006 |
+| Lifecycle audit | Append-only `ideas.IdeaTransition` per status change; `ideaTransitions` (read-only) | S3-007 |
+| Integration and security | Take-over of a stalled review (`WITHDRAWN` + next round, D-2); `PRIVATE`/`DEPARTMENT` ideas refused at submission (D-6); two-tenant, race and end-to-end suites | S3-008 |
 | Categories and discovery | `list_discoverable_ideas` as the single read path, with `IdeaFilters` (category, status, search) that can only **narrow** what the visibility filter allowed, and `ideas/pagination.py` for bounded offset paging. `ideas`/`organizationIdeas` return an `IdeaPage`; there is no `visibility` or `authorId` filter to send | S2-004 |
 | Comments and discussion | `add_comment`/`update_comment`/`delete_comment` behind a `comments(ideaId)` query that filters by the idea's own visibility, so a comment is never more readable than the idea it is on. Edit and delete are author-only, with no elevated path and no new permission code | S2-005 |
 | Voting & engagement | One vote per user per idea, enforced by a service check *and* the `unique_vote_per_user_idea` constraint. Voting is gated on idea visibility only, with no lifecycle condition - a vote is interest in the idea, not participation in a review. `voteCount`/`viewerHasVoted` are annotated onto the discovery page, so a page of ideas costs no extra queries | S2-006 |
@@ -614,9 +634,11 @@ How these are used day to day: [`development.md`](development.md),
 - Business domain apps other than `identity`, `organizations`, `ideas` and
   `reviews`: opportunities, proposals, developers, projects, tasks,
   notifications, impact, files, audit
-- Review *management*: the lifecycle transitions exist and work, but there is
-  no review queue, no reviewer assignment, no reasons recorded against a
-  `CHANGES_REQUESTED` idea, and no dashboard of any kind
+- Review extensions deferred from Sprint 3 (`reviews-domain.md` §19):
+  explicit or automatic reviewer assignment, review panels or quorum, numeric
+  scoring, organization-defined criteria, emailing reviewers on submission
+  (D-11), listing stalled reviews in the review queue, and a frontend view
+  of the lifecycle history (`ideaTransitions` is available to the API only)
 - A ranking or scoring of the votes that now exist, any "who voted" listing,
   threaded comment replies, comment moderation and soft delete, and rate
   limiting — this project has no throttling mechanism to extend. Also: an
@@ -642,7 +664,8 @@ How these are used day to day: [`development.md`](development.md),
   the upload/download operations, routed through this server against
   Django's filesystem storage backend; see
   [Storage](#storage-target--filesystem-today-object-storage-later))
-- Audit logging
+- A general audit log (the lifecycle trail `ideas.IdeaTransition` is the
+  only audit record; account and organization events are not recorded)
 - React Query in the frontend
 - Deployment automation and any deployed environment (development, staging,
   production)

@@ -35,6 +35,8 @@ from organizations.models import Membership
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 OTHER_PASSWORD = 'another-strong-pass-2'
 MIN_DESCRIPTION = 'x' * services.MIN_DESCRIPTION_LENGTH
+# A visibility reviewers can read: the last submission rule (S3-008, D-6).
+REVIEWABLE = Idea.Visibility.ORGANIZATION
 
 
 def make_user(email='ada@example.com', **overrides):
@@ -523,7 +525,7 @@ class TestSubmitIdea:
         user = make_user()
         organization, _ = make_organization(owner=user)
         category = make_category()
-        idea = make_idea(organization, user, category=category)
+        idea = make_idea(organization, user, category=category, visibility=REVIEWABLE)
 
         submitted = services.submit_idea(user, idea.pk)
 
@@ -536,7 +538,7 @@ class TestSubmitIdea:
         the two are written together."""
         user = make_user()
         organization, _ = make_organization(owner=user)
-        idea = make_idea(organization, user, category=make_category())
+        idea = make_idea(organization, user, category=make_category(), visibility=REVIEWABLE)
         before = timezone.now()
 
         submitted = services.submit_idea(user, idea.pk)
@@ -547,7 +549,7 @@ class TestSubmitIdea:
     def test_the_timestamp_is_not_rewritten_by_a_later_read(self):
         user = make_user()
         organization, _ = make_organization(owner=user)
-        idea = make_idea(organization, user, category=make_category())
+        idea = make_idea(organization, user, category=make_category(), visibility=REVIEWABLE)
 
         services.submit_idea(user, idea.pk)
         first = Idea.objects.get(pk=idea.pk).submitted_at
@@ -658,7 +660,7 @@ class TestSubmitIdea:
     def test_an_already_submitted_idea_cannot_be_submitted_again(self):
         user = make_user()
         organization, _ = make_organization(owner=user)
-        idea = make_idea(organization, user, category=make_category())
+        idea = make_idea(organization, user, category=make_category(), visibility=REVIEWABLE)
         services.submit_idea(user, idea.pk)
         first = Idea.objects.get(pk=idea.pk).submitted_at
 
@@ -689,7 +691,7 @@ class TestSubmitIdea:
         """
         user = make_user()
         organization, _ = make_organization(owner=user)
-        idea = make_idea(organization, user, category=make_category())
+        idea = make_idea(organization, user, category=make_category(), visibility=REVIEWABLE)
 
         submitted = services.submit_idea(user, idea.pk)
 

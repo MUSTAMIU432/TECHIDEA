@@ -206,12 +206,19 @@ Two consequences follow, both intended and both pinned by
 
 - An `ORGANIZATION` or `PUBLIC` *draft* is readable by its readers before it is
   submitted. Drafts are only author-only when they are `PRIVATE`.
-- A `PRIVATE` idea stays author-only after it is submitted. A reviewer can
-  only act on an idea they can read (see [Transition matrix](#transition-matrix-implemented-s2-003)),
-  so a submitted `PRIVATE` idea cannot be picked up for review until its
-  author widens its visibility — which `updateIdea` only allows while it is a
-  draft. The frontend says so next to the visibility picker; it does not
-  change visibility on the author's behalf.
+- A `PRIVATE` idea cannot be submitted (S3-008,
+  [`reviews-domain.md`](reviews-domain.md) D-6). A reviewer can only act on
+  an idea they can read (see [Transition matrix](#transition-matrix-implemented-s2-003)),
+  so a submitted `PRIVATE` idea would wait in `SUBMITTED` where no reviewer
+  could reach it. Every move to `SUBMITTED` - the first submission and a
+  resubmission - therefore requires `ORGANIZATION` or `PUBLIC`
+  (`services.REVIEWABLE_VISIBILITIES`, checked with the other submission
+  rules) and refuses anything else with a message telling the author to
+  widen it first. `PRIVATE` keeps its meaning: a private draft stays
+  author-only, and nothing widens visibility on the author's behalf. The
+  frontend says so next to the visibility picker. Ideas submitted as
+  `PRIVATE` before S3-008 are not changed; they stay out of every queue
+  until staff widen them in the Django admin with the author's agreement.
 
 ### DEPARTMENT is a reserved value, not a missing feature
 

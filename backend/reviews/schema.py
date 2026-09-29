@@ -55,6 +55,9 @@ class CriterionAssessmentType:
     description=(
         'One review round of an idea. `decision` and `completedAt` are null '
         'while the review is in progress, which only reviewers ever see. '
+        'WITHDRAWN is not a verdict: the round was closed when another reviewer '
+        'took over from a reviewer who could no longer review, and the next '
+        'round is theirs. '
         '`reviewerId` rather than a nested user, for the same reason '
         '`IdeaType` carries `authorId`.'
     )
@@ -163,7 +166,7 @@ class CriterionAssessmentInput:
     description=(
         "Complete the caller's own open review of an idea. Every criterion must "
         'be rated exactly once; feedback is required for CHANGES_REQUESTED and '
-        'REJECTED.'
+        'REJECTED. WITHDRAWN is refused: only a take-over records it.'
     )
 )
 class CompleteReviewInput:
@@ -206,7 +209,9 @@ class Mutation:
             'Start reviewing a submitted idea: open its next review round and '
             "move it to UNDER_REVIEW. Only a reviewer in the idea's organization "
             'who can read it and did not write it; refused if somebody else has '
-            'already started.'
+            'already started. On an idea UNDER_REVIEW whose reviewer can no '
+            'longer review it, takes the review over: that round is WITHDRAWN and '
+            "the next one is the caller's."
         )
     )
     def start_review(self, info: strawberry.Info, idea_id: strawberry.ID) -> ReviewPayload:

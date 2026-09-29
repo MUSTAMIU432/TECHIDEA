@@ -17,16 +17,16 @@ idea cards). S3-004 is implemented: `startReview` / `completeReview`
 and opened through `ideas.lifecycle.apply_review_transition` (§5.1), and the
 decision form in the workspace. As built, `completeReview` takes `ideaId` as
 well as `reviewId` (the review must belong to that idea), and the feedback
-rule (D-3) is enforced by the service rather than a database CHECK. Not
-implemented yet: the take-over of a review whose reviewer lost eligibility
-(§5.3, D-2), notifications and audit. S3-005 is implemented as §10 describes:
+rule (D-3) is enforced by the service rather than a database CHECK. The
+take-over of a review whose reviewer lost eligibility (§5.3, D-2) followed in
+S3-008. S3-005 is implemented as §10 describes:
 the author edits a `CHANGES_REQUESTED` idea with the existing `updateIdea`
 (visibility fixed, D-6) and resubmits with the existing `submitIdea`; no
 operation is new. Completed reviews are immutable and are never touched by
 the edit or the resubmission, and resubmission creates no review - the next
 round (n+1, with a snapshot of the revised content) is created only when a
-reviewer calls `startReview`. The optional "refuse submission of `PRIVATE`
-ideas" half of D-6 is not implemented. S3-006 (approval) is implemented as
+reviewer calls `startReview`. The "refuse submission of `PRIVATE` ideas"
+half of D-6 followed in S3-008. S3-006 (approval) is implemented as
 §11 recommends: approval is `completeReview` with `decision = APPROVED`,
 through the same validation, locks and review-owned transition as the other
 decisions - no separate mutation or permission - and it ends at `APPROVED`:
@@ -38,8 +38,11 @@ implemented as §15 describes (D-10): every successful status change writes
 one append-only `ideas.IdeaTransition` in the same transaction, naming the
 authorized caller as actor, and refused moves are logged with ids only. The
 reviewer submission email (D-11) is deliberately not implemented, per its
-recommendation. §1 describes the code as it
-was before S3-002.
+recommendation. S3-008 (integration and security) closes Sprint 3: the
+take-over of a stalled review (§5.3, D-2) and the refusal to submit an idea
+reviewers cannot read (D-6), plus the two-tenant security, race and
+end-to-end suites; see [Sprint 3 as delivered](#sprint-3-as-delivered-s3-008).
+§1 describes the code as it was before S3-002.
 
 **D-1 as implemented in S3-002.** Membership creation still exists only at
 organization bootstrap and through Django admin (staff). No self-service
@@ -48,6 +51,35 @@ and so hold `organization.members.manage`, which would make such a mutation
 an oracle for which email addresses have accounts, the thing Identity is
 built to avoid. A consent-based invitation flow in the Organizations domain
 remains the prerequisite for reviewers outside staff-managed organizations.
+S3-008 confirmed this is sufficient for Sprint 3 and added no membership
+mechanism: `reviews/tests/test_end_to_end.py` builds every flow from
+registration, a membership added through the admin's own form, and the
+owner's `assignRoleToMembership`.
+
+### Sprint 3 as delivered (S3-008)
+
+- **Take-over (D-2).** Implemented as §5.3 recommends; see there.
+- **Submission requires a reviewable visibility (D-6).** Every move to
+  `SUBMITTED` - first submission and resubmission - refuses an idea whose
+  visibility is not `ORGANIZATION` or `PUBLIC`
+  (`ideas.services.REVIEWABLE_VISIBILITIES`, part of the submission rules the
+  lifecycle already runs), with "A private idea cannot be reviewed. Share it
+  with your organization or make it public before submitting." `PRIVATE`
+  keeps its meaning and is still the default for a new draft; nothing widens
+  visibility on the author's behalf. So every `SUBMITTED` idea is readable by
+  its organization's reviewers. Ideas submitted as `PRIVATE` before S3-008 are
+  not migrated: changing who can read them is the author's decision, and
+  staff can widen one in the Django admin.
+- **Membership (D-1).** No new mechanism; see above.
+- **Lifecycle history in the UI.** Not required by §14 and not built:
+  `ideaTransitions` is a read-only API surface (author and the organization's
+  reviewers). The review history on the idea card remains the author's view
+  of what happened.
+- **Tests.** `reviews/tests/test_takeover.py`,
+  `test_integration_security.py` (two tenants in both directions, lifecycle
+  bypass, races with record invariants from `reviews/tests/invariants.py`),
+  `test_end_to_end.py` (the four flows over HTTP), and
+  `ideas/tests/test_submission_visibility.py`.
 
 Companion to [`ideas-domain.md`](ideas-domain.md), which owns the lifecycle
 this domain builds on. Where the two disagree about what exists, the code is
@@ -404,6 +436,38 @@ non-lifecycle decision value that records who released it and when, and a
 new round opens with the new reviewer. The idea stays `UNDER_REVIEW`
 throughout.
 
+**Implemented in S3-008**, as recommended:
+
+- The take-over is `startReview` on an `UNDER_REVIEW` idea - claiming a
+  stalled idea is still claiming it, so no assignment mutation exists. Under
+  the idea row lock, the caller must pass `can_review`, and the open review's
+  reviewer must *currently* fail it (left the organization, membership
+  inactive or removed, `idea.review` removed, account deactivated, or the idea
+  no longer readable to them). Otherwise the answer is the same "This idea is
+  not waiting for review." as for any idea not waiting, so an eligible
+  reviewer's review is never taken and the refusal reveals nothing.
+- The open row is completed with `decision = WITHDRAWN` and `completed_at`,
+  no feedback and no assessments; its `reviewer` is who held it. Round n+1
+  opens in the same transaction for the new reviewer (a fresh snapshot, of
+  unchanged content). No second review for a round, no second open review,
+  nothing deleted or rewritten; the withdrawn row is as immutable as any
+  completed one.
+- No status moves, so no `IdeaTransition` is written (a same-status row is
+  refused by its CHECK); the take-over is logged at INFO with ids only
+  (`reviews.services`). No email: nothing was decided.
+- `WITHDRAWN` is a `Review.Decision` value (migration `reviews/0002` widens
+  `review_decision_is_known`) but not a choice: `completeReview` refuses it.
+  Verdicts remain exactly the three idea statuses.
+- `viewerCanStartReview` is also true for a reviewer who may take over, so
+  the idea card links to the workspace ("Review stalled - take it over") and
+  the workspace offers "Take over review". Stalled reviews are **not** listed
+  in `reviewQueue`, which stays `SUBMITTED`-only; they are found from the
+  ideas list.
+- The author sees a withdrawn round in the history like any completed one,
+  labelled "Withdrawn" with an explanation; it carries no feedback.
+- Two concurrent take-overs: the idea lock serializes them and the second
+  finds an eligible holder (the first) and is refused.
+
 ---
 
 ## 6. Reviewer authorization
@@ -591,7 +655,7 @@ and answers `null` for every failure.
 | ------- | ---- |
 | Review queue | Caller must be an eligible reviewer in the requested organization. Returns `SUBMITTED` ideas of **that organization only** that the caller can read, excluding the caller's own. Another tenant's `PUBLIC` ideas never appear. Non-reviewers receive an empty page, which is indistinguishable from an empty queue. |
 | Review detail / history (`ideaReviews`) | Readable by the idea's **author** (completed reviews only) and by **eligible reviewers** of the idea's organization (all reviews). Not readable by other readers of the idea, including platform-wide readers of a `PUBLIC` idea ([D-9](#20-open-product-decisions)). |
-| Create review (`startReview`) | `can_review(user, idea)`, idea in `SUBMITTED`, no open review. Idea row locked. Membership and eligibility re-checked inside the transaction. |
+| Create review (`startReview`) | `can_review(user, idea)`, idea in `SUBMITTED`, no open review. Idea row locked. Membership and eligibility re-checked inside the transaction. On `UNDER_REVIEW`, only the take-over of §5.3 (S3-008). |
 | Decision (`completeReview`) | Caller is the review's reviewer **and** still `can_review` the idea; review in progress; idea `UNDER_REVIEW`; decision valid; feedback rule met. Idea and review rows locked. |
 | Assignment | Not introduced. The only reassignment is the take-over in [§5.3](#53-a-reviewer-who-stops-being-eligible-mid-review), gated on the previous reviewer's **current** ineligibility. |
 | Feedback | Stored on the review, returned only under the review read rule. Never copied into comments. Text only, rendered as text; no HTML. |
@@ -660,6 +724,11 @@ if reviews routinely span sessions); any assignment mutation.
 `transitionIdea` remains for author moves and the hand-off, and refuses
 review-owned moves ([§5.1](#51-closing-the-bypass)).
 
+As built (S3-008): `startReview` also takes over a stalled review (§5.3);
+`ReviewDecision` includes `WITHDRAWN`, which `ideaReviews` may return and
+`completeReview` refuses; `ideaTransitions(ideaId)` (S3-007) is the read-only
+lifecycle history.
+
 ---
 
 ## 14. Frontend boundary
@@ -694,6 +763,10 @@ features/reviews/
   "Resubmit" when status is `CHANGES_REQUESTED`.
 - No redesign of `IdeasWorkspace`. No `dangerouslySetInnerHTML`. No
   client-side authorization decisions beyond showing what the server says.
+- **As built (S3-008):** the workspace offers "Take over review" where the
+  server reports `viewerCanStartReview` on an `UNDER_REVIEW` idea, and
+  `ReviewHistory` labels a withdrawn round. The decision form offers the three
+  verdicts only. No lifecycle-history (`ideaTransitions`) view: deferred.
 
 ---
 
@@ -727,6 +800,8 @@ when, why, and what was reviewed. Two gaps remain that `Review` cannot close:
   empty list.
 - Refused moves are logged by `ideas.lifecycle` at INFO with ids and the
   refusal reason only.
+- A take-over (S3-008) moves no status and writes no row; its record is the
+  withdrawn review and the next round.
 - **Deviation:** no `review` foreign key. Setting it would make `ideas` depend
   on `reviews`, reversing §2's dependency direction; the review a move belongs
   to is recoverable from the idea and the time. Ideas moved before S3-007
@@ -829,7 +904,9 @@ edit and resubmit in `CHANGES_REQUESTED`.
 
 Migrations: `organizations` data migration for `idea.review` + `Reviewer`
 role (S3-002); `reviews/0001_initial` (S3-002/S3-004); `ideas` migration for
-`IdeaTransition` (S3-007). No change to existing `ideas` columns.
+`IdeaTransition` (S3-007); `reviews/0002_review_withdrawn_decision` adds
+`withdrawn` to the decision choices and `review_decision_is_known` (S3-008).
+No change to existing `ideas` columns.
 
 ---
 
@@ -874,8 +951,11 @@ notification centre, Celery, generic audit framework, membership invitation
 
 ## 20. Open product decisions
 
-Each needs an answer before the listed task starts. The recommendation is the
-smallest option consistent with the existing code. None has been implemented.
+Each needed an answer before the listed task started. The recommendation is
+the smallest option consistent with the existing code. As of S3-008 every
+recommendation is implemented as written except D-1: membership stays
+staff-managed (see the top of this document). D-11's optional reviewer email
+is deliberately off, as recommended.
 
 | # | Decision | Recommendation | Blocks |
 | - | -------- | -------------- | ------ |

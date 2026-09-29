@@ -52,10 +52,14 @@ def send_review_decision_email(review_id: int) -> None:
 
     Takes an id and reads the review again, because it runs after the commit:
     the row it describes is the committed one. Does nothing for a review that
-    is not completed - there is no decision to report.
+    is not completed, or was withdrawn by a take-over - there is no decision to
+    report.
     """
     review = Review.objects.select_related('idea__author').filter(pk=review_id).first()
     if review is None or review.completed_at is None:
+        return
+    if review.decision == Review.Decision.WITHDRAWN:
+        # A take-over, not a verdict: the idea is still under review.
         return
 
     author = review.idea.author

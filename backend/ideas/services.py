@@ -310,9 +310,26 @@ def _load_editable_idea(user: User, idea_id: object) -> Idea:
     return idea
 
 
+# Who must be able to read an idea for it to be put forward (S3-008,
+# `docs/reviews-domain.md` D-6). A submitted idea is waiting for a reviewer of
+# its organization, and a reviewer can only review what they can read: a
+# `PRIVATE` idea is readable by its author alone, so submitting one would park
+# it in `SUBMITTED` where no reviewer could ever reach it. `DEPARTMENT` reads
+# as author-only too, and is not selectable anyway. The meaning of `PRIVATE`
+# is unchanged - a private draft stays private - and nothing widens visibility
+# on the author's behalf: they choose, then submit.
+REVIEWABLE_VISIBILITIES = frozenset({Idea.Visibility.ORGANIZATION, Idea.Visibility.PUBLIC})
+
+SUBMISSION_VISIBILITY_MESSAGE = (
+    'A private idea cannot be reviewed. Share it with your organization or make '
+    'it public before submitting.'
+)
+
+
 def _validate_for_submission(idea: Idea) -> None:
     """
-    What a draft must contain before it can be submitted.
+    What a draft must contain before it can be submitted: its content, and a
+    visibility its organization's reviewers can read.
 
     A rule of the transition, so it lives here rather than on the model: a
     draft is *supposed* to be incomplete, and a `null=False` column or a
@@ -331,6 +348,8 @@ def _validate_for_submission(idea: Idea) -> None:
         )
     if idea.category_id is None:
         raise IdeaError('Choose a category before submitting this idea.')
+    if idea.visibility not in REVIEWABLE_VISIBILITIES:
+        raise IdeaError(SUBMISSION_VISIBILITY_MESSAGE)
 
 
 def create_idea(user: User | None, organization_id: object, data: IdeaInput) -> Idea:

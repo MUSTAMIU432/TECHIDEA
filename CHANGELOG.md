@@ -138,6 +138,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     the evaluation, the transition is the lifecycle record.
   - Reviewer emails on submission (D-11) are deliberately not implemented,
     per the architecture's recommendation; documented.
+- S3-008: Integration, security and testing.
+  - **Take-over of a stalled review (D-2, §5.3).** When the reviewer holding
+    an open review is no longer eligible (membership inactive or removed,
+    `idea.review` removed, account deactivated, idea no longer readable to
+    them), another eligible reviewer takes it over with `startReview`: the
+    open round is completed as the new `WITHDRAWN` decision (no feedback, no
+    assessments) and round n+1 opens for them, in one transaction under the
+    idea row lock. The idea stays `UNDER_REVIEW`, so no `IdeaTransition` is
+    written and no email is sent; the take-over is logged with ids only. An
+    eligible reviewer's review is never taken, and concurrent take-overs
+    leave exactly one. `viewerCanStartReview` reports the take-over;
+    `completeReview` refuses `WITHDRAWN`. Migration
+    `reviews/0002_review_withdrawn_decision` widens the decision CHECK.
+  - **Only reviewable ideas can be submitted (D-6).** Every move to
+    `SUBMITTED` requires `ORGANIZATION` or `PUBLIC` visibility, so a
+    submitted idea is always readable by its reviewers. `PRIVATE` is still the
+    default and still author-only; the author widens it before submitting.
+    Ideas submitted as `PRIVATE` earlier are left as they are.
+  - **Frontend:** "Take over review" in the review workspace and a "Review
+    stalled" link on the idea card, both driven by the server's flag; a
+    withdrawn round is labelled and explained in the review history; the
+    decision form offers the three verdicts only; the visibility hint says a
+    private idea cannot be submitted.
+  - **Membership (D-1):** no new mechanism. Staff add memberships in the
+    Django admin and owners grant the Reviewer role with
+    `assignRoleToMembership`; tested end to end.
+  - **Tests:** end-to-end flows over HTTP (registration → admin membership →
+    role grant → draft → submit → review → approval with email and history;
+    changes requested → revision → second round; rejection; every
+    unauthorized caller), a two-tenant security sweep in both directions,
+    lifecycle-bypass and schema checks, races (changes requested vs approve
+    or reject, concurrent starts and take-overs, resubmission vs completion,
+    take-over vs a reinstated reviewer's completion) checked against shared
+    record invariants, take-over and submission-visibility suites.
+  - **Deferred:** stalled reviews in `reviewQueue`, a lifecycle-history
+    (`ideaTransitions`) view in the frontend, membership invitation.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 

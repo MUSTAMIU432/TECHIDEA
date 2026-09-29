@@ -140,9 +140,10 @@ class IdeaType:
         description=(
             'Whether the current viewer is eligible to start a review of this '
             'idea: a reviewer in its organization who can read it and did not '
-            'write it, on an idea waiting in SUBMITTED. A capability flag only; '
-            'the operation that starts a review is not available yet, and it '
-            'will check eligibility again when it is.'
+            'write it, on an idea waiting in SUBMITTED - or UNDER_REVIEW with a '
+            'review whose reviewer can no longer review it, which startReview '
+            'then takes over. A capability flag only; startReview checks '
+            'eligibility again.'
         )
     )
     def viewer_can_start_review(self) -> bool:
