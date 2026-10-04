@@ -5,12 +5,24 @@
  * by the order they're concatenated here, so callers add their own width
  * (`w-full`, `flex-1`, a fixed size, ...) instead of relying on override order.
  */
-export function inputClasses(hasError = false): string {
+interface InputClassOptions {
+  /** A `<textarea>`: its height comes from `rows`, not a fixed `h-11`. */
+  multiline?: boolean
+  /** A roomier field with larger text, for the main fields of a long form. */
+  large?: boolean
+}
+
+export function inputClasses(
+  hasError = false,
+  { multiline = false, large = false }: InputClassOptions = {},
+): string {
+  const height = multiline ? (large ? 'py-3' : 'py-2.5') : large ? 'h-12' : 'h-11'
   return [
     // border-gray-300 (rather than the barely-there gray-200) gives each
     // field a clearly visible outline against the white card, so the form
     // reads at a glance instead of needing a squint.
-    'block h-11 rounded-lg border bg-white px-3.5 text-sm text-gray-900 shadow-sm',
+    `block ${height} rounded-lg border bg-white px-3.5 text-gray-900 shadow-sm`,
+    large ? 'text-base' : 'text-sm',
     'placeholder:text-gray-400 motion-safe:transition-colors motion-safe:duration-150',
     'focus:outline-none focus:ring-2',
     hasError

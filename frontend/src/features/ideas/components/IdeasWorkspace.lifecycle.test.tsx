@@ -1,6 +1,9 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { makeIdea } from '../../../test/idea'
+import { renderWithRouter } from '../../../test/renderWithRouter'
+import { statusLabel } from '../utils/lifecycle'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
@@ -19,37 +22,12 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
 
-const { createIdeaRequest, organizationIdeasRequest, transitionIdeaRequest } =
-  await import('../api/ideasApi')
-const createMock = vi.mocked(createIdeaRequest)
+const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
 const listMock = vi.mocked(organizationIdeasRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 const REVIEWER = { id: '8', email: 'reviewer@example.com' }
-
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'SUBMITTED',
-    visibility: 'ORGANIZATION',
-    submittedAt: '2026-02-01T00:00:00.000Z',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-02T00:00:00.000Z',
-    authorId: '9',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
 
 /**
  * `viewer` decides who is signed in and what the organization context says they
@@ -117,21 +95,29 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   // --- status rendering ----------------------------------------------------
 
   it('renders every lifecycle state the backend can report', async () => {
+    // Every status in the enum, both tracks' worth: an idea may be waiting on
+    // its own organization or on the platform, and a reader who cannot tell
+    // "waiting for my organization" from "waiting for the platform" has learned
+    // nothing from the card.
     const states: IdeaStatus[] = [
       'DRAFT',
+      'SUBMITTED_TO_ORGANIZATION',
+      'ORGANIZATION_CHANGES_REQUESTED',
+      'ORGANIZATION_CONFIRMED',
       'SUBMITTED',
       'UNDER_REVIEW',
       'CHANGES_REQUESTED',
       'REJECTED',
       'APPROVED',
+      'READY_FOR_IMPLEMENTATION',
       'AUTOMATION_PROPOSAL',
     ]
     mockContext({
       ideas: states.map((status, index) =>
-        idea({ id: String(index), status, title: `Idea in ${status}` }),
+        makeIdea({ id: String(index), status, title: `Idea in ${status}` }),
       ),
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Idea in DRAFT')
     // Human labels, not the raw enum names a client would otherwise have to
@@ -139,32 +125,35 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     // the details row — which is asserted rather than assumed.
     //
     // Read from within the list: the status filter above the list offers
-    // options with these same seven words, and a filter named "Draft" is
-    // exactly what it should be called, so the assertion is about the rows.
+    // options with these same words, and a filter named "Draft" is exactly what
+    // it should be called, so the assertion is about the rows.
     const list = within(screen.getByRole('list'))
-    const counts = [
-      'Draft',
-      'Submitted',
-      'Under review',
-      'Changes requested',
-      'Rejected',
-      'Approved',
-      'Automation proposal',
-    ].map((label) => [label, list.getAllByText(label).length])
-    expect(counts).toEqual([
-      ['Draft', 2],
-      ['Submitted', 2],
-      ['Under review', 2],
-      ['Changes requested', 2],
-      ['Rejected', 2],
-      ['Approved', 2],
-      ['Automation proposal', 2],
+    const labels = states.map((status) => [
+      statusLabel(status),
+      list.getAllByText(statusLabel(status)).length,
     ])
+    expect(labels).toEqual(states.map((status) => [statusLabel(status), 2]))
+  })
+
+  it('does not call a platform-approved idea approved, because the author still owes a decision', async () => {
+    mockContext({ ideas: [makeIdea({ status: 'APPROVED' })] })
+    renderWithRouter(<IdeasWorkspace />)
+
+    await screen.findByText('Automate the invoice run')
+    // Platform approval and the author's go-ahead are two different facts; the
+    // second is still outstanding, so the badge says so. Read from the list: the
+    // status filter above it offers an "Approved" option, and a filter named
+    // "Approved" is exactly what it should be called.
+    const list = within(screen.getByRole('list'))
+    expect(list.queryByText('Approved')).not.toBeInTheDocument()
+    expect(list.getAllByText(/your confirmation needed/).length).toBeGreaterThan(0)
+    // ...and says what the author actually has to do.
+    expect(screen.getByText(/decide whether to give the go-ahead/)).toBeInTheDocument()
   })
 
   it('explains what a changes-requested idea needs from its author', async () => {
-    mockContext({ ideas: [idea({ status: 'CHANGES_REQUESTED', authorId: '7' })] })
-    render(<IdeasWorkspace />)
+    mockContext({ ideas: [makeIdea({ status: 'CHANGES_REQUESTED', authorId: '7' })] })
+    renderWithRouter(<IdeasWorkspace />)
 
     // The state whose next step belongs to the reader, so it is worth saying
     // in words rather than leaving them to infer it from a badge colour.
@@ -174,7 +163,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   it('does not explain a draft, which is already obvious', async () => {
     mockContext({
       ideas: [
-        idea({
+        makeIdea({
           status: 'DRAFT',
           submittedAt: null,
           authorId: '7',
@@ -182,7 +171,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
         }),
       ],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
     expect(screen.queryByText(/Sent back to you/)).not.toBeInTheDocument()
@@ -195,82 +184,79 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     ['ORGANIZATION', 'This organization'],
     ['PRIVATE', 'Only you'],
   ])('renders %s as "%s"', async (visibility, label) => {
-    mockContext({ ideas: [idea({ visibility: visibility as Idea['visibility'] })] })
-    render(<IdeasWorkspace />)
+    mockContext({ ideas: [makeIdea({ visibility: visibility as Idea['visibility'] })] })
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText(label)).toBeInTheDocument()
   })
 
   // --- what is offered ------------------------------------------------------
 
-  it('offers the review move the backend says this viewer may make', async () => {
+  it('never offers a review move as a plain status change', async () => {
+    // The server listed the review move for this reviewer, and the card still
+    // draws nothing: starting and deciding a review have to leave a `Review`
+    // row, which `transitionIdea` refuses. Those moves belong to the review
+    // workspace, so offering them here would be offering a button the server
+    // rejects - and a client-side copy of the review rules is exactly the
+    // second place for them to drift.
     mockContext({
       viewer: REVIEWER,
       systemRole: true,
-      ideas: [idea({ availableTransitions: ['UNDER_REVIEW'] })],
+      ideas: [makeIdea({ availableTransitions: ['UNDER_REVIEW'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    expect(await screen.findByRole('button', { name: 'Start review' })).toBeInTheDocument()
+    await screen.findByText('Automate the invoice run')
+    expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take over review' })).not.toBeInTheDocument()
   })
 
-  it('offers the three review outcomes on an idea under review', async () => {
+  it('never offers a decision as a plain status change', async () => {
     mockContext({
       viewer: REVIEWER,
       systemRole: true,
       ideas: [
-        idea({
+        makeIdea({
           status: 'UNDER_REVIEW',
           availableTransitions: ['CHANGES_REQUESTED', 'REJECTED', 'APPROVED'],
         }),
       ],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
-    expect(screen.getByRole('button', { name: 'Request changes' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
-  })
-
-  it('offers an author nothing on their own submitted idea, even holding the Owner role', async () => {
-    // The self-review rule, seen from the client. The viewer here is the author
-    // *and* holds a system role; the server declined to list any move, and the
-    // UI draws no button because there is nothing to draw.
-    mockContext({
-      viewer: SIGNED_IN,
-      systemRole: true,
-      ideas: [idea({ authorId: '7', availableTransitions: [] })],
-    })
-    render(<IdeasWorkspace />)
-
-    await screen.findByText('Automate the invoice run')
-    expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Edit draft' })).not.toBeInTheDocument()
+    for (const label of ['Request changes', 'Reject', 'Approve']) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+    }
   })
 
   it('offers an ordinary member nothing on somebody else submitted idea', async () => {
     mockContext({
       viewer: SIGNED_IN,
       systemRole: false,
-      ideas: [idea({ availableTransitions: [] })],
+      ideas: [makeIdea({ availableTransitions: [] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
     expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Submit for review' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Send to my organization' }),
+    ).not.toBeInTheDocument()
   })
 
   it('offers the author a re-submission after changes are requested', async () => {
     mockContext({
       viewer: SIGNED_IN,
       ideas: [
-        idea({ status: 'CHANGES_REQUESTED', authorId: '7', availableTransitions: ['SUBMITTED'] }),
+        makeIdea({
+          status: 'CHANGES_REQUESTED',
+          authorId: '7',
+          availableTransitions: ['SUBMITTED'],
+        }),
       ],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByRole('button', { name: 'Submit again' })).toBeInTheDocument()
   })
@@ -282,9 +268,9 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     mockContext({
       viewer: REVIEWER,
       systemRole: true,
-      ideas: [idea({ status: 'APPROVED', availableTransitions: ['AUTOMATION_PROPOSAL'] })],
+      ideas: [makeIdea({ status: 'APPROVED', availableTransitions: ['AUTOMATION_PROPOSAL'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
     expect(screen.queryByRole('button', { name: /Hand off/ })).not.toBeInTheDocument()
@@ -295,24 +281,25 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   it('performs the move the server listed and reports its message', async () => {
     transitionMock.mockResolvedValue({
       success: true,
-      message: 'Idea moved to Under review.',
+      message: 'Idea moved to Waiting for your organization.',
       field: null,
-      idea: idea({
-        status: 'UNDER_REVIEW',
-        availableTransitions: ['CHANGES_REQUESTED', 'REJECTED', 'APPROVED'],
+      idea: makeIdea({
+        status: 'SUBMITTED_TO_ORGANIZATION',
+        availableTransitions: [],
       }),
     })
     mockContext({
-      viewer: REVIEWER,
-      systemRole: true,
-      ideas: [idea({ availableTransitions: ['UNDER_REVIEW'] })],
+      viewer: SIGNED_IN,
+      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start review' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to my organization' }))
 
-    expect(transitionMock).toHaveBeenCalledWith('1', 'UNDER_REVIEW')
-    expect(await screen.findByText('Idea moved to Under review.')).toBeInTheDocument()
+    expect(transitionMock).toHaveBeenCalledWith('1', 'SUBMITTED_TO_ORGANIZATION')
+    expect(
+      await screen.findByText('Idea moved to Waiting for your organization.'),
+    ).toBeInTheDocument()
     // The list is re-read, because the card the move was made from has changed.
     await waitFor(() => expect(listMock.mock.calls.length).toBeGreaterThan(1))
   })
@@ -325,13 +312,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
       idea: null,
     })
     mockContext({
-      viewer: REVIEWER,
-      systemRole: true,
-      ideas: [idea({ availableTransitions: ['UNDER_REVIEW'] })],
+      viewer: SIGNED_IN,
+      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start review' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to my organization' }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('You are not allowed to make that change to this idea.')
@@ -340,13 +326,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   it('reports a transport failure without claiming the move happened', async () => {
     transitionMock.mockRejectedValue(new Error('Failed to fetch'))
     mockContext({
-      viewer: REVIEWER,
-      systemRole: true,
-      ideas: [idea({ availableTransitions: ['UNDER_REVIEW'] })],
+      viewer: SIGNED_IN,
+      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start review' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to my organization' }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('We could not reach the server. Please try again.')
@@ -361,23 +346,24 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
       }),
     )
     mockContext({
-      viewer: REVIEWER,
-      systemRole: true,
-      ideas: [idea({ availableTransitions: ['UNDER_REVIEW'] })],
+      viewer: SIGNED_IN,
+      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start review' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to my organization' }))
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Start review' })).toBeDisabled())
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send to my organization' })).toBeDisabled(),
+    )
     release({
       success: true,
-      message: 'Idea moved to Under review.',
+      message: 'Idea moved to Waiting for your organization.',
       field: null,
-      idea: idea({ status: 'UNDER_REVIEW' }),
+      idea: makeIdea({ status: 'SUBMITTED_TO_ORGANIZATION' }),
     })
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Start review' })).not.toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Send to my organization' })).not.toBeDisabled(),
     )
   })
 
@@ -389,27 +375,33 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
       }),
     )
     mockContext({
-      viewer: REVIEWER,
-      systemRole: true,
+      viewer: SIGNED_IN,
       ideas: [
-        idea({ id: '1', availableTransitions: ['UNDER_REVIEW'] }),
-        idea({
+        makeIdea({ id: '1', authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] }),
+        makeIdea({
           id: '2',
           title: 'Another idea',
-          status: 'UNDER_REVIEW',
-          availableTransitions: ['CHANGES_REQUESTED', 'REJECTED', 'APPROVED'],
+          authorId: '7',
+          status: 'ORGANIZATION_CHANGES_REQUESTED',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
         }),
       ],
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start review' }))
+    await screen.findByText('Another idea')
+    const cards = within(screen.getByRole('list')).getAllByRole('listitem')
+    fireEvent.click(within(cards[0]).getByRole('button', { name: 'Send to my organization' }))
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Start review' })).toBeDisabled())
-    // The other idea's buttons are untouched: one move in flight does not lock
+    await waitFor(() =>
+      expect(
+        within(cards[0]).getByRole('button', { name: 'Send to my organization' }),
+      ).toBeDisabled(),
+    )
+    // The other idea's button is untouched: one move in flight does not lock
     // the whole page.
-    expect(screen.getByRole('button', { name: 'Approve' })).not.toBeDisabled()
-    release({ success: true, message: 'ok', field: null, idea: idea() })
+    expect(within(cards[1]).getByRole('button', { name: 'Submit again' })).not.toBeDisabled()
+    release({ success: true, message: 'ok', field: null, idea: makeIdea() })
   })
 
   // --- protected ideas ------------------------------------------------------
@@ -419,17 +411,17 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     // there is nothing to hide client-side - which is the point: the filter
     // that removed it ran on the server, in the same query the UI reads.
     mockContext({ ideas: [] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText('No ideas here yet')).toBeInTheDocument()
     expect(screen.queryByText('Automate the invoice run')).not.toBeInTheDocument()
   })
 
   it('does not offer a transition on an idea the viewer cannot see', async () => {
-    mockContext({ ideas: [idea({ visibility: 'PRIVATE', availableTransitions: [] })] })
-    render(<IdeasWorkspace />)
+    mockContext({ ideas: [makeIdea({ visibility: 'PRIVATE', availableTransitions: [] })] })
+    renderWithRouter(<IdeasWorkspace />)
 
-    // Scoped to the idea's own card: the page's "File a new idea" button lives
+    // Scoped to the idea's own card: the page's "File a new idea" link lives
     // outside it and is not what this is about. `findByText` because the list
     // is fetched on mount.
     const card = (await screen.findByText('Automate the invoice run')).closest('li')
@@ -442,7 +434,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     // computed an empty `availableTransitions` for this viewer, so the UI has
     // nothing to draw and no client-side rule to fall back on.
     for (const label of [
-      'Submit for review',
+      'Send to my organization',
       'Start review',
       'Send back',
       'Approve',
@@ -451,27 +443,5 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     ]) {
       expect(within(card as HTMLElement).queryByRole('button', { name: label })).toBeNull()
     }
-  })
-
-  // --- the form still works alongside ---------------------------------------
-
-  it('still creates a draft, whose only available move is submitting it', async () => {
-    createMock.mockResolvedValue({
-      success: true,
-      message: 'ok',
-      field: null,
-      idea: idea({ status: 'DRAFT', submittedAt: null }),
-    })
-    mockContext({ viewer: SIGNED_IN, ideas: [] })
-    render(<IdeasWorkspace />)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'File a new idea' }))
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A new idea' } })
-    fireEvent.change(screen.getByLabelText('Description'), {
-      target: { value: 'A description long enough.' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
-
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith('3', expect.anything()))
   })
 })

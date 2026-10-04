@@ -54,22 +54,22 @@ export function OrganizationList() {
             <button
               type="button"
               aria-pressed={isActive}
-              className={`w-full rounded-xl border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 ${
+              className={`w-full rounded-xl border p-4 text-left shadow-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 ${
                 isActive
-                  ? 'border-brand-300 bg-brand-50 shadow-sm'
-                  : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+                  ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500'
+                  : 'border-gray-300 bg-white hover:border-brand-300 hover:shadow-md'
               }`}
               onClick={() => setActiveOrganization(organization.id)}
             >
               <span className="flex items-start justify-between gap-4">
                 <span>
-                  <span className="block text-base font-semibold text-gray-900">
+                  <span className="block text-base font-bold text-gray-900">
                     {organization.name}
                   </span>
                   <span className="mt-1 block text-sm text-gray-500">/{organization.slug}</span>
                 </span>
                 {isActive ? (
-                  <span className="rounded-full bg-brand-100 px-2.5 py-1 text-xs font-semibold text-brand-800">
+                  <span className="rounded-full bg-brand-600 px-2.5 py-1 text-xs font-bold text-white">
                     Active
                   </span>
                 ) : null}
@@ -78,7 +78,7 @@ export function OrganizationList() {
                 {statusLabel(membership.status)}
               </span>
               {membership.roles.length > 0 ? (
-                <span className="mt-2 block text-xs font-medium text-brand-700">
+                <span className="mt-2 block text-xs font-semibold text-brand-700">
                   Roles: {membership.roles.map((role) => role.name).join(', ')}
                 </span>
               ) : null}

@@ -1,6 +1,8 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { makeIdea } from '../../../test/idea'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { renderWithRouter } from '../../../test/renderWithRouter'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
@@ -39,29 +41,6 @@ const deleteMock = vi.mocked(deleteCommentRequest)
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 const SOMEBODY_ELSE = '9'
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'DRAFT',
-    visibility: 'ORGANIZATION',
-    submittedAt: null,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: SOMEBODY_ELSE,
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
-
 function comment(
   overrides: Partial<Awaited<ReturnType<typeof commentsRequest>>['items'][number]> = {},
 ) {
@@ -70,6 +49,7 @@ function comment(
     ideaId: '1',
     authorId: SIGNED_IN.id,
     content: 'We do this by hand every month.',
+    parentId: null,
     createdAt: '2026-02-01T09:00:00.000Z',
     updatedAt: '2026-02-01T09:00:00.000Z',
     ...overrides,
@@ -87,15 +67,64 @@ async function card(title = 'Automate the invoice run') {
 
 async function openDiscussion(title = 'Automate the invoice run') {
   const target = await card(title)
+  // The action bar's cell, which is what opens the thread. Named for the
+  // section rather than the action, because the composer's own submit button
+  // is already called "Comment".
   fireEvent.click(within(target).getByRole('button', { name: 'Discussion' }))
   return target as HTMLElement
+}
+
+/**
+ * A comment's own author reaches Edit and Delete through the overflow on that
+ * comment's row, so a test that wants one opens the menu first - the way a
+ * reader does, rather than reaching past the disclosure.
+ */
+function openCommentMenu(target: HTMLElement) {
+  fireEvent.click(within(target).getByRole('button', { name: 'More actions for your comment' }))
 }
 
 function composer(target: HTMLElement) {
   return within(target).getByLabelText('Add a comment') as HTMLTextAreaElement
 }
 
-function mockContext(ideas: Idea[] = [idea()]) {
+/**
+ * A comment's "Reply" disclosure, which is not the reply box's own submit
+ * button - both are called "Reply", deliberately, because one opens the other
+ * and a reader who cannot tell them apart by name can still tell by position.
+ * This reaches the toggle, so a test does not depend on which one it clicked.
+ */
+function replyToggle(target: HTMLElement) {
+  const toggle = within(target)
+    .getAllByRole('button', { name: 'Reply' })
+    .find((button) => button.getAttribute('type') === 'button')
+  if (toggle === undefined) throw new Error('No Reply disclosure on screen.')
+  return toggle
+}
+
+/** The reply box, and the form around it - whose submit button is also "Reply". */
+async function replyBox(target: HTMLElement) {
+  const box = (await within(target).findByLabelText('Reply to this comment')) as HTMLTextAreaElement
+  return { box, form: box.closest('form') as HTMLElement }
+}
+
+/**
+ * Opens a collapsed run of comments. A thread with more than one comment shows
+ * only its first, so a test that wants a later one presses the disclosure
+ * rather than reaching past the component.
+ */
+function seeMore(target: HTMLElement) {
+  const [button] = within(target).queryAllByRole('button', { name: /^See \d+ more/ })
+  if (button === undefined) throw new Error('No "See more" disclosure on screen.')
+  fireEvent.click(button)
+  return button
+}
+
+function postReply(box: HTMLTextAreaElement, form: HTMLElement, content: string) {
+  fireEvent.change(box, { target: { value: content } })
+  fireEvent.click(within(form).getByRole('button', { name: 'Reply' }))
+}
+
+function mockContext(ideas: Idea[] = [makeIdea()]) {
   vi.mocked(useAuth).mockReturnValue({
     user: SIGNED_IN,
   } as unknown as ReturnType<typeof useAuth>)
@@ -141,6 +170,10 @@ function mockContext(ideas: Idea[] = [idea()]) {
  *   regardless - and the assertions check that no elevation exists.
  * - **A write updates what is on screen without re-fetching the list.** The
  *   idea list above, its filters and its page are untouched by commenting.
+ * - **A reply is written where it is answered.** The box opens inside the
+ *   comment being replied to, posts with that comment's id, and lands under it
+ *   in the thread - which is the whole difference between a conversation and a
+ *   list of things that happen to be near each other.
  */
 describe('Idea discussion (S2-005)', () => {
   beforeEach(() => {
@@ -155,7 +188,7 @@ describe('Idea discussion (S2-005)', () => {
   // --- fetching -------------------------------------------------------------
 
   it('does not fetch a discussion until it is opened', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     // One request for the ideas, and none for their discussions.
@@ -164,35 +197,49 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('fetches the discussion when it is opened, and only for that idea', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     await screen.findByText('We do this by hand every month.')
     expect(commentsMock).toHaveBeenCalledTimes(1)
     expect(commentsMock).toHaveBeenCalledWith('1')
-    expect(within(target).getByRole('button', { name: 'Hide discussion' })).toBeInTheDocument()
+    // One name whichever way the cell points; `aria-expanded` is what says the
+    // thread is open, so the label cannot drift between the two states.
+    expect(within(target).getByRole('button', { name: 'Discussion' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
   })
 
   it('only ever has one discussion open', async () => {
-    mockContext([idea({ id: '1', title: 'First idea' }), idea({ id: '2', title: 'Second idea' })])
-    render(<IdeasWorkspace />)
+    mockContext([
+      makeIdea({ id: '1', title: 'First idea' }),
+      makeIdea({ id: '2', title: 'Second idea' }),
+    ])
+    renderWithRouter(<IdeasWorkspace />)
 
     const first = await openDiscussion('First idea')
     await waitFor(() => expect(commentsMock).toHaveBeenCalledTimes(1))
-    fireEvent.click(within(first).getByRole('button', { name: 'Hide discussion' }))
+    fireEvent.click(within(first).getByRole('button', { name: 'Discussion' }))
 
     const second = await openDiscussion('Second idea')
     await waitFor(() => expect(commentsMock).toHaveBeenCalledTimes(2))
     // Opening the second closed the first: two threads on one page is two
     // things to read and a page that grew without the reader asking.
-    expect(within(second).getByRole('button', { name: 'Hide discussion' })).toBeInTheDocument()
-    expect(within(first).getByRole('button', { name: 'Discussion' })).toBeInTheDocument()
+    expect(within(second).getByRole('button', { name: 'Discussion' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
+    expect(within(first).getByRole('button', { name: 'Discussion' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
   })
 
   // --- the three states -----------------------------------------------------
 
   it('shows a loading state before the discussion arrives', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     expect(within(target).getByText('Loading the discussion…')).toBeInTheDocument()
@@ -200,7 +247,7 @@ describe('Idea discussion (S2-005)', () => {
 
   it('shows an empty state when nobody has commented', async () => {
     commentsMock.mockResolvedValue(commentPage([]))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     expect(
@@ -210,7 +257,7 @@ describe('Idea discussion (S2-005)', () => {
 
   it('reports a failed read as itself, not as an empty discussion', async () => {
     commentsMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     // An empty discussion would read as "nobody has said anything", which is a
@@ -229,10 +276,11 @@ describe('Idea discussion (S2-005)', () => {
         comment({ id: 'c2', authorId: SOMEBODY_ELSE, content: 'Second comment.' }),
       ]),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     await within(target).findByText('First comment.')
+    seeMore(target)
     const rendered = within(target)
       .getAllByRole('listitem')
       .map((item) => item.textContent ?? '')
@@ -241,7 +289,7 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('shows who wrote it and when', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     const row = (await within(target).findByText('We do this by hand every month.')).closest('li')
@@ -254,7 +302,7 @@ describe('Idea discussion (S2-005)', () => {
     commentsMock.mockResolvedValue(
       commentPage([comment({ updatedAt: '2026-02-03T11:00:00.000Z' })]),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     expect(await within(target).findByText('· edited')).toBeInTheDocument()
@@ -264,7 +312,7 @@ describe('Idea discussion (S2-005)', () => {
 
   it('renders comment content as text, never as markup', async () => {
     commentsMock.mockResolvedValue(commentPage([comment({ content: '<b>bold</b> & "quoted"' })]))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     const rendered = await within(target).findByText('<b>bold</b> & "quoted"')
@@ -277,7 +325,7 @@ describe('Idea discussion (S2-005)', () => {
 
   it('preserves the line breaks somebody typed', async () => {
     commentsMock.mockResolvedValue(commentPage([comment({ content: 'Step one.\nStep two.' })]))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     await within(target).findByText(/Step one/)
@@ -305,7 +353,7 @@ describe('Idea discussion (S2-005)', () => {
       field: null,
       comment: comment({ id: 'c2', content: 'A new comment.' }),
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
     const before = commentsMock.mock.calls.length
@@ -321,7 +369,7 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('empties the box after a successful post', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     fireEvent.change(composer(target), { target: { value: 'A new comment.' } })
@@ -331,7 +379,7 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('will not post an empty or whitespace-only comment', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     const button = within(target).getByRole('button', { name: 'Comment' })
 
@@ -343,7 +391,7 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('refuses an over-long comment before sending it', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     fireEvent.change(composer(target), { target: { value: 'x'.repeat(2001) } })
@@ -362,7 +410,7 @@ describe('Idea discussion (S2-005)', () => {
       field: 'content',
       comment: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     fireEvent.change(composer(target), { target: { value: 'Something' } })
@@ -381,7 +429,7 @@ describe('Idea discussion (S2-005)', () => {
       field: null,
       comment: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     fireEvent.change(composer(target), { target: { value: 'One more thought' } })
@@ -394,7 +442,7 @@ describe('Idea discussion (S2-005)', () => {
 
   it('reports a failed post as itself and clears the spinner', async () => {
     createMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     fireEvent.change(composer(target), { target: { value: 'A new comment.' } })
@@ -420,7 +468,7 @@ describe('Idea discussion (S2-005)', () => {
             })
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     fireEvent.change(composer(target), { target: { value: 'A new comment.' } })
 
@@ -439,8 +487,8 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('hides the composer on a closed discussion', async () => {
-    mockContext([idea({ status: 'REJECTED', discussionOpen: false })])
-    render(<IdeasWorkspace />)
+    mockContext([makeIdea({ status: 'REJECTED', discussionOpen: false })])
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     expect(
@@ -452,7 +500,7 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('offers no voting or attachment control inside the discussion', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
@@ -477,27 +525,36 @@ describe('Idea discussion (S2-005)', () => {
         comment({ id: 'c2', authorId: SOMEBODY_ELSE, content: 'Somebody else.' }),
       ]),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
     const mine = (await within(target).findByText('We do this by hand every month.')).closest('li')
+    seeMore(target)
     const theirs = (await within(target).findByText('Somebody else.')).closest('li')
 
-    expect(within(mine as HTMLElement).getByRole('button', { name: 'Edit' })).toBeInTheDocument()
-    expect(within(mine as HTMLElement).getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    openCommentMenu(mine as HTMLElement)
+    expect(within(mine as HTMLElement).getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
+    expect(
+      within(mine as HTMLElement).getByRole('menuitem', { name: 'Delete' }),
+    ).toBeInTheDocument()
     // An offer, not a control: the server refuses either way, so drawing these
-    // on somebody else's comment would be a button guaranteed to fail.
-    expect(within(theirs as HTMLElement).queryByRole('button', { name: 'Edit' })).toBeNull()
-    expect(within(theirs as HTMLElement).queryByRole('button', { name: 'Delete' })).toBeNull()
+    // on somebody else's comment would be a button guaranteed to fail - and
+    // here not even a menu to open.
+    expect(
+      within(theirs as HTMLElement).queryByRole('button', {
+        name: 'More actions for your comment',
+      }),
+    ).toBeNull()
   })
 
   it('saves an edit and shows the new text without re-fetching', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
     const before = commentsMock.mock.calls.length
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Edit' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Edit' }))
     const box = within(target).getByLabelText('Edit your comment')
     fireEvent.change(box, { target: { value: 'Edited.' } })
     fireEvent.click(within(target).getByRole('button', { name: 'Save' }))
@@ -514,11 +571,12 @@ describe('Idea discussion (S2-005)', () => {
       field: 'content',
       comment: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Edit' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Edit' }))
     fireEvent.change(within(target).getByLabelText('Edit your comment'), {
       target: { value: 'x'.repeat(2001) },
     })
@@ -533,11 +591,12 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('closes the editor on cancel without changing anything', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Edit' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Edit' }))
     fireEvent.change(within(target).getByLabelText('Edit your comment'), {
       target: { value: 'Never mind' },
     })
@@ -549,11 +608,12 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('will not save an emptied comment', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Edit' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Edit' }))
     fireEvent.change(within(target).getByLabelText('Edit your comment'), {
       target: { value: '  ' },
     })
@@ -565,12 +625,13 @@ describe('Idea discussion (S2-005)', () => {
   // --- deleting -------------------------------------------------------------
 
   it('deletes the reader’s own comment and removes it from the thread', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
     const before = commentsMock.mock.calls.length
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Delete' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Delete' }))
 
     await waitFor(() => expect(deleteMock).toHaveBeenCalled())
     await waitFor(() =>
@@ -587,11 +648,12 @@ describe('Idea discussion (S2-005)', () => {
       field: null,
       comment: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Delete' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Delete' }))
 
     expect(await within(target).findByText('Comment is unavailable.')).toBeInTheDocument()
     expect(within(target).getByText('We do this by hand every month.')).toBeInTheDocument()
@@ -599,11 +661,12 @@ describe('Idea discussion (S2-005)', () => {
 
   it('reports a failed delete as itself', async () => {
     deleteMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Delete' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Delete' }))
 
     expect(
       await within(target).findByText('We could not reach the server. Please try again.'),
@@ -612,11 +675,12 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('shows the empty state again once the last comment is deleted', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
-    fireEvent.click(within(target).getByRole('button', { name: 'Delete' }))
+    openCommentMenu(target)
+    fireEvent.click(within(target).getByRole('menuitem', { name: 'Delete' }))
 
     expect(
       await within(target).findByText('No comments yet. Be the first to say something.'),
@@ -626,7 +690,7 @@ describe('Idea discussion (S2-005)', () => {
   // --- the discovery context is untouched ------------------------------------
 
   it('keeps the idea list, its filters and its page through a discussion', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
     await within(target).findByText('We do this by hand every month.')
 
@@ -641,7 +705,10 @@ describe('Idea discussion (S2-005)', () => {
   })
 
   it('ignores a late answer for a discussion the reader has left', async () => {
-    mockContext([idea({ id: '1', title: 'First idea' }), idea({ id: '2', title: 'Second idea' })])
+    mockContext([
+      makeIdea({ id: '1', title: 'First idea' }),
+      makeIdea({ id: '2', title: 'Second idea' }),
+    ])
     const releases: (() => void)[] = []
     commentsMock.mockImplementation(
       (_ideaId) =>
@@ -649,13 +716,13 @@ describe('Idea discussion (S2-005)', () => {
           releases.push(() => resolve(commentPage([comment({ id: 'c9', content: 'Too late.' })])))
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const first = await openDiscussion('First idea')
     // Close the first thread, open the second idea's, and only then let the
     // first answer arrive. Two discussions are open at different moments, and
     // the late one must not be painted under the second - which is why the
     // answer is tagged with the idea it belongs to.
-    fireEvent.click(within(first).getByRole('button', { name: 'Hide discussion' }))
+    fireEvent.click(within(first).getByRole('button', { name: 'Discussion' }))
     const second = await openDiscussion('Second idea')
     await waitFor(() => expect(releases).toHaveLength(2))
 
@@ -669,5 +736,398 @@ describe('Idea discussion (S2-005)', () => {
       releases[1]?.()
     })
     expect(await within(second).findByText('Too late.')).toBeInTheDocument()
+  })
+
+  // --- replying --------------------------------------------------------------
+
+  it('opens the reply box inside the comment being answered', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+
+    // Nothing to type into yet: the thread's own composer is not a reply, and
+    // there is no second box waiting somewhere on the page.
+    expect(within(target).queryByLabelText('Reply to this comment')).not.toBeInTheDocument()
+    fireEvent.click(replyToggle(target))
+
+    // Inside that comment, not below the thread.
+    const row = (await within(target).findByText('We do this by hand every month.')).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(row).getByLabelText('Reply to this comment')).toBeInTheDocument()
+  })
+
+  it('posts a reply with the id of the comment it answers', async () => {
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'Reply posted.',
+      field: null,
+      comment: comment({ id: 'c2', parentId: 'c1', content: 'We automate it in batches.' }),
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box, form } = await replyBox(target)
+    postReply(box, form, 'We automate it in batches.')
+
+    // The parent is the one thing the client names about the request, so it is
+    // the thing worth asserting: sent as the id of the comment being answered.
+    expect(createMock).toHaveBeenCalledWith('1', 'We automate it in batches.', 'c1')
+  })
+
+  it('shows a posted reply under the comment it answers', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([comment({ id: 'c1', content: 'How is it done now?' })]),
+    )
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'Reply posted.',
+      field: null,
+      comment: comment({ id: 'c2', parentId: 'c1', content: 'By hand, in a spreadsheet.' }),
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('How is it done now?')
+    fireEvent.click(replyToggle(target))
+
+    const { box, form } = await replyBox(target)
+    postReply(box, form, 'By hand, in a spreadsheet.')
+
+    // The reply is inside the same list item as the comment it answers, one
+    // level in - rather than a second card sitting below the first as though it
+    // were a separate conversation. Scoped to `p` because the reply box's own
+    // textarea holds the same text until it is posted.
+    const reply = await within(target).findByText('By hand, in a spreadsheet.', { selector: 'p' })
+    const threadItem = (await within(target).findByText('How is it done now?')).closest('li')
+    expect(threadItem).toContainElement(reply)
+    expect(reply.closest('li')).not.toBe(threadItem)
+  })
+
+  it('closes the reply box once the reply is accepted', async () => {
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'Reply posted.',
+      field: null,
+      comment: comment({ id: 'c2', parentId: 'c1', content: 'An answer.' }),
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+    const { box, form } = await replyBox(target)
+    postReply(box, form, 'An answer.')
+
+    // Nothing is left to do with a box whose reply is posted, and the thread's
+    // own composer is untouched - it was never where the reply was written.
+    await waitFor(() =>
+      expect(within(target).queryByLabelText('Reply to this comment')).not.toBeInTheDocument(),
+    )
+    expect(composer(target)).toHaveValue('')
+  })
+
+  it('keeps the box open, with the words in it, when the reply is refused', async () => {
+    createMock.mockResolvedValue({
+      success: false,
+      message: 'You can only reply to a top-level comment.',
+      field: 'parentId',
+      comment: null,
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+    const { box, form } = await replyBox(target)
+    postReply(box, form, 'An answer.')
+
+    // A refusal is not a reason to throw away what somebody wrote.
+    expect(await within(target).findByRole('alert')).toHaveTextContent(
+      'You can only reply to a top-level comment.',
+    )
+    expect(within(target).getByLabelText('Reply to this comment')).toHaveValue('An answer.')
+  })
+
+  it('toggles the reply box closed when Reply is pressed again', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+
+    fireEvent.click(replyToggle(target))
+    await within(target).findByLabelText('Reply to this comment')
+    fireEvent.click(replyToggle(target))
+
+    expect(within(target).queryByLabelText('Reply to this comment')).not.toBeInTheDocument()
+  })
+
+  it('posts the reply on Enter, the same as pressing Reply', async () => {
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'Reply posted.',
+      field: null,
+      comment: comment({ id: 'c2', parentId: 'c1', content: 'Yes, it is me.' }),
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box, form } = await replyBox(target)
+    fireEvent.change(box, { target: { value: 'Yes, it is me.' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+
+    // The same request the button makes, not a second path to the same place.
+    expect(createMock).toHaveBeenCalledWith('1', 'Yes, it is me.', 'c1')
+    expect(within(form).getByRole('button', { name: 'Reply' })).toHaveAttribute('type', 'submit')
+  })
+
+  it('keeps the line break for Shift+Enter, which is the way back to a newline', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box } = await replyBox(target)
+    fireEvent.change(box, { target: { value: 'Yes, it is me.' } })
+    const notCancelled = fireEvent.keyDown(box, { key: 'Enter', shiftKey: true })
+
+    // No post, and the key was left to the textarea - so the break lands where
+    // the reader pressed it instead of the key looking broken.
+    expect(createMock).not.toHaveBeenCalled()
+    expect(notCancelled).toBe(true)
+  })
+
+  it('does not post on the Enter that is choosing a character', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box } = await replyBox(target)
+    fireEvent.change(box, { target: { value: 'はい' } })
+    // `isComposing` is what an IME sets while a reader is still picking the
+    // character: the Enter confirms the kana and posts a half-typed word
+    // otherwise.
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true })
+
+    expect(createMock).not.toHaveBeenCalled()
+  })
+
+  it('does not post on Enter while the box has nothing to send', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box } = await replyBox(target)
+    fireEvent.change(box, { target: { value: '   ' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+
+    // Nothing to post, so the key is a newline rather than a no-op: the reader
+    // gets what they asked for instead of a keypress that did nothing at all.
+    expect(createMock).not.toHaveBeenCalled()
+  })
+
+  it('posts once on Enter even when it is pressed twice', async () => {
+    let release: (() => void) | undefined
+    createMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              success: true,
+              message: 'Reply posted.',
+              field: null,
+              comment: comment({ id: 'c2', parentId: 'c1', content: 'Yes, it is me.' }),
+            })
+        }),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+    fireEvent.click(replyToggle(target))
+
+    const { box } = await replyBox(target)
+    fireEvent.change(box, { target: { value: 'Yes, it is me.' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    // The impatient second press, before the first has been answered. The box
+    // still holds the words for that moment, so the same guard has to hold.
+    fireEvent.keyDown(box, { key: 'Enter' })
+
+    expect(createMock).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      release?.()
+    })
+    expect(await within(target).findByText('Yes, it is me.', { selector: 'p' })).toBeInTheDocument()
+  })
+
+  // --- a long thread --------------------------------------------------------
+
+  it('shows one comment and leaves the rest behind "See more"', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'First comment.' }),
+        comment({ id: 'c2', content: 'Second comment.' }),
+        comment({ id: 'c3', content: 'Third comment.' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+
+    await within(target).findByText('First comment.')
+    expect(within(target).queryByText('Second comment.')).not.toBeInTheDocument()
+    // The count is spelled out rather than reduced to an ellipsis, so a reader
+    // can decide whether it is worth opening.
+    expect(within(target).getByRole('button', { name: 'See 2 more comments' })).toBeInTheDocument()
+  })
+
+  it('reveals the rest of the thread when "See more" is pressed, and hides them again', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'First comment.' }),
+        comment({ id: 'c2', content: 'Second comment.' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('First comment.')
+
+    seeMore(target)
+    expect(await within(target).findByText('Second comment.')).toBeInTheDocument()
+
+    fireEvent.click(within(target).getByRole('button', { name: 'See fewer' }))
+    expect(within(target).queryByText('Second comment.')).not.toBeInTheDocument()
+  })
+
+  it('draws no "See more" for a thread of one', async () => {
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('We do this by hand every month.')
+
+    // A disclosure with nothing behind it is a control that only says no.
+    expect(within(target).queryByRole('button', { name: /^See \d+ more/ })).not.toBeInTheDocument()
+  })
+
+  it('collapses the replies under a comment, and opens them on request', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'How is it done now?' }),
+        comment({ id: 'c2', parentId: 'c1', content: 'First answer.' }),
+        comment({ id: 'c3', parentId: 'c1', content: 'Second answer.' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('How is it done now?')
+
+    // The reply run collapses on its own terms - the comment it hangs off is
+    // the only thing on screen, and a thread of answers is not what the reader
+    // came for.
+    expect(within(target).queryByText('Second answer.')).not.toBeInTheDocument()
+    fireEvent.click(within(target).getByRole('button', { name: 'See 1 more reply' }))
+    expect(await within(target).findByText('Second answer.')).toBeInTheDocument()
+  })
+
+  it('does not collapse a run while the reader is editing a comment inside it', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', authorId: SOMEBODY_ELSE, content: 'How is it done now?' }),
+        comment({ id: 'c2', parentId: 'c1', authorId: SIGNED_IN.id, content: 'First answer.' }),
+        comment({ id: 'c3', parentId: 'c1', content: 'Second answer.' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('How is it done now?')
+    const reply = (await within(target).findByText('First answer.')).closest('li') as HTMLElement
+
+    openCommentMenu(reply)
+    fireEvent.click(within(reply).getByRole('menuitem', { name: 'Edit' }))
+
+    // Somebody is working in this run. Collapsing it would take the rest of the
+    // thread - the context the edit is made in - out from under them.
+    expect(await within(target).findByText('Second answer.')).toBeInTheDocument()
+  })
+
+  it('never collapses the comment the reader has just posted', async () => {
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'First comment.' }),
+        comment({ id: 'c2', content: 'Second comment.' }),
+      ]),
+    )
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'Comment posted.',
+      field: null,
+      comment: comment({ id: 'c3', content: 'Third comment.' }),
+    })
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('First comment.')
+
+    fireEvent.change(composer(target), { target: { value: 'Third comment.' } })
+    fireEvent.click(within(target).getByRole('button', { name: 'Comment' }))
+
+    // A comment nobody can find after posting it is the one comment that must
+    // not be hidden - so posting opens the run rather than burying the words.
+    expect(await within(target).findByText('Third comment.')).toBeInTheDocument()
+  })
+
+  it('moves the open box to another comment rather than stacking two', async () => {
+    /*
+      One box, always. Two open reply boxes is two half-written answers and two
+      places for a reader's attention to be, on a card that is already holding a
+      conversation.
+    */
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'How is it done now?' }),
+        comment({ id: 'c2', content: 'And who signs it off?' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    await within(target).findByText('How is it done now?')
+
+    fireEvent.click(replyToggle(target))
+    await within(target).findByLabelText('Reply to this comment')
+    const second = within(target)
+      .getAllByRole('button', { name: 'Reply' })
+      .filter((button) => button.getAttribute('type') === 'button')[1] as HTMLElement
+    fireEvent.click(second)
+
+    await waitFor(() =>
+      expect(within(target).getAllByLabelText('Reply to this comment')).toHaveLength(1),
+    )
+    const row = (await within(target).findByText('And who signs it off?')).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(row).getByLabelText('Reply to this comment')).toBeInTheDocument()
+  })
+
+  it('offers Reply on a comment but never on a reply', async () => {
+    /*
+      The server refuses a reply to a reply, so a button there would be offering
+      something guaranteed to fail. A reader who wants to answer a reply answers
+      the comment it belongs to.
+    */
+    commentsMock.mockResolvedValue(
+      commentPage([
+        comment({ id: 'c1', content: 'How is it done now?' }),
+        comment({ id: 'c2', parentId: 'c1', content: 'By hand.' }),
+      ]),
+    )
+    renderWithRouter(<IdeasWorkspace />)
+    const target = await openDiscussion()
+    const reply = await within(target).findByText('By hand.')
+
+    expect(
+      within(reply.closest('li') as HTMLElement).queryByRole('button', { name: 'Reply' }),
+    ).toBe(null)
+    const row = (await within(target).findByText('How is it done now?')).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(row).getAllByRole('button', { name: 'Reply' })[0]).toBeInTheDocument()
   })
 })

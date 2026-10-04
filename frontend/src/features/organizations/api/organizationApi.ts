@@ -134,11 +134,33 @@ const CREATE_ORGANIZATION_MUTATION = `
   }
 `
 
+const ORGANIZATION_MEMBERS_QUERY = `
+  query OrganizationMembers($organizationId: ID!) {
+    organizationMembers(organizationId: $organizationId) { ${MEMBERSHIP_FIELDS} }
+  }
+`
+
 export async function organizationsRequest(): Promise<OrganizationMembership[]> {
   const data = await graphqlClient.request<{ meOrganizations: OrganizationMembership[] }>(
     ME_ORGANIZATIONS_QUERY,
   )
   return data.meOrganizations
+}
+
+/**
+ * One organization's active members, oldest join first.
+ *
+ * Empty - not an error - for an organization the caller cannot see, which is the
+ * same answer as for one that does not exist, so an organization id cannot be
+ * used to discover other tenants. The server decides what "can see" means; this
+ * does not ask for anybody in particular.
+ */
+export async function organizationMembersRequest(organizationId: string): Promise<Membership[]> {
+  const data = await graphqlClient.request<{ organizationMembers: Membership[] }>(
+    ORGANIZATION_MEMBERS_QUERY,
+    { organizationId },
+  )
+  return data.organizationMembers
 }
 
 export async function createOrganizationRequest(

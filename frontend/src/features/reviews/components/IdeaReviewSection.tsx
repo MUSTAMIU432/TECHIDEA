@@ -1,14 +1,17 @@
 import { Link } from 'react-router-dom'
 
 import type { Idea } from '../../ideas/api/ideasApi'
+import { reviewHistoryVisible } from '../../ideas/utils/reviewVisibility'
 import { ReviewHistory } from './ReviewHistory'
 
 /**
- * The review part of an idea card (S3-003), collapsed like the discussion and
- * the evidence next to it.
+ * The review part of an idea card (S3-003), behind the review cell of
+ * `IdeaCardActions`.
  *
  * Drawn only for the two viewers the server would show anything to, so a card
- * does not offer an empty panel to every reader:
+ * does not offer an empty panel to every reader - the same condition the cell
+ * itself is drawn from, read from one helper so the cell and the panel cannot
+ * disagree:
  *
  * - the **author**, once the idea has been put forward, who reads the feedback
  *   on completed rounds;
@@ -17,41 +20,34 @@ import { ReviewHistory } from './ReviewHistory'
  *
  * Neither is a control. `ideaReviews` decides again what this viewer may read,
  * and the queue is authorized on every request.
+ *
+ * **The links to the review workspace are shown whether or not the history is
+ * open**, because they are not part of the history: they are the nudge that
+ * tells a reviewer there is a round of theirs to do, and hiding it behind a
+ * disclosure the nudge itself explains would be a puzzle.
  */
 export function IdeaReviewSection({
   idea,
   viewerId,
   open,
-  onToggle,
 }: {
   idea: Idea
   viewerId: string | null
   open: boolean
-  onToggle: () => void
 }) {
-  const isAuthor = viewerId !== null && viewerId === idea.authorId
-  const putForward = idea.status !== 'DRAFT'
-  const isReviewer = idea.viewerCanStartReview || idea.viewerActiveReviewId !== null
-
-  if (!(isAuthor && putForward) && !isReviewer) return null
+  if (!reviewHistoryVisible(idea, viewerId)) return null
 
   return (
-    <div className="mt-3 border-t border-gray-100 pt-3">
+    <div className="mt-3">
       <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={onToggle}
-          className="inline-flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-xs font-semibold text-brand-700 hover:text-brand-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
-        >
-          {open ? 'Hide review history' : 'Review history'}
-        </button>
         {idea.viewerCanStartReview && (
           <Link
             to={`/app/reviews?idea=${encodeURIComponent(idea.id)}`}
             className="text-xs font-semibold text-brand-700 hover:text-brand-800 hover:underline"
           >
-            Waiting for review — open it in the review workspace
+            {idea.status === 'UNDER_REVIEW'
+              ? 'Review stalled — take it over in the review workspace'
+              : 'Waiting for review — open it in the review workspace'}
           </Link>
         )}
         {idea.viewerActiveReviewId !== null && (

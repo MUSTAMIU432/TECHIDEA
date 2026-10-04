@@ -1,6 +1,8 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { makeIdea } from '../../../test/idea'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { renderWithRouter } from '../../../test/renderWithRouter'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
@@ -32,29 +34,6 @@ const removeMock = vi.mocked(removeVoteRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'DRAFT',
-    visibility: 'ORGANIZATION',
-    submittedAt: null,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '9',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
-
 function state(voteCount: number, viewerHasVoted: boolean) {
   return {
     success: true,
@@ -64,7 +43,7 @@ function state(voteCount: number, viewerHasVoted: boolean) {
   }
 }
 
-function mockContext(ideas: Idea[] = [idea()]) {
+function mockContext(ideas: Idea[] = [makeIdea()]) {
   vi.mocked(useAuth).mockReturnValue({
     user: SIGNED_IN,
   } as unknown as ReturnType<typeof useAuth>)
@@ -130,8 +109,8 @@ describe('Idea voting (S2-006)', () => {
   // --- rendering the state the server sent ----------------------------------
 
   it('renders the count the list arrived with, without asking again', async () => {
-    mockContext([idea({ voteCount: 7, viewerHasVoted: false })])
-    render(<IdeasWorkspace />)
+    mockContext([makeIdea({ voteCount: 7, viewerHasVoted: false })])
+    renderWithRouter(<IdeasWorkspace />)
 
     const toggle = await voteToggle()
     expect(toggle).toHaveTextContent('7')
@@ -142,7 +121,7 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('renders an unvoted idea as unvoted and at zero', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const toggle = await voteToggle()
     expect(toggle).toHaveTextContent('0')
@@ -150,8 +129,8 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('renders a voted idea as voted', async () => {
-    mockContext([idea({ voteCount: 3, viewerHasVoted: true })])
-    render(<IdeasWorkspace />)
+    mockContext([makeIdea({ voteCount: 3, viewerHasVoted: true })])
+    renderWithRouter(<IdeasWorkspace />)
 
     const toggle = await voteToggle()
     expect(toggle).toHaveTextContent('3')
@@ -160,10 +139,10 @@ describe('Idea voting (S2-006)', () => {
 
   it('gives every idea on the page its own control', async () => {
     mockContext([
-      idea({ id: '1', title: 'First idea', voteCount: 2, viewerHasVoted: true }),
-      idea({ id: '2', title: 'Second idea', voteCount: 5, viewerHasVoted: false }),
+      makeIdea({ id: '1', title: 'First idea', voteCount: 2, viewerHasVoted: true }),
+      makeIdea({ id: '2', title: 'Second idea', voteCount: 5, viewerHasVoted: false }),
     ])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const first = within((await screen.findByText('First idea')).closest('li') as HTMLElement)
     const second = within((await screen.findByText('Second idea')).closest('li') as HTMLElement)
@@ -175,7 +154,7 @@ describe('Idea voting (S2-006)', () => {
   // --- voting ---------------------------------------------------------------
 
   it('votes and shows the count the server reported', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
 
     fireEvent.click(await voteToggle())
@@ -187,7 +166,7 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('marks the idea as voted after a successful vote', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
 
     fireEvent.click(await voteToggle())
@@ -199,7 +178,7 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('sends only the idea id, never a voter', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
 
     fireEvent.click(await voteToggle())
@@ -214,7 +193,7 @@ describe('Idea voting (S2-006)', () => {
     // Somebody else voted between the list arriving and this click, so the
     // count is not `previous + 1`. Local arithmetic would render 1.
     voteMock.mockResolvedValue(state(9, true))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
 
     fireEvent.click(await voteToggle())
@@ -225,8 +204,8 @@ describe('Idea voting (S2-006)', () => {
   // --- withdrawing ----------------------------------------------------------
 
   it('removes a vote and shows the new count', async () => {
-    mockContext([idea({ voteCount: 3, viewerHasVoted: true })])
-    render(<IdeasWorkspace />)
+    mockContext([makeIdea({ voteCount: 3, viewerHasVoted: true })])
+    renderWithRouter(<IdeasWorkspace />)
 
     fireEvent.click(await voteToggle())
 
@@ -237,7 +216,7 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('the same toggle votes and un-votes', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const toggle = await voteToggle()
 
     fireEvent.click(toggle)
@@ -260,7 +239,7 @@ describe('Idea voting (S2-006)', () => {
           release = () => resolve(state(1, true))
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const toggle = await voteToggle()
 
     fireEvent.click(toggle)
@@ -280,7 +259,7 @@ describe('Idea voting (S2-006)', () => {
           release = () => resolve(state(1, true))
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const toggle = await voteToggle()
 
     fireEvent.click(toggle)
@@ -303,7 +282,7 @@ describe('Idea voting (S2-006)', () => {
           release = () => resolve(state(1, true))
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const toggle = await voteToggle()
 
     fireEvent.click(toggle)
@@ -325,7 +304,7 @@ describe('Idea voting (S2-006)', () => {
       field: null,
       voteState: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     fireEvent.click(await voteToggle())
 
@@ -339,7 +318,7 @@ describe('Idea voting (S2-006)', () => {
 
   it('reports a transport failure as itself', async () => {
     voteMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     fireEvent.click(await voteToggle())
 
@@ -350,9 +329,9 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('reports a failed removal and leaves the vote in place', async () => {
-    mockContext([idea({ voteCount: 3, viewerHasVoted: true })])
+    mockContext([makeIdea({ voteCount: 3, viewerHasVoted: true })])
     removeMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     fireEvent.click(await voteToggle())
 
@@ -367,7 +346,7 @@ describe('Idea voting (S2-006)', () => {
 
   it('lets the reader dismiss an error and try again', async () => {
     voteMock.mockRejectedValueOnce(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     fireEvent.click(await voteToggle())
     await screen.findByText('We could not reach the server. Please try again.')
 
@@ -382,7 +361,7 @@ describe('Idea voting (S2-006)', () => {
 
   it('recovers on a retry after a failure', async () => {
     voteMock.mockRejectedValueOnce(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     fireEvent.click(await voteToggle())
     await screen.findByText('We could not reach the server. Please try again.')
 
@@ -394,7 +373,10 @@ describe('Idea voting (S2-006)', () => {
   // --- one idea's response cannot touch another's --------------------------
 
   it("a late vote response updates only its own idea's control", async () => {
-    mockContext([idea({ id: '1', title: 'First idea' }), idea({ id: '2', title: 'Second idea' })])
+    mockContext([
+      makeIdea({ id: '1', title: 'First idea' }),
+      makeIdea({ id: '2', title: 'Second idea' }),
+    ])
     const releases = new Map<string, () => void>()
     voteMock.mockImplementation(
       (id: string) =>
@@ -409,7 +391,7 @@ describe('Idea voting (S2-006)', () => {
           )
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const firstToggle = within((await screen.findByText('First idea')).closest('li') as HTMLElement)
     const secondToggle = within(
@@ -440,10 +422,10 @@ describe('Idea voting (S2-006)', () => {
 
   it('an idea keeps its own state when another is voted on', async () => {
     mockContext([
-      idea({ id: '1', title: 'First idea', voteCount: 1, viewerHasVoted: true }),
-      idea({ id: '2', title: 'Second idea', voteCount: 0, viewerHasVoted: false }),
+      makeIdea({ id: '1', title: 'First idea', voteCount: 1, viewerHasVoted: true }),
+      makeIdea({ id: '2', title: 'Second idea', voteCount: 0, viewerHasVoted: false }),
     ])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const secondToggle = within(
       (await screen.findByText('Second idea')).closest('li') as HTMLElement,
     ).getByRole('button', { name: /vote for this idea/i })
@@ -460,7 +442,7 @@ describe('Idea voting (S2-006)', () => {
   // --- the discovery context survives ---------------------------------------
 
   it('does not re-fetch the list when a vote is cast', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
 
     fireEvent.click(await voteToggle())
@@ -472,7 +454,7 @@ describe('Idea voting (S2-006)', () => {
   })
 
   it('preserves the filters and the page through a vote', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await voteToggle()
     const category = screen.getByLabelText('Category')
 
@@ -492,11 +474,11 @@ describe('Idea voting (S2-006)', () => {
 
   it('shows vote controls on a page of ideas without a request per idea', async () => {
     mockContext([
-      idea({ id: '1', title: 'One', voteCount: 1 }),
-      idea({ id: '2', title: 'Two', voteCount: 2 }),
-      idea({ id: '3', title: 'Three', voteCount: 3 }),
+      makeIdea({ id: '1', title: 'One', voteCount: 1 }),
+      makeIdea({ id: '2', title: 'Two', voteCount: 2 }),
+      makeIdea({ id: '3', title: 'Three', voteCount: 3 }),
     ])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('One')
 
     expect(listMock).toHaveBeenCalledTimes(1)
@@ -506,7 +488,7 @@ describe('Idea voting (S2-006)', () => {
   // --- nothing adjacent ----------------------------------------------------
 
   it('offers no attachment, review or proposal control', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const toggle = await voteToggle()
     const card = (await screen.findByText('Automate the invoice run')).closest('li') as HTMLElement
 

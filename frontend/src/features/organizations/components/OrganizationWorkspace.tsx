@@ -1,27 +1,28 @@
 import { CreateOrganizationForm } from './CreateOrganizationForm'
 import { OrganizationList } from './OrganizationList'
 
+/** List and form columns, shared by the heading row so its intro text sits above the form. */
+const COLUMNS = 'grid gap-x-6 lg:grid-cols-2'
+
 export function OrganizationWorkspace() {
   return (
-    <section aria-labelledby="organizations-heading" className="mt-8">
-      <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
+    <section aria-labelledby="organizations-heading" className="mt-10">
+      <div className={`${COLUMNS} gap-y-2 lg:items-end`}>
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-700">
-            Workspace
-          </p>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand-700">Workspace</p>
           <h2
             id="organizations-heading"
-            className="mt-1 text-2xl font-semibold tracking-tight text-gray-900"
+            className="mt-1 text-2xl font-bold tracking-tight text-gray-900"
           >
             Your organizations
           </h2>
         </div>
-        <p className="max-w-md text-sm leading-6 text-gray-600">
+        <p className="text-sm leading-6 text-gray-600">
           Choose an organization for shared work, or create a new one when you are ready.
         </p>
       </div>
 
-      <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
+      <div className={`${COLUMNS} mt-5 items-start gap-y-5`}>
         <OrganizationList />
         <CreateOrganizationForm />
       </div>

@@ -1,11 +1,14 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { renderWithRouter } from '../../../test/renderWithRouter'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
 import { page } from '../../../test/ideaPage'
 import type { Idea, IdeaMutationResult } from '../api/ideasApi'
+import { makeIdea } from '../../../test/idea'
 
 vi.mock('../api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -19,38 +22,33 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
 
-const { createIdeaRequest, organizationIdeasRequest, transitionIdeaRequest } =
-  await import('../api/ideasApi')
-const createMock = vi.mocked(createIdeaRequest)
+const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
 const listMock = vi.mocked(organizationIdeasRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 
-const DRAFT: Idea = {
-  id: '1',
-  title: 'Automate the invoice run',
-  description: 'A description long enough.',
-  status: 'DRAFT',
-  visibility: 'PRIVATE',
-  submittedAt: null,
-  createdAt: '2026-01-01T00:00:00.000Z',
-  updatedAt: '2026-01-01T00:00:00.000Z',
-  authorId: '7',
-  organizationId: '3',
-  category: null,
-  // What the *server* says this viewer may do with it. S2-003 moved the offer
-  // from a hard-coded rule in this file to the backend's transition matrix, so
-  // these fixtures now state it explicitly - which is the stronger assertion:
-  // a button appears here because the server listed the move, not because the
-  // component decided to draw one.
-  availableTransitions: ['SUBMITTED'],
-  discussionOpen: true,
-  voteCount: 0,
-  viewerHasVoted: false,
-  viewerCanStartReview: false,
-  viewerActiveReviewId: null,
-}
+/**
+ * The button that puts an organization draft forward. Its wording is the one
+ * `TRANSITION_LABELS` gives that move, and it is spelled here rather than
+ * imported because this file is asserting the *card* offers it: if the label
+ * changed, these tests should fail rather than follow.
+ */
+const SUBMIT_LABEL = 'Send to my organization'
+
+/**
+ * An organization-context draft, offered one move.
+ *
+ * `availableTransitions` is what the *server* says this viewer may do with it,
+ * so these fixtures state it explicitly - which is the stronger assertion: a
+ * button appears here because the server listed the move, not because the
+ * component decided to draw one. An organization idea's first submission goes
+ * to its own organization, which is why the move is `SUBMITTED_TO_ORGANIZATION`
+ * and the button reads "Send to my organization".
+ */
+const DRAFT: Idea = makeIdea({
+  availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+})
 
 const SOMEONE_ELSES: typeof DRAFT = {
   ...DRAFT,
@@ -88,7 +86,7 @@ describe('IdeasWorkspace', () => {
   // --- the list -----------------------------------------------------------
 
   it('reads the active organization feed, not a list the client filtered', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     // The tenant and visibility rules are the server's. This component asks
     // for one organization's ideas by id and renders whatever it is given.
@@ -111,14 +109,14 @@ describe('IdeasWorkspace', () => {
   })
 
   it('shows a loading state before the ideas arrive', () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(screen.getByText('Loading ideas…')).toBeInTheDocument()
   })
 
   it('renders the ideas it is given', async () => {
     mockContext([DRAFT, SOMEONE_ELSES])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText('Automate the invoice run')).toBeInTheDocument()
     expect(screen.getByText('Their idea')).toBeInTheDocument()
@@ -126,14 +124,14 @@ describe('IdeasWorkspace', () => {
 
   it('shows an empty state when the organization has no ideas', async () => {
     mockContext([])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText('No ideas here yet')).toBeInTheDocument()
   })
 
   it('shows an empty state, not an error, when there is no organization', async () => {
     mockContext([], null)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText('No organization selected')).toBeInTheDocument()
   })
@@ -142,7 +140,7 @@ describe('IdeasWorkspace', () => {
     // An empty list would read as "this organization has no ideas", which is a
     // different claim from "we could not ask".
     listMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('We could not reach the server. Please try again.')
@@ -158,7 +156,7 @@ describe('IdeasWorkspace', () => {
         availableTransitions: [],
       },
     ])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     // Each state appears as its badge *and* in the details row, so the count
     // is asserted rather than assumed: one badge plus one row per idea.
@@ -175,7 +173,7 @@ describe('IdeasWorkspace', () => {
 
   it('shows who each idea is shared with', async () => {
     mockContext([{ ...DRAFT, visibility: 'ORGANIZATION' }])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     expect(await screen.findByText('This organization')).toBeInTheDocument()
   })
@@ -184,22 +182,22 @@ describe('IdeasWorkspace', () => {
 
   it('offers edit and submit only on the signed-in user own draft', async () => {
     mockContext([DRAFT, SOMEONE_ELSES])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
     // One of each: the other idea belongs to somebody else, and offering to
     // edit it would be offering something the server would refuse.
     expect(screen.getAllByRole('button', { name: 'Edit draft' })).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Submit for review' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: SUBMIT_LABEL })).toHaveLength(1)
   })
 
   it('offers no edit or submit on somebody elses idea', async () => {
     mockContext([SOMEONE_ELSES])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Their idea')
     expect(screen.queryByRole('button', { name: 'Edit draft' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Submit for review' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: SUBMIT_LABEL })).not.toBeInTheDocument()
   })
 
   it('offers no edit or submit once an idea is submitted', async () => {
@@ -214,80 +212,113 @@ describe('IdeasWorkspace', () => {
         availableTransitions: [],
       },
     ])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await screen.findByText('Automate the invoice run')
     expect(screen.queryByRole('button', { name: 'Edit draft' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Submit for review' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: SUBMIT_LABEL })).not.toBeInTheDocument()
   })
 
   // --- creating -----------------------------------------------------------
 
-  it('opens the form when asked to file a new idea', async () => {
-    render(<IdeasWorkspace />)
+  it('links to the create page rather than opening a form inline', async () => {
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    fireEvent.click(screen.getByRole('button', { name: 'File a new idea' }))
-
-    expect(await screen.findByRole('heading', { name: 'File a new idea' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /File a new idea/ })).toHaveAttribute(
+      'href',
+      '/app/ideas/new',
+    )
+    expect(screen.queryByRole('heading', { name: 'File a new idea' })).not.toBeInTheDocument()
   })
 
-  it('files a draft and reloads the list', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: DRAFT })
-    render(<IdeasWorkspace />)
-    await screen.findByText('Automate the invoice run')
-    fireEvent.click(screen.getByRole('button', { name: 'File a new idea' }))
+  it('offers no create link without an active organization', async () => {
+    mockContext([], null)
+    renderWithRouter(<IdeasWorkspace />)
 
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A new idea' } })
-    fireEvent.change(screen.getByLabelText('Description'), {
-      target: { value: 'A description long enough.' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: /File a new idea/ })).not.toBeInTheDocument(),
+    )
+  })
 
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith('3', expect.anything()))
-    expect(await screen.findByText(/Draft saved/)).toBeInTheDocument()
-    // The list is re-read, because a new idea is not in the previous answer.
-    await waitFor(() => expect(listMock.mock.calls.length).toBeGreaterThan(1))
+  it('marks the idea the create page just filed', async () => {
+    const notice = 'Your idea "Automate the invoice run" was created and submitted for review.'
+    render(
+      <MemoryRouter
+        initialEntries={[
+          { pathname: '/app/ideas', state: { notice, tone: 'success', ideaId: '1' } },
+        ]}
+      >
+        <IdeasWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText(notice)).toBeInTheDocument()
+    const card = screen.getByText('Automate the invoice run').closest('li')
+    expect(card).toHaveAttribute('aria-current', 'true')
+    expect(within(card as HTMLElement).getByText('Just filed')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByText(notice)).not.toBeInTheDocument()
+  })
+
+  it('shows a draft that could not be submitted as a warning', async () => {
+    const notice =
+      'Your idea "Automate the invoice run" was saved as a draft, but it was not submitted: offline'
+    render(
+      <MemoryRouter
+        initialEntries={[
+          { pathname: '/app/ideas', state: { notice, tone: 'warning', ideaId: '1' } },
+        ]}
+      >
+        <IdeasWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText(notice)).toBeInTheDocument()
+    expect(screen.getByText(notice).closest('output')).toHaveClass('bg-amber-50')
+  })
+
+  it('shows the confirmation carried by the redirect from the create page', async () => {
+    const notice = 'Draft saved. Only you can see it.'
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/app/ideas', state: { notice } }]}>
+        <IdeasWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText(notice)).toBeInTheDocument()
   })
 
   // --- editing ------------------------------------------------------------
 
-  it('opens the edit form with the draft in it', async () => {
-    render(<IdeasWorkspace />)
+  it('opens the draft in the guided form on its own page', async () => {
+    const router = createMemoryRouter(
+      [
+        { path: '/app/ideas', element: <IdeasWorkspace /> },
+        { path: '/app/ideas/:ideaId/edit', element: <p>Edit page</p> },
+      ],
+      { initialEntries: ['/app/ideas'] },
+    )
+    render(<RouterProvider router={router} />)
     await screen.findByText('Automate the invoice run')
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }))
 
-    expect(await screen.findByRole('heading', { name: 'Edit this draft' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Title')).toHaveValue('Automate the invoice run')
+    expect(await screen.findByText('Edit page')).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/app/ideas/1/edit')
   })
 
-  it('saves an edit and closes the form', async () => {
-    const { updateIdeaRequest } = await import('../api/ideasApi')
-    vi.mocked(updateIdeaRequest).mockResolvedValue({
-      success: true,
-      message: 'ok',
-      field: null,
-      idea: { ...DRAFT, title: 'A sharper title' },
-    })
-    render(<IdeasWorkspace />)
+  it('has no editor of its own beside the list', async () => {
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
+
     fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }))
 
-    fireEvent.change(await screen.findByLabelText('Title'), {
-      target: { value: 'A sharper title' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
-
-    await waitFor(() =>
-      expect(vi.mocked(updateIdeaRequest)).toHaveBeenCalledWith(
-        '1',
-        expect.objectContaining({ title: 'A sharper title' }),
-      ),
-    )
-    await waitFor(() =>
-      expect(screen.queryByRole('heading', { name: 'Edit this draft' })).not.toBeInTheDocument(),
-    )
+    expect(screen.queryByRole('heading', { name: 'Edit this draft' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('textbox', { name: 'What problem would you like to solve?' }),
+    ).toBeNull()
   })
 
   // --- submitting ---------------------------------------------------------
@@ -299,15 +330,15 @@ describe('IdeasWorkspace', () => {
       field: null,
       idea: { ...DRAFT, status: 'SUBMITTED', submittedAt: '2026-02-01T00:00:00.000Z' },
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
+    fireEvent.click(screen.getByRole('button', { name: SUBMIT_LABEL }))
 
     // The backend's wording, not a local string: it is the layer that knows
     // what the transition actually did.
     expect(await screen.findByText('Idea moved to Submitted.')).toBeInTheDocument()
-    expect(transitionMock).toHaveBeenCalledWith('1', 'SUBMITTED')
+    expect(transitionMock).toHaveBeenCalledWith('1', 'SUBMITTED_TO_ORGANIZATION')
   })
 
   it('shows a business refusal from a submission as the backend worded it', async () => {
@@ -317,10 +348,10 @@ describe('IdeasWorkspace', () => {
       field: null,
       idea: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
+    fireEvent.click(screen.getByRole('button', { name: SUBMIT_LABEL }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('Choose a category before submitting this idea.')
@@ -328,10 +359,10 @@ describe('IdeasWorkspace', () => {
 
   it('reports a submission transport failure without claiming it went through', async () => {
     transitionMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
+    fireEvent.click(screen.getByRole('button', { name: SUBMIT_LABEL }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('We could not reach the server. Please try again.')
@@ -346,17 +377,15 @@ describe('IdeasWorkspace', () => {
       }),
     )
     mockContext([DRAFT, SOMEONE_ELSES])
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
+    fireEvent.click(screen.getByRole('button', { name: SUBMIT_LABEL }))
 
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Submit for review' })).toBeDisabled(),
-    )
+    await waitFor(() => expect(screen.getByRole('button', { name: SUBMIT_LABEL })).toBeDisabled())
     release({ success: true, message: 'ok', field: null, idea: DRAFT })
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Submit for review' })).not.toBeDisabled(),
+      expect(screen.getByRole('button', { name: SUBMIT_LABEL })).not.toBeDisabled(),
     )
   })
 })

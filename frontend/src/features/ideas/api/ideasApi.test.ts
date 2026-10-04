@@ -43,6 +43,14 @@ describe('ideasApi', () => {
     vi.unstubAllGlobals()
   })
 
+  /**
+   * The organization-context target, spelled once: an idea filed for an
+   * organization names the organization and the context, and the tests below
+   * are all about the payload rather than about the three ways to file one.
+   * The other two contexts have their own tests further down.
+   */
+  const ORGANIZATION_TARGET = { context: 'ORGANIZATION', organizationId: '3' } as const
+
   const IDEA = {
     id: '1',
     title: 'Automate the invoice run',
@@ -72,6 +80,7 @@ describe('ideasApi', () => {
     ideaId: '1',
     authorId: '7',
     content: 'We do this by hand every month.',
+    parentId: null,
     createdAt: '2026-02-01T09:00:00.000Z',
     updatedAt: '2026-02-01T09:00:00.000Z',
   }
@@ -108,12 +117,16 @@ describe('ideasApi', () => {
       createIdea: { success: true, message: 'Idea saved as a draft.', field: null, idea: IDEA },
     })
 
-    await createIdeaRequest('3', { title: 'Automate the invoice run', description: 'Because.' })
+    await createIdeaRequest(ORGANIZATION_TARGET, {
+      title: 'Automate the invoice run',
+      description: 'Because.',
+    })
 
     const [request] = sentRequests(fetchMock)
     expect(request.operationName).toBe('CreateIdea')
     expect(request.variables).toEqual({
       input: {
+        submissionContext: 'ORGANIZATION',
         organizationId: '3',
         idea: {
           title: 'Automate the invoice run',
@@ -125,12 +138,97 @@ describe('ideasApi', () => {
     })
   })
 
+  it('sends the problem story with the content', async () => {
+    const fetchMock = stubFetch({
+      createIdea: { success: true, message: 'ok', field: null, idea: null },
+    })
+
+    await createIdeaRequest(ORGANIZATION_TARGET, {
+      title: 'T',
+      description: 'D',
+      currentProcess: 'Paper, then Excel.',
+      currentTools: ['PAPER_FORMS', 'EXCEL'],
+      frequency: 'WEEKLY',
+      peopleInvolved: 0,
+      impacts: [],
+      expectedBenefit: 'Fewer mistakes.',
+    })
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.variables).toEqual({
+      input: {
+        submissionContext: 'ORGANIZATION',
+        organizationId: '3',
+        idea: {
+          title: 'T',
+          description: 'D',
+          categoryId: null,
+          visibility: null,
+          currentProcess: 'Paper, then Excel.',
+          currentTools: ['PAPER_FORMS', 'EXCEL'],
+          frequency: 'WEEKLY',
+          // Zero and an empty list are answers, not absences.
+          peopleInvolved: 0,
+          impacts: [],
+          expectedBenefit: 'Fewer mistakes.',
+        },
+      },
+    })
+    expect(request.query).toContain('importantConsiderations')
+  })
+
+  it('sends the problem story on update too', async () => {
+    const fetchMock = stubFetch({
+      updateIdea: { success: true, message: 'ok', field: null, idea: null },
+    })
+
+    await updateIdeaRequest('9', {
+      title: 'T',
+      description: 'D',
+      frequency: null,
+      impacts: ['DELAYS'],
+    })
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.variables).toEqual({
+      input: {
+        id: '9',
+        idea: {
+          title: 'T',
+          description: 'D',
+          categoryId: null,
+          visibility: null,
+          frequency: null,
+          impacts: ['DELAYS'],
+        },
+      },
+    })
+  })
+
+  it('carries nothing but the input’s own fields into the request', async () => {
+    const fetchMock = stubFetch({
+      createIdea: { success: true, message: 'ok', field: null, idea: null },
+    })
+
+    // A whole idea handed in as the input, with its id, author and status.
+    await createIdeaRequest(
+      ORGANIZATION_TARGET,
+      IDEA as unknown as Parameters<typeof createIdeaRequest>[1],
+    )
+
+    const idea = (sentRequests(fetchMock)[0].variables as { input: { idea: object } }).input.idea
+    expect(Object.keys(idea)).not.toEqual(expect.arrayContaining(['id']))
+    expect(idea).not.toHaveProperty('authorId')
+    expect(idea).not.toHaveProperty('status')
+    expect(idea).not.toHaveProperty('organizationId')
+  })
+
   it('sends no author, because there is no argument to send one in', async () => {
     const fetchMock = stubFetch({
       createIdea: { success: true, message: 'ok', field: null, idea: IDEA },
     })
 
-    await createIdeaRequest('3', { title: 'T', description: 'D' })
+    await createIdeaRequest(ORGANIZATION_TARGET, { title: 'T', description: 'D' })
 
     const [request] = sentRequests(fetchMock)
     const serialized = JSON.stringify(request.variables)
@@ -146,7 +244,7 @@ describe('ideasApi', () => {
       createIdea: { success: true, message: 'ok', field: null, idea: IDEA },
     })
 
-    const result = await createIdeaRequest('3', { title: 'T', description: 'D' })
+    const result = await createIdeaRequest(ORGANIZATION_TARGET, { title: 'T', description: 'D' })
 
     expect(result.success).toBe(true)
     expect(result.idea?.id).toBe('1')
@@ -163,7 +261,7 @@ describe('ideasApi', () => {
       },
     })
 
-    const result = await createIdeaRequest('3', { title: '', description: 'D' })
+    const result = await createIdeaRequest(ORGANIZATION_TARGET, { title: '', description: 'D' })
 
     expect(result).toMatchObject({ success: false, field: 'title' })
   })
@@ -479,6 +577,45 @@ describe('ideasApi', () => {
     expect(result.success).toBe(true)
   })
 
+  it('sends no parent at all for a top-level comment', async () => {
+    /*
+      Omitted rather than sent as `null`, for the same reason the discovery
+      filters are: an explicit `null` is a different request from an absent
+      field, and this client has no business asserting a server default.
+    */
+    const fetchMock = stubFetch({
+      createComment: { success: true, message: 'Comment posted.', field: null, comment: COMMENT },
+    })
+
+    await createCommentRequest('1', 'A comment.')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.variables).toEqual({
+      input: { ideaId: '1', comment: { content: 'A comment.' } },
+    })
+  })
+
+  it('posts a reply with the comment it answers', async () => {
+    const fetchMock = stubFetch({
+      createComment: {
+        success: true,
+        message: 'Reply posted.',
+        field: null,
+        comment: { ...COMMENT, id: 'c2', parentId: 'c1' },
+      },
+    })
+
+    const result = await createCommentRequest('1', 'An answer.', 'c1')
+
+    const [request] = sentRequests(fetchMock)
+    expect(request.variables).toEqual({
+      input: { ideaId: '1', comment: { content: 'An answer.' }, parentId: 'c1' },
+    })
+    // The parent comes back on the comment, which is what lets a client group
+    // a page it already has rather than asking for the replies again.
+    expect(result.comment?.parentId).toBe('c1')
+  })
+
   it('edits a comment by id', async () => {
     const fetchMock = stubFetch({
       updateComment: {
@@ -744,6 +881,18 @@ describe('ideasApi', () => {
       return fetchMock
     }
 
+    /**
+     * A response that is *not* our JSON payload - which is the case that used to
+     * throw. `Response.json` cannot build one, so the body is written as text.
+     */
+    function stubRawHttp(status: number, body: string) {
+      const fetchMock = vi.fn(
+        async (_url: string, _init?: RequestInit) => new Response(body, { status }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      return fetchMock
+    }
+
     afterEach(() => {
       setAccessToken(null)
     })
@@ -814,6 +963,84 @@ describe('ideasApi', () => {
 
       expect(result.success).toBe(false)
       expect(result.field).toBe('file')
+    })
+
+    it('reports the server’s own message for a refusal', async () => {
+      stubHttp(400, {
+        success: false,
+        message: 'That file type is not supported.',
+        field: 'file',
+      })
+      const file = new File(['x'], 'script.exe', { type: 'application/octet-stream' })
+
+      // The reason the person uploading is shown, in the server's words. A
+      // generic message here is the whole complaint this function exists to fix.
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.message).toBe('That file type is not supported.')
+    })
+
+    /*
+      The bug this replaced: `await response.json()` on an answer that is not our
+      JSON rejected, and the rejection was reported as a transport failure - so a
+      server which was answering perfectly well was described to the reader as
+      unreachable. Anything can answer here, and none of it may throw.
+    */
+
+    it('reports an HTML error page as the status it is, not as a dead network', async () => {
+      stubRawHttp(500, '<html><body><h1>Server Error (500)</h1></body></html>')
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.success).toBe(false)
+      expect(result.message).toContain('500')
+      // The wording that sent people to look at the server instead of the
+      // request: it is a fact only a rejected fetch can support.
+      expect(result.message).not.toMatch(/could not reach/i)
+    })
+
+    it('reports a proxy error with its status rather than throwing', async () => {
+      stubRawHttp(502, '<html>502 Bad Gateway</html>')
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.success).toBe(false)
+      expect(result.message).toContain('502')
+      expect(result.attachment).toBeNull()
+    })
+
+    it('reports a 404 as a 404', async () => {
+      stubRawHttp(404, '<h1>Not Found</h1>')
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.success).toBe(false)
+      expect(result.message).toContain('404')
+    })
+
+    it('still throws when the request never reached the server', async () => {
+      const fetchMock = vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      // The one case the transport message is for, and the only thing that may
+      // still throw: there is no status, because nothing answered.
+      await expect(uploadAttachmentRequest('1', file)).rejects.toThrow('Failed to fetch')
+    })
+
+    it('treats a 200 without a payload as a failure rather than a success', async () => {
+      stubRawHttp(200, '')
+      const file = new File(['x'], 'evidence.pdf', { type: 'application/pdf' })
+
+      const result = await uploadAttachmentRequest('1', file)
+
+      expect(result.success).toBe(false)
+      expect(result.attachment).toBeNull()
     })
   })
 

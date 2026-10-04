@@ -4,17 +4,17 @@ import {
   completeReviewRequest,
   type CriterionRating,
   type ReviewCriterion,
-  type ReviewDecision,
   type ReviewMutationResult,
+  type ReviewVerdict,
 } from '../api/reviewsApi'
-import { CRITERION_LABELS, DECISION_LABELS, RATING_LABELS } from '../utils/reviewLabels'
+import { CRITERION_LABELS, RATING_LABELS, VERDICT_LABELS } from '../utils/reviewLabels'
 
 const CRITERIA = Object.keys(CRITERION_LABELS) as ReviewCriterion[]
 const RATINGS = Object.keys(RATING_LABELS) as CriterionRating[]
-const DECISIONS = Object.keys(DECISION_LABELS) as ReviewDecision[]
+const DECISIONS = Object.keys(VERDICT_LABELS) as ReviewVerdict[]
 
 /** The decisions that must explain themselves to the author - the server's rule too. */
-const FEEDBACK_REQUIRED: ReadonlySet<ReviewDecision> = new Set(['CHANGES_REQUESTED', 'REJECTED'])
+const FEEDBACK_REQUIRED: ReadonlySet<ReviewVerdict> = new Set(['CHANGES_REQUESTED', 'REJECTED'])
 
 type Ratings = Partial<Record<ReviewCriterion, CriterionRating>>
 type Notes = Partial<Record<ReviewCriterion, string>>
@@ -42,7 +42,7 @@ export function ReviewDecisionForm({
   const [ratings, setRatings] = useState<Ratings>({})
   const [notes, setNotes] = useState<Notes>({})
   const [feedback, setFeedback] = useState('')
-  const [decision, setDecision] = useState<ReviewDecision | null>(null)
+  const [decision, setDecision] = useState<ReviewVerdict | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -171,7 +171,7 @@ export function ReviewDecisionForm({
                 checked={decision === option}
                 onChange={() => setDecision(option)}
               />
-              {DECISION_LABELS[option]}
+              {VERDICT_LABELS[option]}
             </label>
           ))}
         </div>

@@ -1,14 +1,25 @@
-import type { CriterionRating, ReviewCriterion, ReviewDecision } from '../api/reviewsApi'
+import type {
+  CriterionRating,
+  ReviewCriterion,
+  ReviewDecision,
+  ReviewVerdict,
+} from '../api/reviewsApi'
 
 /**
  * Human labels for the review vocabulary. Presentation only: which values
  * exist, and which a viewer may see, is the server's answer.
  */
 
-export const DECISION_LABELS: Record<ReviewDecision, string> = {
+/** The decisions a reviewer chooses between, in the order the form offers them. */
+export const VERDICT_LABELS: Record<ReviewVerdict, string> = {
   CHANGES_REQUESTED: 'Changes requested',
   APPROVED: 'Approved',
   REJECTED: 'Rejected',
+}
+
+export const DECISION_LABELS: Record<ReviewDecision, string> = {
+  ...VERDICT_LABELS,
+  WITHDRAWN: 'Withdrawn',
 }
 
 export const CRITERION_LABELS: Record<ReviewCriterion, string> = {

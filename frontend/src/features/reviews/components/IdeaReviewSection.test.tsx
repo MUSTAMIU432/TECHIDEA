@@ -1,8 +1,10 @@
+import { makeIdea } from '../../../test/idea'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Idea } from '../../ideas/api/ideasApi'
+import { IdeaCardActions } from '../../ideas/components/IdeaCardActions'
 import { IdeaReviewSection } from './IdeaReviewSection'
 
 vi.mock('../api/reviewsApi', () => ({
@@ -12,37 +14,31 @@ vi.mock('../api/reviewsApi', () => ({
 const { ideaReviewsRequest } = await import('../api/reviewsApi')
 const historyMock = vi.mocked(ideaReviewsRequest)
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'CHANGES_REQUESTED',
-    visibility: 'ORGANIZATION',
-    submittedAt: '2026-01-02T00:00:00.000Z',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '7',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
-
+/**
+ * The card's footer and its review panel, which is what the Ideas list draws.
+ *
+ * Both halves are rendered because they answer one question between them: the
+ * bar decides whether a review cell is offered at all and the panel decides
+ * what is in it, so a test that asked only one of them could pass while the
+ * card offered a cell that led nowhere.
+ */
 function renderSection(subject: Idea, viewerId: string | null, open = false) {
-  const onToggle = vi.fn()
+  const onToggleSection = vi.fn()
   render(
     <MemoryRouter>
-      <IdeaReviewSection idea={subject} viewerId={viewerId} open={open} onToggle={onToggle} />
+      <IdeaCardActions
+        idea={subject}
+        viewerId={viewerId}
+        vote={{ voteCount: 0, viewerHasVoted: false, pending: false, error: null }}
+        onToggleVote={vi.fn()}
+        onDismissVoteError={vi.fn()}
+        open={{ discussion: false, evidence: false, review: open }}
+        onToggleSection={onToggleSection}
+      />
+      <IdeaReviewSection idea={subject} viewerId={viewerId} open={open} />
     </MemoryRouter>,
   )
-  return onToggle
+  return onToggleSection
 }
 
 /**
@@ -57,28 +53,28 @@ describe('IdeaReviewSection', () => {
   })
 
   it('offers the author the history of an idea they have put forward', () => {
-    const onToggle = renderSection(idea(), '7')
+    const onToggleSection = renderSection(makeIdea({ status: 'SUBMITTED' }), '7')
 
     fireEvent.click(screen.getByRole('button', { name: 'Review history' }))
 
-    expect(onToggle).toHaveBeenCalled()
+    expect(onToggleSection).toHaveBeenCalledWith('review')
     expect(historyMock).not.toHaveBeenCalled()
   })
 
   it('offers the author nothing on a draft', () => {
-    renderSection(idea({ status: 'DRAFT' }), '7')
+    renderSection(makeIdea({ status: 'DRAFT' }), '7')
 
     expect(screen.queryByRole('button', { name: 'Review history' })).not.toBeInTheDocument()
   })
 
   it('offers an ordinary reader nothing at all', () => {
-    renderSection(idea(), '99')
+    renderSection(makeIdea({ status: 'SUBMITTED' }), '99')
 
     expect(screen.queryByRole('button', { name: 'Review history' })).not.toBeInTheDocument()
   })
 
   it('points a reviewer who can start a review at it in the review workspace', () => {
-    renderSection(idea({ status: 'SUBMITTED', viewerCanStartReview: true }), '99')
+    renderSection(makeIdea({ status: 'SUBMITTED', viewerCanStartReview: true }), '99')
 
     expect(screen.getByRole('link', { name: /open it in the review workspace/ })).toHaveAttribute(
       'href',
@@ -86,8 +82,17 @@ describe('IdeaReviewSection', () => {
     )
   })
 
+  it('points a reviewer at a stalled review they may take over', () => {
+    renderSection(makeIdea({ status: 'UNDER_REVIEW', viewerCanStartReview: true }), '99')
+
+    expect(screen.getByRole('link', { name: /Review stalled — take it over/ })).toHaveAttribute(
+      'href',
+      '/app/reviews?idea=1',
+    )
+  })
+
   it('tells a reviewer with an active review that it is theirs', () => {
-    renderSection(idea({ status: 'UNDER_REVIEW', viewerActiveReviewId: '12' }), '99')
+    renderSection(makeIdea({ status: 'UNDER_REVIEW', viewerActiveReviewId: '12' }), '99')
 
     expect(screen.getByRole('link', { name: /continue review/ })).toHaveAttribute(
       'href',
@@ -100,6 +105,7 @@ describe('IdeaReviewSection', () => {
       {
         id: '9',
         ideaId: '1',
+        scope: 'PLATFORM',
         round: 1,
         reviewerId: '4',
         decision: 'CHANGES_REQUESTED',
@@ -111,14 +117,14 @@ describe('IdeaReviewSection', () => {
       },
     ])
 
-    renderSection(idea(), '7', true)
+    renderSection(makeIdea({ status: 'SUBMITTED' }), '7', true)
 
     expect(await screen.findByText('Add the monthly volume.')).toBeInTheDocument()
     expect(historyMock).toHaveBeenCalledWith('1')
   })
 
   it('shows an empty history as "no reviews", not as a refusal', async () => {
-    renderSection(idea(), '7', true)
+    renderSection(makeIdea({ status: 'SUBMITTED' }), '7', true)
 
     expect(await screen.findByText('No reviews yet.')).toBeInTheDocument()
   })
@@ -126,7 +132,7 @@ describe('IdeaReviewSection', () => {
   it('reports a failed history request as a failure', async () => {
     historyMock.mockRejectedValue(new Error('offline'))
 
-    renderSection(idea(), '7', true)
+    renderSection(makeIdea({ status: 'SUBMITTED' }), '7', true)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not load the review history')
   })

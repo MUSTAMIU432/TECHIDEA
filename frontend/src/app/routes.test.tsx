@@ -1,13 +1,33 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setAccessToken } from '../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../features/identity/auth/authApi'
 import { organizationIdeasRequest } from '../features/ideas/api/ideasApi'
 import { organizationsRequest } from '../features/organizations/api/organizationApi'
+import { adminOverviewRequest } from '../features/administration/api/administrationApi'
+import {
+  adminCapabilitiesRequest,
+  NO_ADMIN_CAPABILITIES,
+} from '../features/administration/api/capabilitiesApi'
 import { page } from '../test/ideaPage'
 import { renderRoutes } from '../test/renderWithRouter'
 import { router } from './routes'
+
+/**
+ * How long an assertion on a `lazy` route may wait.
+ *
+ * The administration console is loaded on demand (`routes.tsx`), so an
+ * assertion about what it renders is really an assertion about a dynamic
+ * `import()` landing *and* a capability query resolving. On a loaded CI runner
+ * that pair can take longer than Testing Library's 1s default, which produced a
+ * failure in roughly one full-suite run out of three and none in isolation -
+ * a timing dependency in the test, not a defect in the route.
+ *
+ * Five seconds is long enough to be reliable and short enough that a genuinely
+ * broken route still fails rather than hanging.
+ */
+const LAZY_ROUTE_TIMEOUT = 5000
 
 vi.mock('../features/organizations/api/organizationApi', () => ({
   organizationsRequest: vi.fn(),
@@ -23,6 +43,7 @@ vi.mock('../features/ideas/api/ideasApi', () => ({
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   submitIdeaRequest: vi.fn(),
+  ideaRequest: vi.fn(async () => null),
 }))
 
 // The Reviews feature's API (S3-003), mocked for the same reason: both
@@ -31,6 +52,18 @@ vi.mock('../features/reviews/api/reviewsApi', () => ({
   viewerCanReviewInRequest: vi.fn(async () => false),
   reviewQueueRequest: vi.fn(),
   ideaReviewsRequest: vi.fn(async () => []),
+}))
+
+// The administration console's API. `AppLayout` asks for the viewer's
+// console capabilities on mount (to decide whether to offer the "Admin"
+// link), so every `/app` route reaches it. Denied by default, like the server.
+vi.mock('../features/administration/api/capabilitiesApi', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  adminCapabilitiesRequest: vi.fn(),
+}))
+vi.mock('../features/administration/api/administrationApi', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  adminOverviewRequest: vi.fn(),
 }))
 
 vi.mock('../features/identity/auth/authApi', () => ({
@@ -50,6 +83,8 @@ const mockedRefresh = vi.mocked(refreshTokenRequest)
 const mockedMe = vi.mocked(meRequest)
 const mockedOrganizations = vi.mocked(organizationsRequest)
 const mockedIdeas = vi.mocked(organizationIdeasRequest)
+const mockedCapabilities = vi.mocked(adminCapabilitiesRequest)
+const mockedOverview = vi.mocked(adminOverviewRequest)
 
 const USER = {
   id: '1',
@@ -70,6 +105,7 @@ describe('route tree', () => {
     mockedMe.mockResolvedValue(null)
     mockedOrganizations.mockResolvedValue([])
     mockedIdeas.mockResolvedValue(page([]))
+    mockedCapabilities.mockResolvedValue(NO_ADMIN_CAPABILITIES)
   })
 
   afterEach(() => {
@@ -137,6 +173,37 @@ describe('route tree', () => {
     ).toBeInTheDocument()
   })
 
+  it('renders the new-idea page at /app/ideas/new when authenticated', async () => {
+    mockedRefresh.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+    })
+    mockedMe.mockResolvedValue(USER)
+
+    renderRoutes(router.routes, '/app/ideas/new')
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Tell us about a problem.' }),
+    ).toBeInTheDocument()
+  })
+
+  it('renders the edit page at /app/ideas/:ideaId/edit when authenticated', async () => {
+    mockedRefresh.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+    })
+    mockedMe.mockResolvedValue(USER)
+
+    renderRoutes(router.routes, '/app/ideas/1/edit')
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Edit your draft.' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('This idea is not available.')).toBeInTheDocument()
+  })
+
   it('redirects /app/ideas to /auth when there is no authenticated session', async () => {
     renderRoutes(router.routes, '/app/ideas')
 
@@ -181,6 +248,82 @@ describe('route tree', () => {
 
     renderRoutes(router.routes, '/app')
 
-    expect(await screen.findByText(/ada@example.com/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'MUSTANET home' })).toBeInTheDocument()
+  })
+
+  describe('the administration console', () => {
+    function signIn() {
+      mockedRefresh.mockResolvedValue({
+        success: true,
+        message: 'ok',
+        session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      })
+      mockedMe.mockResolvedValue(USER)
+    }
+
+    const ADMIN = {
+      ...NO_ADMIN_CAPABILITIES,
+      canAccessConsole: true,
+    }
+
+    it('offers the Admin link to a platform administrator', async () => {
+      signIn()
+      mockedCapabilities.mockResolvedValue(ADMIN)
+
+      renderRoutes(router.routes, '/app')
+
+      const main = await screen.findByRole('navigation', { name: 'Main' })
+      expect(await within(main).findByRole('link', { name: 'Admin' })).toHaveAttribute(
+        'href',
+        '/app/admin',
+      )
+    })
+
+    it('does not offer the Admin link to anybody else', async () => {
+      signIn()
+
+      renderRoutes(router.routes, '/app')
+
+      const main = await screen.findByRole('navigation', { name: 'Main' })
+      await waitFor(() => expect(mockedCapabilities).toHaveBeenCalled())
+      expect(within(main).queryByRole('link', { name: 'Admin' })).not.toBeInTheDocument()
+    })
+
+    it('shows a normal user who types /app/admin a forbidden state, and loads nothing', async () => {
+      signIn()
+
+      renderRoutes(router.routes, '/app/admin/users')
+
+      expect(
+        await screen.findByRole(
+          'heading',
+          { name: 'Not authorized' },
+          { timeout: LAZY_ROUTE_TIMEOUT },
+        ),
+      ).toBeInTheDocument()
+      expect(mockedOverview).not.toHaveBeenCalled()
+    })
+
+    it('sends an unauthenticated visitor to sign in', async () => {
+      renderRoutes(router.routes, '/app/admin')
+
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { level: 1, name: 'Welcome back' })).toBeInTheDocument(),
+      )
+      expect(mockedCapabilities).not.toHaveBeenCalled()
+    })
+
+    it('renders the console dashboard for an administrator', async () => {
+      signIn()
+      mockedCapabilities.mockResolvedValue(ADMIN)
+      mockedOverview.mockReturnValue(new Promise(() => {}))
+
+      renderRoutes(router.routes, '/app/admin')
+
+      expect(
+        await screen.findByRole('heading', { name: 'Overview' }, { timeout: LAZY_ROUTE_TIMEOUT }),
+      ).toBeInTheDocument()
+      expect(screen.getByRole('navigation', { name: 'Administration' })).toBeInTheDocument()
+    })
   })
 })

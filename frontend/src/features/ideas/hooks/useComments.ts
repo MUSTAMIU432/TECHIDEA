@@ -20,11 +20,16 @@ import {
  * reader's scroll position and the page they were on through somebody else
  * saying something.
  *
+ * A reply is one of those comments with a `parentId`, so it is spliced and
+ * ordered exactly as any other would be. Nothing here knows what a thread
+ * *looks* like: the list stays chronological and the component groups it.
+ *
  * Three things it will not do:
  *
  * - **No local filtering, sorting or de-duplication.** The server's order and
  *   membership are the truth. A client that sorted its own copy would show an
- *   order the backend never promised.
+ *   order the backend never promised. Grouping a reply under its parent is not
+ *   this: it reads the `parentId` the server sent and reorders nothing.
  * - **No pretending a refusal is a failure.** A `success: false` payload is the
  *   server's answer and is reported as its message, with `field` for the input
  *   at fault. Only a thrown error - the request never got a decision - becomes
@@ -45,8 +50,16 @@ export interface CommentDiscussion {
   /** The comment currently being written or edited, by id. */
   busyCommentId: string | null
   editingCommentId: string | null
+  /** The comment this reader last posted, for a view that hides a long thread. */
+  lastPostedId: string | null
   canPost: boolean
-  post: (content: string) => Promise<boolean>
+  /**
+   * Post a comment, or - with `parentId` - a reply to another comment on this
+   * idea. The parent is a hint about the shape of the request, never a
+   * permission: the server checks it can be read, is on this idea, and is not
+   * itself a reply.
+   */
+  post: (content: string, parentId?: string | null) => Promise<boolean>
   startEditing: (commentId: string) => void
   cancelEditing: () => void
   saveEdit: (commentId: string, content: string) => Promise<boolean>
@@ -82,6 +95,16 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
   const [posting, setPosting] = useState(false)
   const [busyCommentId, setBusyCommentId] = useState<string | null>(null)
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  /**
+   * The comment this reader last posted, or null if they have not posted one
+   * this session.
+   *
+   * Not cleared afterwards. It names a comment rather than an event, so a stale
+   * value can only ever match a comment that was deleted, and the view that
+   * asks is looking for one row to keep on screen - where a missing id and a
+   * null are the same answer.
+   */
+  const [lastPostedId, setLastPostedId] = useState<string | null>(null)
   // Bumped only when a successful write has nothing to splice into - i.e. the
   // read failed, so there is no page to update. The normal path updates the
   // answer in place and never touches this.
@@ -158,7 +181,7 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
   const error = failed ? TRANSPORT_FAILURE : null
 
   const post = useCallback(
-    async (content: string) => {
+    async (content: string, parentId?: string | null) => {
       if (ideaId === null) return false
 
       // Refuse a second click before it becomes a request. `posting` alone
@@ -171,7 +194,7 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
       setPosting(true)
       setWriteError(null)
       try {
-        const result = await createCommentRequest(ideaId, content)
+        const result = await createCommentRequest(ideaId, content, parentId ?? null)
         if (!result.success || result.comment === null) {
           setWriteError({ message: result.message, field: result.field })
           return false
@@ -180,7 +203,17 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
         // new comment is the newest. The total moves with it, so the count on
         // screen stays true - and the idea list above is untouched, so the
         // reader keeps their filters and their page.
+        //
+        // A reply is spliced the same way, at the end rather than under its
+        // parent: this list is chronological because that is how a conversation
+        // is read, and the reply is *rendered* under its parent by grouping
+        // `parentId`, which the payload already carries.
         const created = result.comment
+        // So a view that collapses a long thread can put this reader's own
+        // words back on screen. A comment nobody can find after posting it is
+        // the one comment that must never be hidden, and the id is the only
+        // thing that knows it is theirs rather than the server's.
+        setLastPostedId(created.id)
         if (answer === null) {
           // The read failed, so there is no page to splice into. Reload rather
           // than invent one, so the total is the server's number.
@@ -254,14 +287,30 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
           return false
         }
         if (answer !== null) {
-          setAnswer({
-            ...answer,
-            comments: answer.comments.filter((comment) => comment.id !== commentId),
-            pageInfo: {
-              ...answer.pageInfo,
-              totalCount: Math.max(0, answer.pageInfo.totalCount - 1),
-            },
-          })
+          // Deleting a comment takes its replies with it, on the server. Any
+          // reply left on screen would be a reply to a question that is gone.
+          //
+          // When this page held one, the whole page is re-read rather than
+          // patched: the server's cascade may have removed replies this page
+          // never loaded - the discussion is paged - so the total is not
+          // knowable from what is in state, and arithmetic on a guess is the
+          // kind of number that is wrong without looking wrong.
+          const droppedReplies = answer.comments.filter(
+            (comment) => comment.parentId === commentId,
+          ).length
+
+          if (droppedReplies > 0) {
+            setReloadToken((token) => token + 1)
+          } else {
+            setAnswer({
+              ...answer,
+              comments: answer.comments.filter((comment) => comment.id !== commentId),
+              pageInfo: {
+                ...answer.pageInfo,
+                totalCount: Math.max(0, answer.pageInfo.totalCount - 1),
+              },
+            })
+          }
         }
         if (editingCommentId === commentId) setEditingCommentId(null)
         return true
@@ -285,6 +334,7 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
     posting,
     busyCommentId,
     editingCommentId,
+    lastPostedId,
     canPost,
     post,
     startEditing: setEditingCommentId,

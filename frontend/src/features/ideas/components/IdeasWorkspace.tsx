@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import {
   submitIdeaRequest,
@@ -6,17 +7,19 @@ import {
   type Idea,
   type IdeaFilters,
   type IdeaStatus,
-  type IdeaVisibility,
 } from '../api/ideasApi'
 import { useDebouncedCallback } from '../../../lib/useDebouncedCallback'
 import { useOrganization } from '../../organizations/context/useOrganization'
-import { IdeaForm } from './IdeaForm'
 import { IdeaList } from './IdeaList'
 import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
+import { readIdeasRedirect, type NoticeTone } from '../utils/savedIdeaNotice'
 
 /**
- * The Ideas area: the organization's ideas on one side, the create/edit form
- * on the other.
+ * The Ideas area: the organization's ideas. Filing a new idea
+ * (`/app/ideas/new`) and editing one (`/app/ideas/:ideaId/edit`) are pages of
+ * their own, both the same guided form, and both redirect back here with
+ * their confirmation in router state. There is deliberately no second editor
+ * on this page: one form, one way to change an idea.
  *
  * Composition and nothing else. The mutations, the filtering and the rules all
  * live behind `ideasApi` and the backend; this component's whole job is to
@@ -47,27 +50,20 @@ import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
  * - a transport failure: the request never reached a decision, so it is
  *   reported as itself rather than as "your idea was not accepted".
  */
-/**
- * Who can read a just-saved draft, in words. Derived from the idea's own
- * visibility rather than assumed: a draft is only author-only when it is
- * `PRIVATE`, and saving or submitting never changes that (S2-008).
- */
-const DRAFT_READERS: Record<IdeaVisibility, string> = {
-  PRIVATE: 'Only you can see it.',
-  ORGANIZATION: 'Members of this organization can read it.',
-  PUBLIC: 'Anyone signed in to the platform can read it.',
-  DEPARTMENT: 'Only you can see it.',
-}
-
 export function IdeasWorkspace() {
   const { activeOrganization } = useOrganization()
-  const [editing, setEditing] = useState<Idea | null>(null)
-  const [isCreating, setIsCreating] = useState(false)
+  const location = useLocation()
+  const navigate = useNavigate()
   const [submittingIdeaId, setSubmittingIdeaId] = useState<string | null>(null)
   const [submittingTarget, setSubmittingTarget] = useState<IdeaStatus | null>(null)
   const [filters, setFilters] = useState<IdeaFilters>({})
   const [reloadToken, setReloadToken] = useState(0)
-  const [notice, setNotice] = useState<string | null>(null)
+  // Both seeded from the redirect after filing a new idea on `/app/ideas/new`.
+  const [redirect] = useState(() => readIdeasRedirect(location.state))
+  const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(() =>
+    redirect ? { text: redirect.notice, tone: redirect.tone } : null,
+  )
+  const highlightedIdeaId = redirect?.ideaId ?? null
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   /*
@@ -81,6 +77,17 @@ export function IdeasWorkspace() {
     applyFilters({ ...filters, search: search.trim() === '' ? null : search })
   }, SEARCH_DEBOUNCE_MS)
 
+  /*
+   * The confirmation has been taken into local state, so drop it from the
+   * history entry: a refresh, or coming Back to this entry, should not
+   * announce the same save a second time.
+   */
+  useEffect(() => {
+    if (readIdeasRedirect(location.state) !== null) {
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null })
+    }
+  }, [location.state, location.pathname, location.search, navigate])
+
   function reloadList() {
     setReloadToken((token) => token + 1)
   }
@@ -93,19 +100,6 @@ export function IdeasWorkspace() {
    */
   function applyFilters(next: IdeaFilters) {
     setFilters({ ...next, offset: next.offset ?? 0 })
-  }
-
-  function handleSaved(idea: Idea) {
-    setEditing(null)
-    setIsCreating(false)
-    setNotice(
-      idea.status === 'DRAFT'
-        ? `Draft saved. ${DRAFT_READERS[idea.visibility]}`
-        : idea.status === 'CHANGES_REQUESTED'
-          ? 'Changes saved. Use Submit again when the idea is ready for the next review.'
-          : 'Idea saved.',
-    )
-    reloadList()
   }
 
   async function handleTransition(idea: Idea, target: IdeaStatus) {
@@ -122,7 +116,7 @@ export function IdeasWorkspace() {
           ? await submitIdeaRequest(idea.id)
           : await transitionIdeaRequest(idea.id, target)
       if (result.success) {
-        setNotice(result.message)
+        setNotice({ text: result.message, tone: 'success' })
         reloadList()
         return
       }
@@ -135,11 +129,9 @@ export function IdeasWorkspace() {
     }
   }
 
-  const showForm = isCreating || editing !== null
-
   return (
     <section aria-labelledby="ideas-heading" className="mt-8">
-      <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-700">Ideas</p>
           <h2
@@ -149,15 +141,39 @@ export function IdeasWorkspace() {
             {activeOrganization ? activeOrganization.name : 'Your ideas'}
           </h2>
         </div>
-        <p className="max-w-md text-sm leading-6 text-gray-600">
-          File a problem worth automating. Submitting puts it forward for review; who can see it is
-          its visibility, which submitting does not change.
-        </p>
+        {activeOrganization && (
+          <Link
+            to="/app/ideas/new"
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+          >
+            <span aria-hidden="true">+</span>
+            File a new idea
+          </Link>
+        )}
       </div>
 
       {notice && (
-        <output className="mt-5 block rounded-lg bg-green-50 px-4 py-3 text-sm text-green-800">
-          {notice}
+        <output
+          className={`mt-5 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${
+            notice.tone === 'success'
+              ? 'border-green-200 bg-green-50 text-green-800'
+              : 'border-amber-200 bg-amber-50 text-amber-900'
+          }`}
+        >
+          <span className="flex items-start gap-2">
+            <span aria-hidden="true" className="font-bold">
+              {notice.tone === 'success' ? '✓' : '!'}
+            </span>
+            <span>{notice.text}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss"
+            className="shrink-0 rounded px-1 font-semibold opacity-70 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+          >
+            ×
+          </button>
         </output>
       )}
       {submitError && (
@@ -166,54 +182,23 @@ export function IdeasWorkspace() {
         </p>
       )}
 
-      <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
-        <div>
-          <IdeaList
-            filters={filters}
-            onFiltersChange={applyFilters}
-            onSearchChange={searchFor}
-            // A token rather than a remount key: a save invalidates the list
-            // and must re-run its fetch, but a remount would also throw away
-            // the reader's filters and page, which have nothing to do with the
-            // write. The fetch is a side effect of the list's props, so
-            // changing one of them is enough.
-            reloadToken={reloadToken}
-            onEdit={(idea) => {
-              setSubmitError(null)
-              setIsCreating(false)
-              setEditing(idea)
-            }}
-            onTransition={handleTransition}
-            submittingIdeaId={submittingIdeaId}
-            submittingTarget={submittingTarget}
-          />
-          {!showForm && activeOrganization && (
-            <button
-              type="button"
-              onClick={() => {
-                setNotice(null)
-                setSubmitError(null)
-                setEditing(null)
-                setIsCreating(true)
-              }}
-              className="mt-4 w-full rounded-xl border border-dashed border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
-            >
-              File a new idea
-            </button>
-          )}
-        </div>
-
-        {showForm && activeOrganization && (
-          <IdeaForm
-            organizationId={activeOrganization.id}
-            idea={editing}
-            onSaved={handleSaved}
-            onCancel={() => {
-              setIsCreating(false)
-              setEditing(null)
-            }}
-          />
-        )}
+      <div className="mt-5">
+        <IdeaList
+          filters={filters}
+          onFiltersChange={applyFilters}
+          onSearchChange={searchFor}
+          // A token rather than a remount key: a transition invalidates the
+          // list and must re-run its fetch, but a remount would also throw
+          // away the reader's filters and page, which have nothing to do with
+          // the write. The fetch is a side effect of the list's props, so
+          // changing one of them is enough.
+          reloadToken={reloadToken}
+          onEdit={(idea) => navigate(`/app/ideas/${idea.id}/edit`)}
+          onTransition={handleTransition}
+          submittingIdeaId={submittingIdeaId}
+          submittingTarget={submittingTarget}
+          highlightedIdeaId={highlightedIdeaId}
+        />
       </div>
     </section>
   )

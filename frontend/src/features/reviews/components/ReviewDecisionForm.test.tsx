@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ReviewMutationResult } from '../api/reviewsApi'
@@ -59,6 +59,15 @@ describe('ReviewDecisionForm', () => {
       expect(screen.getByLabelText(`Note on ${label.toLowerCase()} (optional)`)).toBeInTheDocument()
     }
     expect(screen.getAllByRole('option', { name: 'Not applicable' })).toHaveLength(5)
+  })
+
+  it('offers the three verdicts and never Withdrawn, which only a take-over records', () => {
+    renderForm()
+
+    const decisions = within(screen.getByRole('group', { name: 'Decision' }))
+      .getAllByRole('radio')
+      .map((radio) => (radio as HTMLInputElement).value)
+    expect(decisions).toEqual(['CHANGES_REQUESTED', 'APPROVED', 'REJECTED'])
   })
 
   it('requires every criterion to be rated', () => {

@@ -1,6 +1,8 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { makeIdea } from '../../../test/idea'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { renderWithRouter } from '../../../test/renderWithRouter'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
@@ -31,29 +33,6 @@ const CATEGORIES = [
   { id: '5', name: 'Finance', slug: 'finance', description: '' },
 ]
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'DRAFT',
-    visibility: 'PRIVATE',
-    submittedAt: null,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '7',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
-
 /**
  * A server that answers for the window it was asked for.
  *
@@ -61,7 +40,7 @@ function idea(overrides: Partial<Idea> = {}): Idea {
  * paging is a conversation, and a mock that always replies with page 3 leaves
  * the buttons reading an offset the reader is not at.
  */
-function echoPage(total: number, rows: Idea[] = [idea()]) {
+function echoPage(total: number, rows: Idea[] = [makeIdea()]) {
   listMock.mockImplementation(async (_organizationId, filters = {}) => {
     const offset = filters.offset ?? 0
     const limit = filters.limit ?? 20
@@ -85,7 +64,7 @@ function lastFilters(): IdeaFilters {
   return call[1] ?? {}
 }
 
-function mockContext(answer: IdeaPage = page([idea()])) {
+function mockContext(answer: IdeaPage = page([makeIdea()])) {
   vi.mocked(useAuth).mockReturnValue({
     user: SIGNED_IN,
   } as unknown as ReturnType<typeof useAuth>)
@@ -144,7 +123,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   // --- the controls reach the server ---------------------------------------
 
   it('offers the categories the server listed, and no others', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const select = (await screen.findByLabelText('Category')) as HTMLSelectElement
     const options = within(select)
@@ -158,7 +137,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('sends a category filter when one is chosen', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     fireEvent.change(categorySelect(), { target: { value: '4' } })
@@ -167,7 +146,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('sends a status filter when one is chosen', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     fireEvent.change(statusSelect(), { target: { value: 'SUBMITTED' } })
@@ -176,7 +155,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('composes category, status and search into one request', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     fireEvent.change(categorySelect(), { target: { value: '4' } })
@@ -194,7 +173,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('drops the filter again when the control is put back to all', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
     fireEvent.change(categorySelect(), { target: { value: '4' } })
     await waitFor(() => expect(lastFilters().categoryId).toBe('4'))
@@ -205,7 +184,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('clears every filter at once, and empties the search box', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
     fireEvent.change(categorySelect(), { target: { value: '4' } })
     fireEvent.change(statusSelect(), { target: { value: 'REJECTED' } })
@@ -228,7 +207,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
 
   it('asks for a search only once the typing pauses', async () => {
     vi.useFakeTimers()
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     // Let the mount fetch settle before counting requests, or the first
     // render's call is counted as a search.
     await act(async () => {})
@@ -252,7 +231,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
 
   it('never searches for a term that was typed and then replaced', async () => {
     vi.useFakeTimers()
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await act(async () => {})
 
     fireEvent.change(searchBox(), { target: { value: 'invoice' } })
@@ -271,7 +250,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
 
   it('trims a search before sending it', async () => {
     vi.useFakeTimers()
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await act(async () => {})
 
     fireEvent.change(searchBox(), { target: { value: '   ' } })
@@ -287,8 +266,8 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   // --- narrowing returns to the first page ---------------------------------
 
   it('returns to the first page when a filter narrows the result', async () => {
-    mockContext(pagedPage([idea()], 40, { offset: 20, limit: 20 }))
-    render(<IdeasWorkspace />)
+    mockContext(pagedPage([makeIdea()], 40, { offset: 20, limit: 20 }))
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
 
     fireEvent.change(categorySelect(), { target: { value: '4' } })
@@ -300,8 +279,8 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('returns to the first page when a search narrows the result', async () => {
-    mockContext(pagedPage([idea()], 40, { offset: 20, limit: 20 }))
-    render(<IdeasWorkspace />)
+    mockContext(pagedPage([makeIdea()], 40, { offset: 20, limit: 20 }))
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
 
     fireEvent.change(searchBox(), { target: { value: 'invoice' } })
@@ -311,10 +290,10 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   // --- paging ---------------------------------------------------------------
 
   it('reports the window the server applied, not the rows it returned', async () => {
-    mockContext(pagedPage([idea({ id: '1' })], 137, { offset: 40, limit: 20 }))
+    mockContext(pagedPage([makeIdea({ id: '1' })], 137, { offset: 40, limit: 20 }))
     // Answered as though the reader asked for page 3, which is the state the
     // fixture describes.
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     // One idea on screen, and the reader is told there are 137. The count is
     // the server's because the client has never seen the other 136.
@@ -325,7 +304,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('does not print a range past the end on the last page', async () => {
     mockContext()
     echoPage(25)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await waitFor(() => expect(lastFilters().offset).toBe(0))
 
     fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
@@ -338,7 +317,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('moves forward by the page size the server applied', async () => {
     mockContext()
     echoPage(137)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -352,7 +331,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('moves back by the applied page size, and never below zero', async () => {
     mockContext()
     echoPage(137)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
     await waitFor(() => expect(lastFilters().offset).toBe(20))
     expect(pageSummary()).toBe('Showing 21-40 of 137')
@@ -369,7 +348,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('disables the buttons at the ends and only there', async () => {
     mockContext()
     echoPage(137)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
 
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
@@ -379,7 +358,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('paging keeps the filters that got us here', async () => {
     mockContext()
     echoPage(137)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
     fireEvent.change(categorySelect(), { target: { value: '4' } })
     await waitFor(() => expect(lastFilters().categoryId).toBe('4'))
@@ -393,7 +372,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('offers no pager at all when everything fits on one page', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     // "Showing 1-1 of 1" with both buttons disabled is a control that cannot
@@ -405,7 +384,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   // --- the three empties ----------------------------------------------------
 
   it('distinguishes "nothing here" from "nothing matches"', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     listMock.mockResolvedValue(page([]))
@@ -420,7 +399,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('offers a way back from a page that is now past the end', async () => {
     mockContext()
     echoPage(40)
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await waitFor(() => expect(lastFilters().offset).toBe(0))
 
     // The reader is on page 2, and the rows on page 3 are gone: ideas were
@@ -438,14 +417,14 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   // --- failures and races ---------------------------------------------------
 
   it('keeps the previous page on screen while a new filter is in flight', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     let release: (() => void) | null = null
     listMock.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          release = () => resolve(page([idea({ id: '2', title: 'A second idea' })]))
+          release = () => resolve(page([makeIdea({ id: '2', title: 'A second idea' })]))
         }),
     )
     fireEvent.change(categorySelect(), { target: { value: '4' } })
@@ -465,14 +444,14 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('shows the results for the newest query when two arrive out of order', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     const releases: (() => void)[] = []
     listMock.mockImplementation(
       () =>
         new Promise((resolve) => {
-          releases.push(() => resolve(page([idea({ id: '9', title: 'Resolved second' })])))
+          releases.push(() => resolve(page([makeIdea({ id: '9', title: 'Resolved second' })])))
         }),
     )
 
@@ -498,7 +477,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
     // S2-008 regression. The test above resolves both requests with the same
     // row, so a stale answer overwriting the current one looked identical and
     // went unnoticed. Here the two answers differ.
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     const requests: { resolve: (value: IdeaPage) => void }[] = []
@@ -517,13 +496,13 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
 
     // B settles first and is shown.
     await act(async () => {
-      b.resolve(page([idea({ id: '9', title: 'Current answer' })]))
+      b.resolve(page([makeIdea({ id: '9', title: 'Current answer' })]))
     })
     expect(await screen.findByText('Current answer')).toBeInTheDocument()
 
     // A settles afterwards and must be discarded.
     await act(async () => {
-      a.resolve(page([idea({ id: '8', title: 'Stale answer' })]))
+      a.resolve(page([makeIdea({ id: '8', title: 'Stale answer' })]))
     })
     expect(screen.getByText('Current answer')).toBeInTheDocument()
     expect(screen.queryByText('Stale answer')).not.toBeInTheDocument()
@@ -532,7 +511,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('does not let a stale request’s failure wipe the current answer', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
     const requests: { resolve: (value: IdeaPage) => void; reject: (reason: unknown) => void }[] = []
@@ -549,7 +528,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
     const [a, b] = requests
 
     await act(async () => {
-      b.resolve(page([idea({ id: '9', title: 'Current answer' })]))
+      b.resolve(page([makeIdea({ id: '9', title: 'Current answer' })]))
     })
     await act(async () => {
       a.reject(new Error('Failed to fetch'))
@@ -561,8 +540,8 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   })
 
   it('reports a failed page as a failure, not as an empty result', async () => {
-    mockContext(pagedPage([idea()], 137))
-    render(<IdeasWorkspace />)
+    mockContext(pagedPage([makeIdea()], 137))
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
 
     listMock.mockRejectedValue(new Error('Failed to fetch'))
@@ -577,12 +556,18 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
   it('keeps the filters and the page when a write reloads the list', async () => {
     mockContext(
       pagedPage(
-        [idea({ id: '2', title: 'A submitted idea', availableTransitions: ['SUBMITTED'] })],
+        [
+          makeIdea({
+            id: '2',
+            title: 'A submitted idea',
+            availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+          }),
+        ],
         137,
         { offset: 20 },
       ),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByRole('navigation', { name: 'Ideas pagination' })
     fireEvent.change(categorySelect(), { target: { value: '4' } })
     await waitFor(() => expect(lastFilters().categoryId).toBe('4'))
@@ -591,9 +576,13 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
       success: true,
       message: 'Idea submitted.',
       field: null,
-      idea: idea({ id: '2', status: 'SUBMITTED', availableTransitions: [] }),
+      idea: makeIdea({
+        id: '2',
+        status: 'SUBMITTED_TO_ORGANIZATION',
+        availableTransitions: [],
+      }),
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send to my organization' }))
 
     // The write re-asks, and the answer keeps the reader where they were. A
     // remount here would drop them on page 1 with no filters, which is the

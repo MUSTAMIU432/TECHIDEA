@@ -133,11 +133,17 @@ export function useAttachments(ideaId: string | null): AttachmentGallery {
         if (answer === null) {
           setReloadToken((token) => token + 1)
         } else {
-          setAnswer({
-            ...answer,
-            attachments: [...answer.attachments, created],
-            pageInfo: { ...answer.pageInfo, totalCount: answer.pageInfo.totalCount + 1 },
-          })
+          // From the latest list, not the one this callback closed over: files
+          // uploaded one after another must each land after the previous one.
+          setAnswer((latest) =>
+            latest === null
+              ? latest
+              : {
+                  ...latest,
+                  attachments: [...latest.attachments, created],
+                  pageInfo: { ...latest.pageInfo, totalCount: latest.pageInfo.totalCount + 1 },
+                },
+          )
         }
         return true
       } catch {

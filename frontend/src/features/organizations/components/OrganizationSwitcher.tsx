@@ -6,11 +6,11 @@ export function OrganizationSwitcher() {
   if (memberships.length === 0) return null
 
   return (
-    <label className="flex items-center gap-2 text-sm text-gray-600">
-      <span className="hidden font-medium sm:inline">Working in</span>
+    <label className="flex min-w-0 items-center gap-2 text-sm text-brand-100">
+      <span className="hidden shrink-0 font-medium lg:inline">Working in</span>
       <select
         aria-label="Active organization"
-        className="h-10 min-w-40 rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200 disabled:cursor-not-allowed disabled:opacity-60"
+        className="h-10 w-full min-w-0 max-w-56 rounded-lg sm:min-w-40 border border-white/20 bg-white px-3 text-sm font-semibold text-brand-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-white/70 disabled:cursor-not-allowed disabled:opacity-60"
         disabled={status === 'loading'}
         value={activeOrganization?.id ?? ''}
         onChange={(event) => setActiveOrganization(event.target.value)}

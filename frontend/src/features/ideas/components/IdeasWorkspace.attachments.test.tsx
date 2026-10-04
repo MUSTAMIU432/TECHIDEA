@@ -1,11 +1,14 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { makeIdea } from '../../../test/idea'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { renderWithRouter } from '../../../test/renderWithRouter'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeasWorkspace } from './IdeasWorkspace'
 import { page, pageOf } from '../../../test/ideaPage'
 import type { Idea, IdeaAttachment } from '../api/ideasApi'
+import { COURTESY_MAX_UPLOAD_BYTES, MAX_UPLOAD_LABEL } from '../utils/attachmentRules'
 
 vi.mock('../api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -44,28 +47,8 @@ const downloadMock = vi.mocked(downloadAttachmentRequest)
 const OWNER = { id: '9', email: 'author@example.com' }
 const COLLEAGUE = { id: '7', email: 'colleague@example.com' }
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'DRAFT',
-    visibility: 'ORGANIZATION',
-    submittedAt: null,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '9',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
+/** The idea under test, authored by `OWNER` so the upload controls are offered. */
+const OWNED_IDEA: Idea = makeIdea({ authorId: OWNER.id })
 
 function attachment(overrides: Partial<IdeaAttachment> = {}): IdeaAttachment {
   return {
@@ -84,7 +67,7 @@ function attachment(overrides: Partial<IdeaAttachment> = {}): IdeaAttachment {
 function mockContext(
   options: { user?: typeof OWNER; ideas?: Idea[]; attachments?: IdeaAttachment[] } = {},
 ) {
-  const { user = OWNER, ideas: ideaList = [idea()], attachments: attachmentList = [] } = options
+  const { user = OWNER, ideas: ideaList = [OWNED_IDEA], attachments: attachmentList = [] } = options
 
   vi.mocked(useAuth).mockReturnValue({ user } as unknown as ReturnType<typeof useAuth>)
   vi.mocked(useOrganization).mockReturnValue({
@@ -138,7 +121,7 @@ describe('Idea attachments (S2-007)', () => {
   // --- lazy fetch and rendering ----------------------------------------------
 
   it('does not fetch attachments until the section is opened', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
     await act(async () => {})
 
@@ -147,7 +130,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('fetches and renders attachments once opened', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     await openEvidence()
 
@@ -157,7 +140,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('shows an empty state when there is nothing attached yet', async () => {
     mockContext({ attachments: [] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const card = await openEvidence()
 
@@ -172,7 +155,7 @@ describe('Idea attachments (S2-007)', () => {
           release = () => resolve(pageOf<IdeaAttachment>([]))
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const card = await openEvidence()
 
@@ -184,7 +167,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('reports a failed listing as a transport failure', async () => {
     attachmentsMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const card = await openEvidence()
 
@@ -196,7 +179,7 @@ describe('Idea attachments (S2-007)', () => {
   // --- upload -----------------------------------------------------------------
 
   it('offers the file picker to the ideas own author', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const card = await openEvidence()
 
@@ -205,7 +188,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('does not offer the file picker to a colleague', async () => {
     mockContext({ user: COLLEAGUE })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
 
     const card = await openEvidence()
 
@@ -220,7 +203,7 @@ describe('Idea attachments (S2-007)', () => {
       field: null,
       attachment: attachment({ filename: 'new-evidence.pdf' }),
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
 
     const input = within(card).getByLabelText(/choose file/i, {
@@ -246,7 +229,7 @@ describe('Idea attachments (S2-007)', () => {
             })
         }),
     )
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
@@ -267,7 +250,7 @@ describe('Idea attachments (S2-007)', () => {
       field: 'file',
       attachment: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
@@ -280,7 +263,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('reports a transport failure on upload as itself', async () => {
     uploadMock.mockRejectedValue(new Error('Failed to fetch'))
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
@@ -294,23 +277,28 @@ describe('Idea attachments (S2-007)', () => {
   })
 
   it('rejects an obviously oversized file before ever calling the server', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
     }) as HTMLInputElement
-    const oversized = new File([new Uint8Array(11 * 1024 * 1024)], 'huge.pdf', {
+    // Sized from the rule rather than written out, so this test keeps testing
+    // "too big is refused before the network" after the limit moves, instead of
+    // quietly testing a file that is now comfortably allowed.
+    const oversized = new File([new Uint8Array(COURTESY_MAX_UPLOAD_BYTES + 1)], 'huge.pdf', {
       type: 'application/pdf',
     })
 
     fireEvent.change(input, { target: { files: [oversized] } })
 
-    expect(await within(card).findByText(/larger than 10 mb/i)).toBeInTheDocument()
+    expect(
+      await within(card).findByText(new RegExp(`larger than ${MAX_UPLOAD_LABEL}`, 'i')),
+    ).toBeInTheDocument()
     expect(uploadMock).not.toHaveBeenCalled()
   })
 
   it('rejects an unsupported extension before ever calling the server', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
@@ -327,7 +315,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('downloads an attachment when its button is pressed', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -338,7 +326,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('every reader who can see the section can download, not only the author', async () => {
     mockContext({ user: COLLEAGUE, attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
 
     expect(await within(card).findByRole('button', { name: /download/i })).toBeInTheDocument()
@@ -348,7 +336,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('the author can delete their own attachment', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -360,7 +348,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('a colleague is not offered a delete control', async () => {
     mockContext({ user: COLLEAGUE, attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -374,7 +362,7 @@ describe('Idea attachments (S2-007)', () => {
       message: 'Attachment is unavailable.',
       field: null,
     })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -387,7 +375,7 @@ describe('Idea attachments (S2-007)', () => {
   // --- discovery context survives ----------------------------------------------
 
   it('does not re-fetch the ideas list when the evidence section is opened', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await openEvidence()
 
     expect(listMock).toHaveBeenCalledTimes(1)
@@ -395,7 +383,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('does not re-fetch the ideas list after an upload or a delete', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -409,7 +397,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('offers no voting or discussion control inside the evidence section', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
@@ -421,7 +409,7 @@ describe('Idea attachments (S2-007)', () => {
 
   it('exposes the evidence list as a labelled region once open', async () => {
     mockContext({ attachments: [attachment()] })
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
 
     expect(
@@ -430,7 +418,7 @@ describe('Idea attachments (S2-007)', () => {
   })
 
   it('the toggle reports its expanded state', async () => {
-    render(<IdeasWorkspace />)
+    renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
     await act(async () => {})
     const card = screen.getByText('Automate the invoice run').closest('li') as HTMLElement

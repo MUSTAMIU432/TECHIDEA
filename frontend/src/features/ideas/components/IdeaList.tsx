@@ -8,6 +8,7 @@ import { useCategories } from '../hooks/useCategories'
 import { useIdeaDiscovery } from '../hooks/useIdeaDiscovery'
 import { useIdeaVotes } from '../hooks/useIdeaVotes'
 import {
+  isResubmission,
   statusClasses,
   statusDescription,
   statusLabel,
@@ -17,9 +18,19 @@ import {
 import { IdeaAttachments } from './IdeaAttachments'
 import { IdeaDiscussion } from './IdeaDiscussion'
 import { IdeaReviewSection } from '../../reviews/components/IdeaReviewSection'
-import { IdeaVoteButton } from './IdeaVoteButton'
+import { IdeaCardActions, type IdeaCardSection } from './IdeaCardActions'
 import { IdeaFiltersBar } from './IdeaFiltersBar'
 import { IdeaPagination } from './IdeaPagination'
+
+/**
+ * The one open section on the page: which idea, and which of its three
+ * disclosures. A null is "the list is closed", which is the state a reader
+ * arrives in and the state a filter change should return them to.
+ */
+interface OpenSection {
+  ideaId: string
+  section: IdeaCardSection
+}
 
 /**
  * The organization's ideas, narrowed by the filters above them, and what can
@@ -44,6 +55,11 @@ import { IdeaPagination } from './IdeaPagination'
  *   edit or a submission it should refuse whether or not the buttons were
  *   rendered, and a failure to render them is not a security control.
  */
+/** Bring the just-filed idea into view once its card is rendered. */
+function scrollIntoView(element: HTMLLIElement | null) {
+  element?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+}
+
 export function IdeaList({
   filters,
   onFiltersChange,
@@ -53,6 +69,7 @@ export function IdeaList({
   reloadToken,
   submittingIdeaId = null,
   submittingTarget = null,
+  highlightedIdeaId = null,
 }: {
   /** The filters in effect. Sent to the server; never applied here. */
   filters: IdeaFilters
@@ -78,6 +95,8 @@ export function IdeaList({
    * reader back to page 1 after every save.
    */
   reloadToken: number
+  /** The idea just filed from `/app/ideas/new`: marked, and scrolled into view. */
+  highlightedIdeaId?: string | null
   /**
    * Which idea's submission is in flight, so exactly one row shows a spinner.
    * Owned by the workspace rather than by this component: the mutation lives
@@ -90,21 +109,28 @@ export function IdeaList({
 }) {
   const { user } = useAuth()
   const { activeOrganization, status: organizationStatus } = useOrganization()
-  // Which idea's discussion is open, at most one.
-  //
-  // Held here rather than inside `IdeaDiscussion` for two reasons. The hook
-  // that fetches the thread is keyed on whether the thread is open, so its
-  // position decides when a fetch happens - and `IdeaList` is the component
-  // that already re-renders wholesale on a filter change, so an open
-  // discussion cannot outlive the results it belongs to. And one at a time
-  // keeps a page from accumulating twenty open threads.
-  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null)
-  // Independent of the discussion toggle above: a reader may want to see an
-  // idea's evidence without opening its discussion, or both at once, so
-  // there is no shared "one section open" rule between the two - each has
-  // its own single-open-at-a-time state instead.
-  const [openAttachmentsId, setOpenAttachmentsId] = useState<string | null>(null)
-  const [openReviewsId, setOpenReviewsId] = useState<string | null>(null)
+  /*
+    Which section is open, if any - **at most one on the whole page**, and it is
+    one value rather than one flag per section per idea.
+
+    That shape is the whole rule, and it is what makes opening a card's evidence
+    close another card's comments instead of stacking them: there is nowhere to
+    record a second one. The reasons it is worth doing that way:
+
+    - **A list is scanned, not read.** Somebody comparing two ideas opens one
+      card, then the next. Two open sections means the reader is deciding which
+      one is real, and the page gets taller than the amount of content on it
+      warrants - every closed section is content that has to be scrolled past.
+    - **Each section is a request.** A discussion, an evidence list and a review
+      history are three fetches, keyed on being open
+      (`useComments(open ? idea.id : null, ...)`, `useAttachments`,
+      `IdeaReviewSection`). Leaving twenty cards open would leave sixty requests
+      in flight for content nobody asked for.
+    - **`IdeaList` already re-renders wholesale on a filter change**, so an open
+      section cannot outlive the results it belongs to. Holding the position
+      here rather than inside each panel is what gives it that.
+  */
+  const [openSection, setOpenSection] = useState<OpenSection | null>(null)
   const { categories } = useCategories()
   const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
     activeOrganization?.id ?? null,
@@ -115,6 +141,11 @@ export function IdeaList({
   // the server's numbers on the first paint - no per-idea request, and nothing
   // to reload when a vote changes.
   const { votes, toggle: toggleVote, dismissError: dismissVoteError } = useIdeaVotes(ideas)
+
+  /** Whether this idea's section is the open one. The only question a row asks. */
+  function isSectionOpen(ideaId: string, section: IdeaCardSection): boolean {
+    return openSection !== null && openSection.ideaId === ideaId && openSection.section === section
+  }
 
   if (organizationStatus === 'loading') return <LoadingPanel />
 
@@ -186,21 +217,36 @@ export function IdeaList({
               {ideas.map((idea) => {
                 const isMine = user?.id === idea.authorId
                 const isDraft = idea.status === 'DRAFT'
-                // Sent back by a reviewer (S3-005): the author revises and
-                // submits again. Authorship is only what decides whether to
-                // *offer* the edit; `updateIdea` checks it again.
-                const isRevisable = idea.status === 'CHANGES_REQUESTED'
+                // Sent back for changes (S3-005): the author revises and
+                // submits again. Either track's changes-requested state counts -
+                // somebody has read the idea and written down what to change, and
+                // which track asked is a question the status badge answers rather
+                // than one the actions have to repeat.
+                //
+                // Authorship is only what decides whether to *offer* the edit;
+                // `updateIdea` checks it again.
+                const isRevisable = isResubmission(idea.status)
                 const canEdit = isMine && (isDraft || isRevisable)
                 return (
                   <li
                     key={idea.id}
-                    className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
+                    ref={idea.id === highlightedIdeaId ? scrollIntoView : undefined}
+                    aria-current={idea.id === highlightedIdeaId ? 'true' : undefined}
+                    // Clear of the pinned header and breadcrumb when scrolled to.
+                    className={`scroll-mt-[calc(var(--app-chrome-height)+1rem)] rounded-xl border bg-white p-4 shadow-sm ${
+                      idea.id === highlightedIdeaId
+                        ? 'border-brand-400 ring-2 ring-brand-200'
+                        : 'border-gray-200'
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="truncate text-sm font-semibold text-gray-900">
                           {idea.title}
                         </h3>
+                        {idea.id === highlightedIdeaId && (
+                          <p className="mt-0.5 text-xs font-semibold text-brand-700">Just filed</p>
+                        )}
                         <p className="mt-1 line-clamp-2 text-sm text-gray-600">
                           {idea.description || 'No description yet.'}
                         </p>
@@ -248,21 +294,6 @@ export function IdeaList({
                     </dl>
 
                     {/*
-                        The vote control, next to the idea's other facts. The
-                        count and whether *this* reader voted both arrive on
-                        the idea from the server, so there is no request per
-                        card and no client-side count to drift.
-                      */}
-                    <div className="mt-3 flex items-center gap-2">
-                      <IdeaVoteButton
-                        ideaId={idea.id}
-                        control={votes[idea.id]}
-                        onToggle={toggleVote}
-                        onDismissError={dismissVoteError}
-                      />
-                    </div>
-
-                    {/*
                         Actions are rendered from `availableTransitions`, which the
                         backend computed for *this* viewer. So there is no client-side
                         rule saying "the author may submit" or "a reviewer may approve"
@@ -286,8 +317,13 @@ export function IdeaList({
                           </button>
                         )}
                         {idea.availableTransitions.map((target) => {
+                          // A re-submission reads the same whichever track asked
+                          // for the changes: pressing it sends the idea back
+                          // where it came from, and the card's own state says
+                          // where that is.
                           const label =
-                            isRevisable && target === 'SUBMITTED'
+                            isRevisable &&
+                            (target === 'SUBMITTED' || target === 'SUBMITTED_TO_ORGANIZATION')
                               ? 'Submit again'
                               : transitionLabel(target)
                           if (label === null) return null
@@ -309,16 +345,44 @@ export function IdeaList({
                       </div>
                     ) : null}
                     {/*
-                        The discussion, collapsed. Fetched when it is opened
-                        and not before - see `IdeaDiscussion`.
+                        The card's footer: the vote control and the three
+                        disclosures that open the discussion, the evidence and
+                        the review history, in one evenly spaced row. It owns
+                        the toggles, so the sections below it are content-only -
+                        see `IdeaCardActions`.
+
+                        Last, because it is the foot of the card and the
+                        lifecycle buttons above it are what the author came
+                        for; a reader scanning for what can be done to an idea
+                        should not have to pass the bar to reach the status.
                       */}
-                    <IdeaDiscussion
+                    <IdeaCardActions
                       idea={idea}
-                      open={openDiscussionId === idea.id}
-                      onToggle={() =>
-                        setOpenDiscussionId((current) => (current === idea.id ? null : idea.id))
-                      }
+                      viewerId={user?.id ?? null}
+                      vote={votes[idea.id]}
+                      onToggleVote={toggleVote}
+                      onDismissVoteError={dismissVoteError}
+                      open={{
+                        discussion: isSectionOpen(idea.id, 'discussion'),
+                        evidence: isSectionOpen(idea.id, 'evidence'),
+                        review: isSectionOpen(idea.id, 'review'),
+                      }}
+                      onToggleSection={(section) => {
+                        // The one rule, written once: opening a section closes
+                        // whatever was open, whether that was another section of
+                        // this card or another card's - and opening the section
+                        // that is already open closes it, which is what a
+                        // disclosure that says `aria-expanded` has to do.
+                        setOpenSection((current) =>
+                          current !== null &&
+                          current.ideaId === idea.id &&
+                          current.section === section
+                            ? null
+                            : { ideaId: idea.id, section },
+                        )
+                      }}
                     />
+                    <IdeaDiscussion idea={idea} open={isSectionOpen(idea.id, 'discussion')} />
                     {/*
                         Supporting evidence (S2-007), collapsed and fetched
                         only while open - the same reasoning as the
@@ -327,13 +391,7 @@ export function IdeaList({
                         then evidence, in the order S2-005 and S2-007
                         shipped.
                       */}
-                    <IdeaAttachments
-                      idea={idea}
-                      open={openAttachmentsId === idea.id}
-                      onToggle={() =>
-                        setOpenAttachmentsId((current) => (current === idea.id ? null : idea.id))
-                      }
-                    />
+                    <IdeaAttachments idea={idea} open={isSectionOpen(idea.id, 'evidence')} />
                     {/*
                         Review history (S3-003), for the author once the idea
                         is put forward and for reviewers - fetched only while
@@ -342,10 +400,7 @@ export function IdeaList({
                     <IdeaReviewSection
                       idea={idea}
                       viewerId={user?.id ?? null}
-                      open={openReviewsId === idea.id}
-                      onToggle={() =>
-                        setOpenReviewsId((current) => (current === idea.id ? null : idea.id))
-                      }
+                      open={isSectionOpen(idea.id, 'review')}
                     />
                   </li>
                 )

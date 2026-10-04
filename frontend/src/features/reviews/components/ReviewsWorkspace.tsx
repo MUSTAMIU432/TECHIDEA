@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router-dom'
 
 import { ideaRequest, type Idea } from '../../ideas/api/ideasApi'
 import { IdeaAttachments } from '../../ideas/components/IdeaAttachments'
+import { CardDisclosureButton, PaperclipIcon } from '../../ideas/components/IdeaCardActions'
+import { IdeaStory } from '../../ideas/components/IdeaStory'
 import { IdeaPagination } from '../../ideas/components/IdeaPagination'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
@@ -27,7 +29,8 @@ import { ReviewHistory } from './ReviewHistory'
  *
  * An idea being reviewed leaves the queue (it is no longer waiting), so an
  * in-progress review is reopened by `?idea=<id>`, which is where the idea
- * card's "Continue review" link points.
+ * card's "Continue review" link points. The same link opens a stalled review
+ * (its reviewer can no longer review it) for another reviewer to take over.
  */
 export function ReviewsWorkspace() {
   const { user } = useAuth()
@@ -40,6 +43,33 @@ export function ReviewsWorkspace() {
   const [notice, setNotice] = useState<string | null>(null)
   const [searchParams] = useSearchParams()
   const linkedIdeaId = searchParams.get('idea')
+
+  /*
+    **The page belongs to the organization, so it is reset with it.** Page three
+    of one organization's queue is not page three of another's: the offsets are
+    positions in two different result sets, and carrying one across shows a
+    reader an empty second page of an organization they have not looked at yet -
+    which is exactly the "nothing is waiting" message they would then believe.
+
+    Adjusted during render rather than in an effect, deliberately. An effect runs
+    after React has already committed the new organization's first render, so the
+    queue would be asked for at the old offset once before the reset landed: two
+    requests per switch, the first one for a page nobody asked for. React
+    re-renders immediately here instead, before the effect that fetches.
+
+    The selected idea goes with it, for the same reason - it is a row from the
+    organization that was on screen a moment ago, and the panel beside the queue
+    would otherwise show one tenant's idea under another tenant's name. A
+    `?idea=` deep link is the exception: it names its own idea, so it survives the
+    switch and the effect below is left to open it.
+  */
+  const [shownOrganizationId, setShownOrganizationId] = useState(organizationId)
+  if (organizationId !== shownOrganizationId) {
+    setShownOrganizationId(organizationId)
+    setOffset(0)
+    if (linkedIdeaId === null) setSelected(null)
+  }
+
   const { ideas, pageInfo, loading, error } = useReviewQueue(
     canReview ? organizationId : null,
     offset,
@@ -121,9 +151,30 @@ export function ReviewsWorkspace() {
           ) : loading && pageInfo === null ? (
             <p className="text-sm text-gray-500">Loading the review queue…</p>
           ) : ideas.length === 0 ? (
-            <p className="text-sm text-gray-500">
-              Nothing is waiting for review. Submitted ideas appear here, oldest first.
-            </p>
+            /*
+              The one message that is true in every empty case, and the reason it
+              is worded this way: the server never says *why* a queue is empty.
+              It excludes a reviewer's own ideas from their own queue and returns
+              the same empty page as for an organization with nothing waiting, so
+              that `organizationId` cannot be used to find out who has submitted
+              what, or who reviews where. Anything that claimed to know -
+              "there are no submitted ideas", "nobody has submitted one" - would
+              be a guess dressed as a fact, and would be wrong for exactly the
+              reader most likely to be looking at this panel.
+
+              So the headline is about *their* queue rather than the
+              organization's contents, and the second line states the rule
+              itself. It is shown unconditionally, because the one thing this
+              client must not do is let the wording vary with what it cannot see.
+            */
+            <div>
+              <p className="text-sm font-semibold text-gray-900">
+                No ideas are waiting for your review.
+              </p>
+              <p className="mt-1 text-sm leading-6 text-gray-500">
+                Ideas you submitted yourself are not eligible for your own review.
+              </p>
+            </div>
           ) : (
             <>
               <ul aria-label="Ideas waiting for review" className="divide-y divide-gray-100">
@@ -191,6 +242,9 @@ function ReviewContext({
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  // The server offers a start on an idea already under review only when its
+  // reviewer can no longer review it: `startReview` then takes the review over.
+  const takeOver = idea.status === 'UNDER_REVIEW'
 
   async function handleStart() {
     setStartError(null)
@@ -225,14 +279,18 @@ function ReviewContext({
       </p>
       {idea.viewerCanStartReview && (
         <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-brand-50 px-3 py-2">
-          <p className="text-sm text-brand-800">Waiting for a reviewer.</p>
+          <p className="text-sm text-brand-800">
+            {takeOver
+              ? 'The reviewer who started this review can no longer review it.'
+              : 'Waiting for a reviewer.'}
+          </p>
           <button
             type="button"
             onClick={handleStart}
             disabled={starting}
             className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {starting ? 'Starting…' : 'Start review'}
+            {starting ? 'Starting…' : takeOver ? 'Take over review' : 'Start review'}
           </button>
         </div>
       )}
@@ -242,12 +300,26 @@ function ReviewContext({
         </p>
       )}
       <p className="mt-4 whitespace-pre-line text-sm leading-6 text-gray-700">{idea.description}</p>
+      {/* What happens today, who it affects, what better looks like - in the
+          author's words, so the review starts from the problem, not a guess. */}
+      <IdeaStory story={idea} />
 
-      <IdeaAttachments
-        idea={idea}
-        open={evidenceOpen}
-        onToggle={() => setEvidenceOpen((o) => !o)}
-      />
+      {/*
+        The evidence panel is a disclosure of its own here rather than a cell of
+        a card's action bar: this is one idea, not a list, so there is no row
+        of sibling actions to sit level with. The same icon and wording as the
+        bar, so the two places it appears are recognisably the same thing.
+      */}
+      <div className="mt-5 border-t border-gray-100 pt-4">
+        <CardDisclosureButton
+          icon={<PaperclipIcon size="sm" />}
+          label="Supporting evidence"
+          hideLabel="Hide supporting evidence"
+          open={evidenceOpen}
+          onToggle={() => setEvidenceOpen((o) => !o)}
+        />
+        <IdeaAttachments idea={idea} open={evidenceOpen} />
+      </div>
 
       {idea.viewerActiveReviewId !== null && (
         <section aria-label="Your review" className="mt-5 border-t border-gray-100 pt-4">

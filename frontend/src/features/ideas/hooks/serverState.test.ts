@@ -1,3 +1,4 @@
+import { makeIdea } from '../../../test/idea'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -55,6 +56,7 @@ function comment(id: string, content: string): IdeaComment {
     ideaId: '1',
     authorId: '7',
     content,
+    parentId: null,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   }
@@ -70,29 +72,6 @@ function attachment(id: string, filename: string): IdeaAttachment {
     size: 10,
     createdAt: '2026-01-01T00:00:00.000Z',
     downloadUrl: `/ideas/1/attachments/${id}/download/`,
-  }
-}
-
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'A description long enough.',
-    status: 'SUBMITTED',
-    visibility: 'ORGANIZATION',
-    submittedAt: '2026-01-01T00:00:00.000Z',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '8',
-    organizationId: '3',
-    category: null,
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: false,
-    viewerActiveReviewId: null,
-    ...overrides,
   }
 }
 
@@ -181,7 +160,7 @@ describe('useIdeaVotes', () => {
   it('lets a refreshed list replace the numbers a vote response left behind', async () => {
     // 1. Initial server state.
     const view = renderHook(({ ideas }: { ideas: Idea[] }) => useIdeaVotes(ideas), {
-      initialProps: { ideas: [idea({ voteCount: 2, viewerHasVoted: false })] },
+      initialProps: { ideas: [makeIdea({ voteCount: 2, viewerHasVoted: false })] },
     })
     expect(view.result.current.votes['1']).toMatchObject({ voteCount: 2, viewerHasVoted: false })
 
@@ -199,7 +178,7 @@ describe('useIdeaVotes', () => {
 
     // 3. The list is fetched again and the server now says something else -
     //    other people voted, and this reader's vote was withdrawn elsewhere.
-    view.rerender({ ideas: [idea({ voteCount: 5, viewerHasVoted: false })] })
+    view.rerender({ ideas: [makeIdea({ voteCount: 5, viewerHasVoted: false })] })
 
     // 4. The refreshed server state wins; the old response is not pinned.
     expect(view.result.current.votes['1']).toMatchObject({
@@ -212,7 +191,7 @@ describe('useIdeaVotes', () => {
 
   it('keeps an undismissed error across a refresh, but not stale numbers', async () => {
     const view = renderHook(({ ideas }: { ideas: Idea[] }) => useIdeaVotes(ideas), {
-      initialProps: { ideas: [idea({ voteCount: 1 })] },
+      initialProps: { ideas: [makeIdea({ voteCount: 1 })] },
     })
     voteMock.mockResolvedValue({
       success: false,
@@ -223,7 +202,7 @@ describe('useIdeaVotes', () => {
     act(() => view.result.current.toggle('1'))
     await waitFor(() => expect(view.result.current.votes['1'].error).toBe('Idea is unavailable.'))
 
-    view.rerender({ ideas: [idea({ voteCount: 4 })] })
+    view.rerender({ ideas: [makeIdea({ voteCount: 4 })] })
 
     expect(view.result.current.votes['1']).toMatchObject({
       voteCount: 4,
@@ -232,7 +211,7 @@ describe('useIdeaVotes', () => {
   })
 
   it('does not reset anything when it is handed the same answer again', async () => {
-    const ideas = [idea({ voteCount: 2 })]
+    const ideas = [makeIdea({ voteCount: 2 })]
     const view = renderHook(({ list }: { list: Idea[] }) => useIdeaVotes(list), {
       initialProps: { list: ideas },
     })

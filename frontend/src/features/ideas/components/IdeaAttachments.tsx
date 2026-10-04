@@ -4,15 +4,23 @@ import { useAuth } from '../../identity/auth/AuthContext'
 import { SpinnerIcon } from '../../identity/components/icons'
 import { useAttachments } from '../hooks/useAttachments'
 import type { Idea, IdeaAttachment } from '../api/ideasApi'
+import {
+  ACCEPTED_FILE_TYPES,
+  attachmentProblem,
+  formatFileSize,
+  MAX_UPLOAD_LABEL,
+} from '../utils/attachmentRules'
 
 /**
  * One idea's supporting evidence: the files attached to it, and what the
  * signed-in reader may do with them.
  *
- * Behind its own disclosure, fetched only while open - the same reasoning
- * `IdeaDiscussion` uses and for the same reason: a page holds many ideas,
- * and a page that fetched every idea's attachment list up front would be a
- * request for evidence nobody asked to see yet.
+ * Rendered behind the evidence cell of `IdeaCardActions` on `/app/ideas`, and
+ * behind `CardDisclosureButton` in the review workspace - either way it is
+ * fetched only while open, for the same reason `IdeaDiscussion` does: a page
+ * holds many ideas, and a page that fetched every idea's attachment list up
+ * front would be a request for evidence nobody asked to see yet. Nothing at all
+ * is rendered while it is closed: an empty box is a thing to look at.
  *
  * **Upload and delete are offered to the idea's own author only.**
  * `idea.authorId === user.id` decides what to *offer* here exactly the way
@@ -28,43 +36,33 @@ import type { Idea, IdeaAttachment } from '../api/ideasApi'
  * the server's own message, not pre-empted by a client-side guess at why it
  * might fail.
  */
-export function IdeaAttachments({
-  idea,
-  open,
-  onToggle,
-}: {
-  idea: Idea
-  open: boolean
-  onToggle: () => void
-}) {
-  const { user } = useAuth()
-  const gallery = useAttachments(open ? idea.id : null)
-  const isOwner = user?.id === idea.authorId
+export function IdeaAttachments({ idea, open }: { idea: Idea; open: boolean }) {
+  if (!open) return null
 
   return (
-    <div className="mt-3 border-t border-gray-100 pt-3">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={onToggle}
-        className="inline-flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-xs font-semibold text-brand-700 hover:text-brand-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
-      >
-        {open ? 'Hide supporting evidence' : 'Supporting evidence'}
-      </button>
-      {open && (
-        <section aria-label={`Supporting evidence: ${idea.title}`} className="mt-3">
-          <AttachmentList gallery={gallery} isOwner={isOwner} />
-          {isOwner && <AttachmentUploader idea={idea} gallery={gallery} />}
-        </section>
-      )}
-    </div>
+    <section aria-label={`Supporting evidence: ${idea.title}`} className="mt-3">
+      <IdeaAttachmentsPanel idea={idea} />
+    </section>
   )
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+/**
+ * The list and, for the idea's author, the uploader - without the
+ * disclosure. Mounted only while it should fetch: by `IdeaAttachments` while
+ * open, and by the intake form's "Supporting documents" step while an
+ * existing idea is being edited.
+ */
+export function IdeaAttachmentsPanel({ idea }: { idea: Idea }) {
+  const { user } = useAuth()
+  const gallery = useAttachments(idea.id)
+  const isOwner = user?.id === idea.authorId
+
+  return (
+    <>
+      <AttachmentList gallery={gallery} isOwner={isOwner} />
+      {isOwner && <AttachmentUploader idea={idea} gallery={gallery} />}
+    </>
+  )
 }
 
 function AttachmentList({
@@ -132,7 +130,7 @@ function AttachmentRow({
             display name with no directory component, but it is still never
             interpreted as markup here. */}
         <p className="truncate text-sm font-medium text-gray-800">{attachment.filename}</p>
-        <p className="text-xs text-gray-500">{formatSize(attachment.size)}</p>
+        <p className="text-xs text-gray-500">{formatFileSize(attachment.size)}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
         <button
@@ -168,39 +166,6 @@ function AttachmentRow({
   )
 }
 
-/**
- * Files this domain accepts, spelled out for the file picker's own `accept`
- * filter - a courtesy that narrows what a well-behaved browser offers to
- * pick, never the validation itself. The server's allow-list
- * (`ideas.attachments.ALLOWED_ATTACHMENT_TYPES`) is the one that matters,
- * and it is checked against the file's own bytes, not this string.
- */
-const ACCEPTED_EXTENSIONS = [
-  '.pdf',
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-  '.csv',
-  '.txt',
-  '.doc',
-  '.docx',
-  '.xls',
-  '.xlsx',
-]
-const ACCEPTED_FILE_TYPES = ACCEPTED_EXTENSIONS.join(',')
-
-/**
- * Matches the backend's default `ATTACHMENT_MAX_UPLOAD_BYTES` - a courtesy
- * check only, so an obviously-too-large file is rejected before a round
- * trip rather than after one. If a deployment changes the server's limit,
- * the server's own message on a refused upload is still what a reader sees
- * for anything this quick check let through; this number is not the
- * boundary.
- */
-const COURTESY_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-
 function AttachmentUploader({
   idea,
   gallery,
@@ -223,21 +188,12 @@ function AttachmentUploader({
     setSelectionError(null)
     gallery.clearWriteError()
 
-    // A courtesy pre-check only - see `COURTESY_MAX_UPLOAD_BYTES` and
-    // `ACCEPTED_EXTENSIONS` above. Whatever passes here still goes to the
-    // server, which is the actual, authoritative check; this only saves an
-    // obviously-doomed round trip.
-    const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
-    if (!ACCEPTED_EXTENSIONS.includes(extension)) {
-      setSelectionError('That file type is not supported.')
-      return
-    }
-    if (file.size === 0) {
-      setSelectionError('That file is empty.')
-      return
-    }
-    if (file.size > COURTESY_MAX_UPLOAD_BYTES) {
-      setSelectionError('That file is larger than 10 MB.')
+    // A courtesy pre-check only - see `utils/attachmentRules`. Whatever
+    // passes here still goes to the server, which is the actual,
+    // authoritative check; this only saves an obviously-doomed round trip.
+    const problem = attachmentProblem(file)
+    if (problem !== null) {
+      setSelectionError(problem)
       return
     }
 
@@ -262,8 +218,10 @@ function AttachmentUploader({
         onChange={handleChange}
         className="sr-only"
       />
+      {/* The limit is asked for rather than written, so this hint cannot
+          promise something the uploader does not enforce. */}
       <span className="ml-2 text-xs text-gray-500">
-        PDF, image, spreadsheet or document, up to 10 MB
+        PDF, image, spreadsheet or document, up to {MAX_UPLOAD_LABEL}
       </span>
 
       {selectionError !== null && (

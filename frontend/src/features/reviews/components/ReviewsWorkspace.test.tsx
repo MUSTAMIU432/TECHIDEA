@@ -1,8 +1,9 @@
+import { makeIdea } from '../../../test/idea'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Idea, IdeaPage } from '../../ideas/api/ideasApi'
+import type { IdeaPage } from '../../ideas/api/ideasApi'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { pageOf } from '../../../test/ideaPage'
@@ -32,33 +33,11 @@ const queueMock = vi.mocked(reviewQueueRequest)
 const historyMock = vi.mocked(ideaReviewsRequest)
 const startMock = vi.mocked(startReviewRequest)
 
-function idea(overrides: Partial<Idea> = {}): Idea {
-  return {
-    id: '1',
-    title: 'Automate the invoice run',
-    description: 'We key every invoice in by hand.',
-    status: 'SUBMITTED',
-    visibility: 'ORGANIZATION',
-    submittedAt: '2026-01-02T00:00:00.000Z',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    authorId: '8',
-    organizationId: '3',
-    category: { id: '4', name: 'Finance', slug: 'finance', description: '' },
-    availableTransitions: [],
-    discussionOpen: true,
-    voteCount: 0,
-    viewerHasVoted: false,
-    viewerCanStartReview: true,
-    viewerActiveReviewId: null,
-    ...overrides,
-  }
-}
-
 function review(overrides: Partial<Review> = {}): Review {
   return {
     id: '9',
     ideaId: '1',
+    scope: 'PLATFORM',
     round: 1,
     reviewerId: '7',
     decision: 'CHANGES_REQUESTED',
@@ -70,6 +49,9 @@ function review(overrides: Partial<Review> = {}): Review {
     ...overrides,
   }
 }
+
+const GLOBEX = { id: '4', name: 'Globex' }
+const INITECH = { id: '5', name: 'Initech' }
 
 function mockContext(
   organization: { id: string; name: string } | null = { id: '3', name: 'Acme' },
@@ -83,12 +65,30 @@ function mockContext(
   } as unknown as ReturnType<typeof useOrganization>)
 }
 
+/**
+ * A fresh element on every call, deliberately: rerendering the *same* element
+ * reference lets React bail out of the subtree, which would quietly make the
+ * organization switch below a no-op and the test pass for the wrong reason.
+ */
+const workspace = () => (
+  <MemoryRouter>
+    <ReviewsWorkspace />
+  </MemoryRouter>
+)
+
 function renderWorkspace() {
-  return render(
-    <MemoryRouter>
-      <ReviewsWorkspace />
-    </MemoryRouter>,
-  )
+  const view = render(workspace())
+  return {
+    ...view,
+    /**
+     * What the organization switcher does: the context answers with a different
+     * organization and the same tree is rendered again.
+     */
+    switchOrganization(organization: { id: string; name: string }) {
+      mockContext(organization)
+      view.rerender(workspace())
+    },
+  }
 }
 
 const queueList = () => screen.findByRole('list', { name: 'Ideas waiting for review' })
@@ -98,7 +98,10 @@ describe('ReviewsWorkspace', () => {
     vi.clearAllMocks()
     mockContext()
     canReviewMock.mockResolvedValue(true)
-    queueMock.mockResolvedValue(pageOf([idea()]))
+    // A queue is ideas this reviewer may take, so the default subject is one they
+    // can start a review of. The one test about the server declining states that
+    // with its own fixture.
+    queueMock.mockResolvedValue(pageOf([makeIdea({ viewerCanStartReview: true })]))
     historyMock.mockResolvedValue([])
   })
 
@@ -138,7 +141,67 @@ describe('ReviewsWorkspace', () => {
 
     expect(await screen.findByText('Loading the review queue…')).toBeInTheDocument()
     await act(async () => resolve(pageOf([])))
-    expect(screen.getByText(/Nothing is waiting for review/)).toBeInTheDocument()
+    expect(screen.getByText('No ideas are waiting for your review.')).toBeInTheDocument()
+  })
+
+  // --- the empty state must not claim to know more than it does -----------
+
+  it('says whose queue is empty, and why their own ideas are not in it', async () => {
+    queueMock.mockResolvedValue(pageOf([]))
+
+    renderWorkspace()
+
+    expect(await screen.findByText('No ideas are waiting for your review.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Ideas you submitted yourself are not eligible for your own review.'),
+    ).toBeInTheDocument()
+  })
+
+  it('makes no claim about the organization’s submissions', async () => {
+    queueMock.mockResolvedValue(pageOf([]))
+
+    renderWorkspace()
+    await screen.findByText('No ideas are waiting for your review.')
+
+    // The server does not say why a queue is empty - it returns the same empty
+    // page whether there is nothing waiting or the only ideas are the reviewer's
+    // own - so every one of these would be a guess. One of them would also be the
+    // answer to "does this organization have ideas?", which is the thing the
+    // empty page exists to withhold.
+    const panel = screen.getByText('No ideas are waiting for your review.').closest('div')
+    expect(panel).not.toHaveTextContent(/no one has submitted/i)
+    expect(panel).not.toHaveTextContent(/there are no submitted ideas/i)
+    expect(panel).not.toHaveTextContent(/nobody has submitted/i)
+    expect(panel).not.toHaveTextContent(/other reviewers/i)
+    // A count would be the same leak in a different shape.
+    expect(panel).not.toHaveTextContent(/\\d/)
+  })
+
+  it('asks nothing beyond the queue and the review check', async () => {
+    queueMock.mockResolvedValue(pageOf([]))
+
+    renderWorkspace()
+    await screen.findByText('No ideas are waiting for your review.')
+
+    // The security test, in the only form a client can honour it: the empty
+    // state is rendered from the answer to the one request the page already made,
+    // so there is no second question whose answer would distinguish "nothing
+    // eligible" from "only my own ideas".
+    expect(queueMock).toHaveBeenCalledTimes(1)
+    expect(canReviewMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the same empty state whichever organization is selected', async () => {
+    queueMock.mockResolvedValue(pageOf([]))
+    const view = renderWorkspace()
+    await screen.findByText('No ideas are waiting for your review.')
+
+    view.switchOrganization(GLOBEX)
+
+    expect(await screen.findByText('No ideas are waiting for your review.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Ideas you submitted yourself are not eligible for your own review.'),
+    ).toBeInTheDocument()
   })
 
   it('reports a failed request as a failure, not as an empty queue', async () => {
@@ -147,18 +210,21 @@ describe('ReviewsWorkspace', () => {
     renderWorkspace()
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not load the review queue')
-    expect(screen.queryByText(/Nothing is waiting/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No ideas are waiting/)).not.toBeInTheDocument()
   })
 
   it('pages by the server’s offsets', async () => {
     queueMock.mockImplementation(async (_organizationId, page = {}) =>
-      pageOf([idea({ id: String((page.offset ?? 0) + 1), title: `Idea at ${page.offset ?? 0}` })], {
-        offset: page.offset ?? 0,
-        limit: 20,
-        totalCount: 45,
-        hasNextPage: (page.offset ?? 0) + 20 < 45,
-        hasPreviousPage: (page.offset ?? 0) > 0,
-      }),
+      pageOf(
+        [makeIdea({ id: String((page.offset ?? 0) + 1), title: `Idea at ${page.offset ?? 0}` })],
+        {
+          offset: page.offset ?? 0,
+          limit: 20,
+          totalCount: 45,
+          hasNextPage: (page.offset ?? 0) + 20 < 45,
+          hasPreviousPage: (page.offset ?? 0) > 0,
+        },
+      ),
     )
 
     renderWorkspace()
@@ -179,11 +245,129 @@ describe('ReviewsWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(resolvers).toHaveLength(2))
 
-    await act(async () => resolvers[1](pageOf([idea({ title: 'Current answer' })])))
-    await act(async () => resolvers[0](pageOf([idea({ title: 'Stale answer' })])))
+    await act(async () => resolvers[1](pageOf([makeIdea({ title: 'Current answer' })])))
+    await act(async () => resolvers[0](pageOf([makeIdea({ title: 'Stale answer' })])))
 
     expect(screen.getByText('Current answer')).toBeInTheDocument()
     expect(screen.queryByText('Stale answer')).not.toBeInTheDocument()
+  })
+
+  // --- switching organization ----------------------------------------------
+
+  it('starts the new organization at the first page, not where the last one was', async () => {
+    queueMock.mockImplementation(async (organizationId, page = {}) =>
+      pageOf(
+        [
+          makeIdea({
+            id: `${organizationId}-${page.offset ?? 0}`,
+            title: `Idea for ${organizationId} at ${page.offset ?? 0}`,
+          }),
+        ],
+        {
+          offset: page.offset ?? 0,
+          limit: 20,
+          totalCount: 45,
+          hasNextPage: (page.offset ?? 0) + 20 < 45,
+          hasPreviousPage: (page.offset ?? 0) > 0,
+        },
+      ),
+    )
+
+    const view = renderWorkspace()
+    await screen.findByText('Idea for 3 at 0')
+    fireEvent.click(screen.getByRole('button', { name: /next/i }))
+    await screen.findByText('Idea for 3 at 20')
+    expect(queueMock).toHaveBeenLastCalledWith('3', { offset: 20 })
+
+    view.switchOrganization(GLOBEX)
+
+    await screen.findByText('Idea for 4 at 0')
+    expect(queueMock).toHaveBeenLastCalledWith('4', { offset: 0 })
+    // Not even once: an offset carried across is a page of somebody else's
+    // results, so the new organization must never be asked for one.
+    expect(queueMock).not.toHaveBeenCalledWith('4', { offset: 20 })
+  })
+
+  it('shows the new organization loading instead of the old organization’s rows', async () => {
+    // Acme answers; Globex never does, so the switch is caught mid-flight.
+    queueMock.mockImplementation(async (organizationId) =>
+      organizationId === '3'
+        ? pageOf([makeIdea({ title: 'Acme idea' })])
+        : new Promise<IdeaPage>(() => {}),
+    )
+
+    const view = renderWorkspace()
+    expect(await screen.findByText('Acme idea')).toBeInTheDocument()
+
+    view.switchOrganization(GLOBEX)
+
+    expect(await screen.findByText('Loading the review queue…')).toBeInTheDocument()
+    // The previous organization's rows are the previous organization's rows.
+    expect(screen.queryByText('Acme idea')).not.toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Ideas waiting for review' })).not.toBeInTheDocument()
+  })
+
+  it('shows the new organization’s own empty queue, not the old organization’s rows', async () => {
+    queueMock.mockImplementation(async (organizationId) =>
+      organizationId === '3' ? pageOf([makeIdea({ title: 'Idea for Acme' })]) : pageOf([]),
+    )
+
+    const view = renderWorkspace()
+    expect(await screen.findByText('Idea for Acme')).toBeInTheDocument()
+
+    view.switchOrganization(GLOBEX)
+
+    // Globex's own answer, empty - not Acme's rows left over, and not Acme's
+    // pageInfo still claiming there is a page two to turn to.
+    expect(await screen.findByText('No ideas are waiting for your review.')).toBeInTheDocument()
+    expect(screen.queryByText('Idea for Acme')).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: /page/i })).not.toBeInTheDocument()
+  })
+
+  it('drops a late answer from an organization that is no longer selected', async () => {
+    const resolvers: Record<string, Array<(page: IdeaPage) => void>> = {}
+    queueMock.mockImplementation(
+      (organizationId) =>
+        new Promise<IdeaPage>((resolve) => {
+          resolvers[organizationId] = [...(resolvers[organizationId] ?? []), resolve]
+        }),
+    )
+
+    const view = renderWorkspace()
+    await waitFor(() => expect(resolvers['3']).toHaveLength(1))
+
+    view.switchOrganization(GLOBEX)
+    await waitFor(() => expect(resolvers['4']).toHaveLength(1))
+
+    view.switchOrganization(INITECH)
+    await waitFor(() => expect(resolvers['5']).toHaveLength(1))
+
+    // Initech answers, and only then does the abandoned Acme request settle.
+    await act(async () => resolvers['5'][0](pageOf([makeIdea({ title: 'Initech idea' })])))
+    expect(await screen.findByText('Initech idea')).toBeInTheDocument()
+    await act(async () => resolvers['3'][0](pageOf([makeIdea({ title: 'Acme idea' })])))
+
+    expect(screen.getByText('Initech idea')).toBeInTheDocument()
+    expect(screen.queryByText('Acme idea')).not.toBeInTheDocument()
+  })
+
+  it('closes the review context of an idea from the previous organization', async () => {
+    queueMock.mockImplementation(async (organizationId) =>
+      pageOf([makeIdea({ title: `Idea for ${organizationId}` })]),
+    )
+
+    const view = renderWorkspace()
+    fireEvent.click(await within(await queueList()).findByRole('button', { name: /Idea for 3/ }))
+    expect(await screen.findByRole('article')).toBeInTheDocument()
+
+    view.switchOrganization(GLOBEX)
+
+    // Wait for Globex to have arrived first: asserted during the capability
+    // check the panel is not there for the reason this test is about, but
+    // because the whole section is replaced while access is re-checked.
+    await screen.findByText('Idea for 4')
+    // One organization's idea must not stay on screen under another's name.
+    expect(screen.queryByRole('article')).not.toBeInTheDocument()
   })
 
   it('opens an idea’s review context with its history', async () => {
@@ -205,7 +389,7 @@ describe('ReviewsWorkspace', () => {
     )
 
     const context = screen.getByRole('article')
-    expect(within(context).getByText('We key every invoice in by hand.')).toBeInTheDocument()
+    expect(within(context).getByText('A description long enough.')).toBeInTheDocument()
     expect(within(context).getByRole('button', { name: 'Start review' })).toBeInTheDocument()
     const history = await within(context).findByRole('list', { name: 'Review history' })
     expect(within(history).getByText('Add the monthly volume.')).toBeInTheDocument()
@@ -215,8 +399,42 @@ describe('ReviewsWorkspace', () => {
     expect(historyMock).toHaveBeenCalledWith('1')
   })
 
+  it('shows the reviewer the author’s problem story, and only the answered parts', async () => {
+    queueMock.mockResolvedValue(
+      pageOf([
+        makeIdea({
+          currentProcess: 'Invoices arrive by email and are typed into Excel.',
+          currentTools: ['EMAIL', 'EXCEL'],
+          frequency: 'DAILY',
+          peopleInvolved: 3,
+          impacts: ['MISTAKES'],
+          expectedBenefit: 'Fewer typing mistakes.',
+        }),
+      ]),
+    )
+
+    renderWorkspace()
+    fireEvent.click(
+      await within(await queueList()).findByRole('button', { name: /Automate the invoice run/ }),
+    )
+
+    const story = within(screen.getByRole('article')).getByRole('region', {
+      name: 'The problem in detail',
+    })
+    expect(
+      within(story).getByText('Invoices arrive by email and are typed into Excel.'),
+    ).toBeInTheDocument()
+    expect(within(story).getByText('Email, Excel')).toBeInTheDocument()
+    expect(within(story).getByText('Daily')).toBeInTheDocument()
+    expect(within(story).getByText('About 3')).toBeInTheDocument()
+    expect(within(story).getByText('Mistakes happen')).toBeInTheDocument()
+    expect(within(story).getByText('Fewer typing mistakes.')).toBeInTheDocument()
+    // Nothing was said about who is affected, so nothing is shown for it.
+    expect(within(story).queryByText('Who is affected')).not.toBeInTheDocument()
+  })
+
   it('offers no Start review, and no decision form, where the server says not', async () => {
-    queueMock.mockResolvedValue(pageOf([idea({ viewerCanStartReview: false })]))
+    queueMock.mockResolvedValue(pageOf([makeIdea({ viewerCanStartReview: false })]))
 
     renderWorkspace()
     fireEvent.click(await within(await queueList()).findByRole('button', { name: /Automate/ }))
@@ -231,7 +449,7 @@ describe('ReviewsWorkspace', () => {
       message: 'Review started.',
       field: null,
       review: review({ id: '12', decision: null, completedAt: null }),
-      idea: idea({
+      idea: makeIdea({
         status: 'UNDER_REVIEW',
         viewerCanStartReview: false,
         viewerActiveReviewId: '12',
@@ -279,7 +497,7 @@ describe('ReviewsWorkspace', () => {
 
   it('reopens an in-progress review from ?idea=', async () => {
     vi.mocked(ideaRequest).mockResolvedValue(
-      idea({
+      makeIdea({
         id: '5',
         title: 'Being reviewed',
         status: 'UNDER_REVIEW',
@@ -297,5 +515,52 @@ describe('ReviewsWorkspace', () => {
     expect(await screen.findByRole('heading', { name: 'Being reviewed' })).toBeInTheDocument()
     expect(screen.getByRole('form', { name: 'Review decision' })).toBeInTheDocument()
     expect(ideaRequest).toHaveBeenCalledWith('5')
+  })
+
+  it('offers to take over a stalled review from ?idea=, then shows the new round', async () => {
+    vi.mocked(ideaRequest).mockResolvedValue(
+      makeIdea({
+        id: '5',
+        title: 'Stalled',
+        status: 'UNDER_REVIEW',
+        viewerCanStartReview: true,
+        viewerActiveReviewId: null,
+      }),
+    )
+    startMock.mockResolvedValue({
+      success: true,
+      message: 'Review started.',
+      field: null,
+      review: review({ id: '13', round: 2, decision: null, completedAt: null }),
+      idea: makeIdea({
+        id: '5',
+        title: 'Stalled',
+        status: 'UNDER_REVIEW',
+        viewerCanStartReview: false,
+        viewerActiveReviewId: '13',
+      }),
+    })
+    historyMock.mockResolvedValue([
+      review({ reviewerId: '6', decision: 'WITHDRAWN', feedback: '', assessments: [] }),
+    ])
+
+    render(
+      <MemoryRouter initialEntries={['/app/reviews?idea=5']}>
+        <ReviewsWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(
+      await screen.findByText('The reviewer who started this review can no longer review it.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Withdrawn')).toBeInTheDocument()
+    expect(screen.getByText(/another reviewer took it over/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take over review' }))
+
+    expect(await screen.findByRole('form', { name: 'Review decision' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take over review' })).not.toBeInTheDocument()
+    expect(startMock).toHaveBeenCalledWith('5')
   })
 })

@@ -24,3 +24,14 @@
     opacity: 1;
   }
 }
+
+/* The moving segment of an upload whose progress is not reported: a file in
+   flight, not a percentage (see `FileUploadPanel`). */
+@keyframes upload-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}

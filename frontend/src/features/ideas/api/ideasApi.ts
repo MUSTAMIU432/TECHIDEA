@@ -38,19 +38,66 @@ import { env } from '../../../lib/env'
 /**
  * The submission lifecycle, mirroring the backend's `IdeaStatus` enum.
  *
- * All seven values are listed even though S2-002 can only produce `DRAFT` and
- * `SUBMITTED`, because the review statuses are part of the contract from the
- * start: a union type that omitted them would be wrong by omission the
- * moment Sprint 3 lands.
+ * Eleven values, because there are **two review tracks** and the states say
+ * which one an idea is in. Read as three journeys:
+ *
+ *     draft
+ *       -> submitted_to_organization          (organization ideas only)
+ *       -> organization_changes_requested | organization_confirmed
+ *       -> submitted                        (individual, team, or confirmed)
+ *       -> under_review -> changes_requested | rejected | approved
+ *       -> ready_for_implementation          (the author's own go-ahead)
+ *       -> automation_proposal               (the hand-off to the developer track)
+ *
+ * The organization stage exists only for an ORGANIZATION-context idea: a team or
+ * individual idea has nobody to confirm it, so it goes from `draft` to
+ * `submitted` in one move. And `ready_for_implementation` is *not* `approved` -
+ * platform approval is one thing, the author's decision to proceed from it is
+ * another, and the UI must never render the second as the first.
  */
 export type IdeaStatus =
   | 'DRAFT'
+  | 'SUBMITTED_TO_ORGANIZATION'
+  | 'ORGANIZATION_CHANGES_REQUESTED'
+  | 'ORGANIZATION_CONFIRMED'
   | 'SUBMITTED'
   | 'UNDER_REVIEW'
   | 'CHANGES_REQUESTED'
   | 'REJECTED'
   | 'APPROVED'
+  | 'READY_FOR_IMPLEMENTATION'
   | 'AUTOMATION_PROPOSAL'
+
+/**
+ * Who an idea is being put forward by. Mirrors `IdeaSubmissionContext`.
+ *
+ * The context is not decoration: it decides **whose validation applies before
+ * the platform sees the idea**. An organization idea is confirmed by its
+ * organization first; a team or individual idea has no such stage and goes
+ * straight to the platform. It is also which tenant the idea belongs to, which
+ * is why `organizationId` is nullable and `teamId` exists at all.
+ */
+export type SubmissionContext = 'INDIVIDUAL' | 'TEAM' | 'ORGANIZATION'
+
+/**
+ * What this state means in words, and the single action this viewer should take
+ * next. Resolved by the server from `ideas.states` - one table that also derives
+ * what the server will accept, so this client never translates an enum value
+ * itself and cannot disagree with the matrix about what to offer.
+ */
+export interface IdeaState {
+  status: IdeaStatus
+  label: string
+  shortLabel: string
+  tone: 'NEUTRAL' | 'INFO' | 'PROGRESS' | 'WARNING' | 'SUCCESS' | 'DECISION'
+  stage: 'AUTHORING' | 'ORGANIZATION' | 'PLATFORM' | 'OWNER' | 'IMPLEMENTATION'
+  primaryAction: string
+  primaryActionLabel: string
+  isLocked: boolean
+  isTerminal: boolean
+  stageIndex: number
+  stageCount: number
+}
 
 /**
  * Who may read an idea. `DEPARTMENT` is listed because the backend's enum
@@ -76,17 +123,17 @@ export const SELECTABLE_VISIBILITIES: ReadonlyArray<{
   {
     value: 'PRIVATE',
     label: 'Only me',
-    hint: 'Nobody else can see this, not even your team or a reviewer - so it cannot be reviewed.',
+    hint: 'Only you can see this idea.',
   },
   {
     value: 'ORGANIZATION',
     label: 'My organization',
-    hint: 'Every active member of this organization can read it.',
+    hint: 'People in your organization who have permission can see it.',
   },
   {
     value: 'PUBLIC',
-    label: 'Everyone on the platform',
-    hint: 'Any signed-in member of the platform can read it.',
+    label: 'Everyone',
+    hint: 'Other users can discover this idea.',
   },
 ]
 
@@ -139,7 +186,68 @@ export interface IdeaCategory {
   description: string
 }
 
-export interface Idea {
+/** How often the problem happens. Mirrors the backend's `IdeaFrequency` enum. */
+export type IdeaFrequency =
+  | 'SEVERAL_TIMES_A_DAY'
+  | 'DAILY'
+  | 'SEVERAL_TIMES_A_WEEK'
+  | 'WEEKLY'
+  | 'MONTHLY'
+  | 'OCCASIONALLY'
+  | 'OTHER'
+
+/** What happens because of the problem. Mirrors the backend's `IdeaImpact` enum. */
+export type IdeaImpact =
+  | 'TOO_MUCH_TIME'
+  | 'REPEATED_WORK'
+  | 'MISTAKES'
+  | 'WAITING'
+  | 'DELAYS'
+  | 'OVERLOAD'
+  | 'LOST_INFORMATION'
+  | 'COMPLAINTS'
+  | 'HIGHER_COSTS'
+  | 'OTHER'
+
+/** What the work is handled with today. Mirrors the backend's `IdeaCurrentTool` enum. */
+export type IdeaCurrentTool =
+  | 'PAPER_FORMS'
+  | 'EXCEL'
+  | 'GOOGLE_SHEETS'
+  | 'EMAIL'
+  | 'WHATSAPP'
+  | 'PHONE_CALLS'
+  | 'WEBSITE'
+  | 'MOBILE_APP'
+  | 'COMPUTER_PROGRAM'
+  | 'PHYSICAL_FILES'
+  | 'OTHER'
+
+/**
+ * The problem story: the guided intake form's answers, in the author's own
+ * words. Every one is optional - blank strings, empty lists and nulls mean
+ * "not answered" - and none of them asks about technology: the author says
+ * what happens and what better would look like, and later stages decide how.
+ */
+export interface IdeaProblemStory {
+  currentProcess: string
+  currentTools: IdeaCurrentTool[]
+  currentToolsOther: string
+  performedBy: string
+  affectedPeople: string
+  frequency: IdeaFrequency | null
+  timeRequired: string
+  peopleInvolved: number | null
+  impacts: IdeaImpact[]
+  impactDetails: string
+  improvementGoal: string
+  desiredOutcome: string
+  easierForPeople: string
+  expectedBenefit: string
+  importantConsiderations: string
+}
+
+export interface Idea extends IdeaProblemStory {
   id: string
   title: string
   description: string
@@ -150,7 +258,32 @@ export interface Idea {
   createdAt: string
   updatedAt: string
   authorId: string
-  organizationId: string
+  /**
+   * The tenant this idea belongs to, or null. Null is normal, not missing: an
+   * individual idea has no organization and a team idea has neither, which is
+   * the whole point of the context field.
+   */
+  organizationId: string | null
+  teamId: string | null
+  submissionContext: SubmissionContext
+  /** The organization's or the team's name, whichever the context names. */
+  tenantName: string
+  /**
+   * When the owner gave the go-ahead, and never rewritten. Null until they do,
+   * and it is the *only* record of that decision - which is why this client
+   * renders `APPROVED` as "waiting for your confirmation" rather than as done.
+   */
+  ownerGoAheadAt: string | null
+  platformApprovedAt: string | null
+  /**
+   * How many times this idea has been submitted to the platform, and when it was
+   * last locked. A resubmission after changes makes the next version rather than
+   * overwriting this one, so this is the number the platform report refers to.
+   */
+  platformVersion: number
+  platformLockedAt: string | null
+  /** Wording and the one next action for this viewer. See `IdeaState`. */
+  state: IdeaState
   category: IdeaCategory | null
   /**
    * The statuses *this viewer* may move this idea to right now, computed by the
@@ -199,11 +332,15 @@ export interface Idea {
    *   Never another reviewer's.
    */
   viewerCanStartReview: boolean
+  viewerCanStartOrganizationReview: boolean
   viewerActiveReviewId: string | null
 }
 
-/** The writable content of an idea. Mirrors the backend's `IdeaInput`. */
-export interface IdeaDraftInput {
+/**
+ * The writable content of an idea. Mirrors the backend's `IdeaInput`: an
+ * update writes the whole input, so a story answer left out is cleared.
+ */
+export interface IdeaDraftInput extends Partial<IdeaProblemStory> {
   title: string
   description: string
   categoryId?: string | null
@@ -237,13 +374,49 @@ export const IDEA_FIELDS = `
   updatedAt
   authorId
   organizationId
+  teamId
+  submissionContext
+  tenantName
+  ownerGoAheadAt
+  platformApprovedAt
+  platformVersion
+  platformLockedAt
+  state {
+    status
+    label
+    shortLabel
+    tone
+    stage
+    primaryAction
+    primaryActionLabel
+    isLocked
+    isTerminal
+    stageIndex
+    stageCount
+  }
   availableTransitions
   discussionOpen
   voteCount
   viewerHasVoted
   viewerCanStartReview
+  viewerCanStartOrganizationReview
   viewerActiveReviewId
   category { ${CATEGORY_FIELDS} }
+  currentProcess
+  currentTools
+  currentToolsOther
+  performedBy
+  affectedPeople
+  frequency
+  timeRequired
+  peopleInvolved
+  impacts
+  impactDetails
+  improvementGoal
+  desiredOutcome
+  easierForPeople
+  expectedBenefit
+  importantConsiderations
 `
 
 const CREATE_IDEA_MUTATION = `
@@ -329,30 +502,82 @@ const CATEGORIES_QUERY = `
 `
 
 /**
+ * Where a new idea is being put forward, and by whom it will be reviewed.
+ *
+ * One argument carrying all three rather than three optional ones, because they
+ * are not independent: an individual submission names no tenant at all, a team
+ * submission names a team and no organization, and an organization submission
+ * names an organization and no team. Three optional fields would let a caller
+ * send an organization *and* a team and be refused by the server for a mistake
+ * the type could not prevent.
+ */
+export interface SubmissionTarget {
+  context: SubmissionContext
+  organizationId?: string | null
+  teamId?: string | null
+}
+/** The problem-story keys of `IdeaInput`, in the backend's order. */
+const STORY_INPUT_KEYS = [
+  'currentProcess',
+  'currentTools',
+  'currentToolsOther',
+  'performedBy',
+  'affectedPeople',
+  'frequency',
+  'timeRequired',
+  'peopleInvolved',
+  'impacts',
+  'impactDetails',
+  'improvementGoal',
+  'desiredOutcome',
+  'easierForPeople',
+  'expectedBenefit',
+  'importantConsiderations',
+] as const satisfies ReadonlyArray<keyof IdeaProblemStory>
+
+/**
+ * The GraphQL `IdeaInput` for `input`: the four core fields always, and each
+ * story answer the caller supplied. Built key by key from a fixed list, so
+ * nothing the caller's object happens to carry beyond the input's own fields
+ * - an id, an author, a status - can ride along into the request.
+ */
+function ideaInputVariables(input: IdeaDraftInput): Record<string, unknown> {
+  const variables: Record<string, unknown> = {
+    title: input.title,
+    description: input.description,
+    categoryId: input.categoryId ?? null,
+    visibility: input.visibility ?? null,
+  }
+  for (const key of STORY_INPUT_KEYS) {
+    if (input[key] !== undefined) variables[key] = input[key]
+  }
+  return variables
+}
+
+/**
  * File a new idea as a draft.
  *
- * `organizationId` is a request to act *in* that organization, not a value to
- * write onto the idea: the server authorizes it and then uses it, and the
- * author is always the signed-in user. Neither can be set from here, which is
- * why neither appears in the arguments.
+ * The tenant ids are a request to act *in* that tenant, not a value to write
+ * onto the idea: the server authorizes each one and then uses it, and the author
+ * is always the signed-in user. Neither can be set from here, which is why
+ * neither appears in the arguments. Nulls are dropped rather than sent as null,
+ * because the backend distinguishes "no tenant" (absent) from "an empty tenant"
+ * and only the first is a thing a client can mean.
  */
 export async function createIdeaRequest(
-  organizationId: string,
+  target: SubmissionTarget,
   input: IdeaDraftInput,
 ): Promise<IdeaMutationResult> {
+  const variables: Record<string, unknown> = {
+    submissionContext: target.context,
+    idea: ideaInputVariables(input),
+  }
+  if (target.organizationId) variables.organizationId = target.organizationId
+  if (target.teamId) variables.teamId = target.teamId
+
   const data = await graphqlClient.request<{ createIdea: IdeaMutationResult }>(
     CREATE_IDEA_MUTATION,
-    {
-      input: {
-        organizationId,
-        idea: {
-          title: input.title,
-          description: input.description,
-          categoryId: input.categoryId ?? null,
-          visibility: input.visibility ?? null,
-        },
-      },
-    },
+    { input: variables },
   )
   return data.createIdea
 }
@@ -367,12 +592,7 @@ export async function updateIdeaRequest(
     {
       input: {
         id,
-        idea: {
-          title: input.title,
-          description: input.description,
-          categoryId: input.categoryId ?? null,
-          visibility: input.visibility ?? null,
-        },
+        idea: ideaInputVariables(input),
       },
     },
   )
@@ -389,6 +609,62 @@ export async function submitIdeaRequest(id: string): Promise<IdeaMutationResult>
     { id },
   )
   return data.submitIdea
+}
+
+const SUBMIT_TO_PLATFORM_MUTATION = `
+  mutation SubmitToPlatform($id: ID!) {
+    submitToPlatform(id: $id) {
+      success
+      message
+      field
+      idea { ${IDEA_FIELDS} }
+    }
+  }
+`
+
+const GIVE_GO_AHEAD_MUTATION = `
+  mutation GiveGoAhead($id: ID!) {
+    giveGoAhead(id: $id) {
+      success
+      message
+      field
+      idea { ${IDEA_FIELDS} }
+    }
+  }
+`
+
+/**
+ * `ORGANIZATION_CONFIRMED -> SUBMITTED`: the **author** puts an idea the
+ * organization has confirmed in front of the platform.
+ *
+ * A separate mutation from `submitIdea` because it is a genuinely different act
+ * rather than a variant of the same one, and because collapsing the two is how
+ * "an organization submitted its member's idea" happens.
+ */
+export async function submitToPlatformRequest(id: string): Promise<IdeaMutationResult> {
+  const data = await graphqlClient.request<{ submitToPlatform: IdeaMutationResult }>(
+    SUBMIT_TO_PLATFORM_MUTATION,
+    { id },
+  )
+  return data.submitToPlatform
+}
+
+/**
+ * `APPROVED -> READY_FOR_IMPLEMENTATION`: the author's explicit go-ahead.
+ *
+ * **Platform approval is not this.** The report exists; the idea is `APPROVED`;
+ * and until the person who wrote it decides to proceed it is nobody's business
+ * to proceed. So this is a distinct mutation with a distinct button, and the UI
+ * must not offer it to an organization Owner or a platform reviewer - the server
+ * refuses both, and the flag that decides whether to draw it is the author's own
+ * authorship.
+ */
+export async function giveGoAheadRequest(id: string): Promise<IdeaMutationResult> {
+  const data = await graphqlClient.request<{ giveGoAhead: IdeaMutationResult }>(
+    GIVE_GO_AHEAD_MUTATION,
+    { id },
+  )
+  return data.giveGoAhead
 }
 
 /**
@@ -511,6 +787,14 @@ export interface IdeaComment {
   ideaId: string
   authorId: string
   content: string
+  /**
+   * The comment this one answers, or `null` for a top-level comment.
+   *
+   * The server's own field, carried through rather than derived here: a thread
+   * is one level deep, so grouping the page a query already returned by this one
+   * value is enough, and a client that guessed the shape would be guessing.
+   */
+  parentId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -534,6 +818,7 @@ const COMMENT_FIELDS = `
   ideaId
   authorId
   content
+  parentId
   createdAt
   updatedAt
 `
@@ -599,16 +884,32 @@ export async function commentsRequest(
 }
 
 /**
- * Post a comment. The author is the signed-in user and the idea is authorized
- * by the server, so neither is an argument here.
+ * Post a comment, or a reply to one.
+ *
+ * The author is the signed-in user and the idea is authorized by the server, so
+ * neither is an argument here. `parentId` is the one thing a caller may name
+ * about the *shape* of its comment, and only to answer a comment rather than to
+ * open a new one - the server checks it is readable, on this idea, and not
+ * itself a reply.
+ *
+ * Omitted rather than sent as `null` when there is no parent, for the same
+ * reason the discovery filters are: an explicit `null` is a different request
+ * from an absent field.
  */
 export async function createCommentRequest(
   ideaId: string,
   content: string,
+  parentId?: string | null,
 ): Promise<CommentMutationResult> {
   const data = await graphqlClient.request<{ createComment: CommentMutationResult }>(
     CREATE_COMMENT_MUTATION,
-    { input: { ideaId, comment: { content } } },
+    {
+      input: {
+        ideaId,
+        comment: { content },
+        ...(parentId ? { parentId } : {}),
+      },
+    },
   )
   return data.createComment
 }
@@ -865,11 +1166,11 @@ export async function deleteAttachmentRequest(id: string): Promise<AttachmentMut
  * every call rather than captured once, for the same reason `graphqlClient`'s
  * `headers` is a function.
  *
- * Never throws for a business refusal - a `success: false` response is
- * returned like any other payload here, so a caller handles it the same way
- * it handles a refused GraphQL mutation. A thrown error means the request
- * never reached a decision (the network, the server being down), which is a
- * different fact.
+ * Never throws for anything the server answered - a refusal, and an answer this
+ * code does not recognise, both come back as `success: false` with a message, so
+ * a caller handles them the way it handles a refused GraphQL mutation. Only a
+ * rejected `fetch` throws, and that is the one case that really is a transport
+ * failure: the request never reached a decision.
  */
 export async function uploadAttachmentRequest(
   ideaId: string,
@@ -886,8 +1187,57 @@ export async function uploadAttachmentRequest(
     body,
   })
 
-  const payload = (await response.json()) as UploadAttachmentResult
-  return payload
+  return readUploadResponse(response)
+}
+
+/**
+ * The upload's answer, whatever shape it arrives in.
+ *
+ * **`response.json()` on its own is what used to hide this.** Every failure that
+ * is not one of our JSON payloads - a proxy's 502, Django's own 404/405/500
+ * page, a body nobody wrote - is not JSON, so the parse rejected, the caller saw
+ * a thrown error, and the person uploading was told "we could not reach the
+ * server" about a server that was answering perfectly well. The status code is
+ * the one fact that is always there, so it is read first and reported.
+ *
+ * The body is read as text and parsed by hand rather than with `response.json()`
+ * so that a malformed payload is a *reported* failure instead of an exception:
+ * the same outcome, without the one message that is wrong whenever the network
+ * was fine.
+ */
+async function readUploadResponse(response: Response): Promise<UploadAttachmentResult> {
+  const raw = await response.text()
+
+  let payload: unknown = null
+  try {
+    payload = raw === '' ? null : JSON.parse(raw)
+  } catch {
+    payload = null
+  }
+
+  if (payload !== null && typeof payload === 'object') {
+    const answer = payload as Partial<UploadAttachmentResult>
+    if (typeof answer.message === 'string') {
+      return {
+        success: answer.success === true && answer.attachment !== undefined,
+        message: answer.message,
+        field: typeof answer.field === 'string' ? answer.field : null,
+        attachment: answer.attachment ?? null,
+      }
+    }
+  }
+
+  return {
+    success: false,
+    // The status, and nothing guessed. Which layer answered - the application,
+    // a proxy, a gateway - is not knowable from here, and a message that claimed
+    // to know would be the second guess in a row.
+    message: `The server could not accept this file (HTTP ${response.status}${
+      response.statusText ? ` ${response.statusText}` : ''
+    }).`,
+    field: null,
+    attachment: null,
+  }
 }
 
 /**

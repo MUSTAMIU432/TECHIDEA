@@ -54,6 +54,12 @@ export function ReviewHistory({ ideaId, viewerId }: { ideaId: string; viewerId: 
               {viewerId !== null && review.reviewerId === viewerId ? ' · by you' : ''}
             </p>
           </div>
+          {review.decision === 'WITHDRAWN' && (
+            <p className="mt-2 text-sm text-gray-500">
+              The reviewer could no longer review this idea, so another reviewer took it over in the
+              next round. No decision was made in this round.
+            </p>
+          )}
           {review.feedback && (
             <p className="mt-2 whitespace-pre-line text-sm leading-6 text-gray-700">
               {review.feedback}
