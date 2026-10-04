@@ -45,7 +45,7 @@ Organization                       User
 | ------ | ----- | ----- |
 | `Category` | `ideas_category` | Platform-wide, flat, reusable. Not tenant-scoped. |
 | `Idea` | `ideas_idea` | The submission, and the tenant boundary. |
-| `Comment` | `ideas_comment` | One idea, one authenticated author. Not threaded. |
+| `Comment` | `ideas_comment` | One idea, one authenticated author. A reply names its parent; one level deep. |
 | `Vote` | `ideas_vote` | One row per (user, idea). No value, no downvotes. |
 | `Attachment` | `ideas_attachment` | Metadata only; the bytes live in object storage. |
 
@@ -54,6 +54,107 @@ organizations' ideas comparable to each other, which is the input a future
 cross-tenant discovery or matching feature needs. An organization-scoped
 category would silently make "customer support" in one company unrelated to
 "customer support" in another.
+
+### The problem story (guided intake form)
+
+An idea is written by the person who has the problem - a student, a member
+of staff, a manager, a customer - not by a developer. So beyond `title` and
+`description` (the problem in the author's own words), `Idea` carries the
+answers to a short, plain-language interview about the problem. None of it
+asks about technology: the author says what happens and what better would
+look like, and review, requirements and later stages decide how.
+
+| Question (as the form asks it) | Column | Type |
+| --- | --- | --- |
+| How do you currently handle this? | `current_process` | text |
+| What do you currently use to handle this work? | `current_tools` (+ `current_tools_other`) | list of `Idea.CurrentTool` (+ ≤200 chars) |
+| Who is usually responsible for doing this? | `performed_by` | ≤300 chars |
+| Who is affected when this problem happens? | `affected_people` | ≤300 chars |
+| How often does this happen? | `frequency` | `Idea.Frequency`, blank = not answered |
+| Approximately how much time does this work take? | `time_required` | ≤120 chars, free text ("several days") |
+| Approximately how many people are involved? | `people_involved` | positive integer, null = not answered |
+| What happens because of the problem? | `impacts` (+ `impact_details`) | list of `Idea.Impact` (+ text) |
+| What would you like to be different? | `improvement_goal` | text |
+| If the problem were solved, what would you like to happen? | `desired_outcome` | text |
+| What should people be able to do more easily? | `easier_for_people` | text |
+| How would you know that this problem has been solved? | `expected_benefit` | text |
+| Is there anything important we should know? | `important_considerations` | text |
+
+Design decisions:
+
+- **One column per question, not a JSON blob**, so each answer can be read,
+  filtered and later assessed on its own. The two multi-selects are
+  PostgreSQL arrays of enum codes, stored de-duplicated in the vocabulary's
+  own order, and - like `status` and `visibility` - every closed vocabulary
+  has a CHECK constraint derived from the same tuple as its `TextChoices`.
+- **All optional.** A draft needs only a title. The submission rule is
+  unchanged - title, description of at least 20 characters, a category, and a
+  visibility a reviewer can read - so the story helps without gatekeeping.
+- **Shape-only validation** in `ideas.services`: known values, sane bounds
+  (long answers ≤ `MAX_STORY_ANSWER_LENGTH` = 5000, ≤ 1,000,000 people),
+  refused per field rather than truncated.
+- **`expected_benefit` is the existing column**, now written: "what would be
+  better once it is solved" is exactly the benefit the `expected_benefit`
+  review criterion assesses. `problem_statement` stays unwritten (it would
+  duplicate `description`) and `proposed_solution` is **deliberately never
+  asked of the author**.
+- **Same rules as all content.** Written only through `create_idea` /
+  `update_idea` (author, active member, editable status); read through the
+  same visibility-filtered selectors as `description`. An update writes the
+  whole input, so an omitted answer is cleared - the form always sends every
+  field.
+- `IDEA_STORY_FIELDS` lists the columns once; the review snapshot
+  (`reviews.services._submission_snapshot`, key `story`) uses it so a
+  reviewer's record of what they assessed includes every answer.
+
+The frontend (`IdeaForm`) asks these over eight steps - the problem, what
+happens today, the impact, what should improve, how you would know it is
+solved, anything important, category & visibility, supporting documents -
+with every step reachable at any time and "Save draft" on each. Supporting
+documents for a new idea are held in the form and uploaded through the
+existing attachment endpoint straight after the draft is created, before it
+is submitted; there is no second upload path.
+
+### Development categories (temporary seed)
+
+Until category management in Django Admin is built, a fresh database has no
+categories - and an idea cannot be submitted without one. For local
+development and end-to-end testing there is a **bootstrap seed**, and only
+that:
+
+```bash
+cd backend
+python manage.py seed_dev_categories
+```
+
+It creates twelve sample categories (Finance, Education, Human Resources,
+Operations, Information Technology, Customer Service, Healthcare, Procurement,
+Logistics, Government & Public Services, Sales & Marketing, Other) with stable
+slugs, from `ideas/dev_categories.py`.
+
+- **Same storage.** They are ordinary `Category` rows, served by the existing
+  `categories` query. There is no second list: not in the frontend, not in a
+  fixture, not in a setting.
+- **Additive and idempotent.** A category is created only when neither its
+  slug nor its name is taken. Existing rows - seeded or made by an
+  administrator - are never updated, reactivated or deleted, so re-running it
+  is always safe.
+- **Development only.** The command refuses to run with `DEBUG` off unless
+  given `--allow-non-debug`, for a deliberately seeded test database.
+- **Not the taxonomy.** Nothing may branch on these names or slugs. The
+  frontend renders whatever `id`, `name`, `slug` and `description` the query
+  returns (`IdeaForm.categories.test.tsx` uses invented categories to keep it
+  that way).
+
+The intended architecture, which the seed does not change:
+
+```
+Django Admin  ->  Category records  ->  GraphQL (categories)  ->  Idea Intake Form
+```
+
+The future Admin UI manages these same records - create, edit, activate,
+deactivate - and needs no frontend change. Once it exists, the seed can be
+deleted without touching anything that reads categories.
 
 Reverse accessors are named for what they are, not for symmetry:
 `organization.ideas`, `category.ideas`, `idea.comments`, `user.ideas`,
@@ -485,7 +586,7 @@ question about one is a question about the idea it hangs from.
 
 | Operation | Requires |
 | --------- | -------- |
-| `add_comment(user, idea_id, content)` | An active user who may **read** the idea, and an open discussion |
+| `add_comment(user, idea_id, content, parent_id=None)` | An active user who may **read** the idea, and an open discussion. With `parent_id`: a readable, top-level comment on that same idea |
 | `update_comment(user, comment_id, content)` | The **author** of the comment, and still being able to read its idea |
 | `delete_comment(user, comment_id, None)` | The **author** of the comment, and still being able to read its idea |
 
@@ -535,6 +636,36 @@ two comments written in the same instant would otherwise come back in an
 arbitrary order and a page boundary could show one twice and skip another.
 `Comment.Meta.ordering` is `['created_at']` alone, so the tie-break is stated in
 the selector.
+
+**Replies** are a nullable self-reference, `Comment.parent`, not a second table
+and not a `parent_id` string. Three rules, all of them refusals rather than
+repairs:
+
+- **One level.** `Comment.clean` refuses a parent that is itself a reply, so a
+  thread is a comment and its replies and there is no depth to store, bound or
+  render. A deeper thread would need a depth field, a recursive read, and a rule
+  about when to stop — and would read worse than the same conversation with the
+  replies one indent in.
+- **Same idea.** A reply is checked against the already-authorized idea, so a
+  comment cannot be quoted across from another idea's thread. `clean` repeats it
+  for the paths that do not go through the service.
+- **Readable by the caller.** `add_comment` resolves `parent_id` through the same
+  selector as every other comment read. Without it, a reply could hang off a
+  comment on a `PRIVATE` idea and its own text would be visible to people who
+  were never shown the thing it was about.
+
+`parent` is `CASCADE`, so deleting a comment takes its replies with it. The
+alternative — promoting a reply to top-level — would republish somebody's words
+as though they had been their own. The consequence, which is a rule and not an
+accident: an author can remove a whole thread by removing its first comment, and
+a reply to a reply does not exist.
+
+**Reading** is unaffected by all of this. `comments(ideaId)` still returns one
+chronological page; `parentId` on each comment is what lets a client group the
+page it already has. There is deliberately no nested `replies` selection: it
+would be a second fetch of rows already in that page and free to disagree with
+it. Because a page can begin mid-thread, a client must still be able to render a
+reply whose parent it has not loaded, rather than dropping it.
 
 **Paging** reuses `ideas/pagination.py` unchanged, including the default of 20
 and the maximum of 50: a discussion has no more reason to differ from the list
@@ -643,7 +774,7 @@ validate_content`). A renamed executable is caught by the second check even
 when the first would have let it through; a set of "dangerous" signatures
 (`MZ`, ELF, a shebang, Mach-O/Java) is refused for *every* extension,
 including ones with no signature of their own to check (CSV, TXT), as
-defense in depth. Size is capped by `ATTACHMENT_MAX_UPLOAD_BYTES` (10 MB by
+defense in depth. Size is capped by `ATTACHMENT_MAX_UPLOAD_BYTES` (50 MB by
 default), checked against the upload's own measured size, never a
 client-supplied header.
 
@@ -755,10 +886,11 @@ asked for category "abc" and received the unfiltered list would read that as
 
 **Search** is a case-insensitive substring match over `title` and
 `description` only, via `icontains`, which binds the term as a parameter.
-`problem_statement` and the other long-form fields are deliberately not
-searched: they are not exposed by the API, and searching a field the UI does
-not show would let a reader confirm the presence of a phrase in text they
-cannot otherwise see. Django escapes the pattern metacharacters, so a reader
+`problem_statement` and `proposed_solution` are deliberately not searched:
+they are not exposed by the API, and searching a field the UI does not show
+would let a reader confirm the presence of a phrase in text they cannot
+otherwise see. The problem-story answers are exposed but not yet searched -
+widening search to them is a product decision for later, not a side effect. Django escapes the pattern metacharacters, so a reader
 who types `%` searches for the character rather than matching everything.
 
 **Ordering** is `-created_at, -pk`. The tie-breaker is not decoration:
@@ -828,7 +960,7 @@ Intended operations:
 | `idea(id)` | `createIdea(input)` |
 | `ideas(filters)` | `updateIdea(input)` |
 | `organizationIdeas(organizationId, filters)` | `submitIdea(id)` |
-| `categories` | `addComment(input)` |
+| `categories` | `addComment(input)` — `parentId` makes it a reply |
 | `comments(ideaId)` | `updateComment(input)` / `deleteComment(id)` |
 | `attachments(ideaId)` / `attachment(id)` — implemented in S2-007 | `voteIdea(id)` / `removeVote(id)` — implemented in S2-006 |
 | | `deleteAttachment(id)` — implemented in S2-007 |

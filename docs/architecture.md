@@ -29,8 +29,11 @@ that a future React Native client can reuse backend contracts without a
 backend rewrite.
 
 Implemented: the application shell, routing, Tailwind, a shared GraphQL
-client, and an error boundary. Not implemented: React Query, feature
-modules, and any business UI. See
+client, an error boundary, and one feature module per business domain
+(`identity`, `organizations`, `ideas`, `reviews`, `teams`, `invitations`,
+`messaging`, `notifications`, `administration`) with their pages wired under
+`/app`. Not implemented: React Query - server state is fetched per feature with
+plain hooks, and no caching library is in use. See
 [Current Implementation Status](#current-implementation-status).
 
 ### Backend (target — foundation implemented)
@@ -54,13 +57,15 @@ Expected future domains:
 - audit
 
 Implemented: the Django project, split settings, the `graphql_api`
-infrastructure app (not a business domain), and four business domain apps —
-`identity`, `organizations`, `ideas` and `reviews` (models, reviewer
-eligibility, the review queue and history, starting and deciding reviews,
-resubmission after changes are requested, and the author's decision email,
-S3-002 to S3-006, the lifecycle audit trail `ideas.IdeaTransition`, S3-007,
-and the take-over of a stalled review and the reviewable-visibility rule for
-submission, S3-008). The rest are introduced incrementally in later sprints.
+infrastructure app (not a business domain), and nine business domain apps —
+`identity`, `organizations`, `ideas`, `reviews`, `administration`, `teams`,
+`invitations`, `messaging` and `notifications`. `identity`, `organizations`,
+`ideas` and `reviews` cover registration and sessions, tenants and roles, the
+idea lifecycle with its problem story and platform track, and review rounds from
+eligibility through decision (S3-002 to S3-008). `administration` is the platform
+console. `teams`, `invitations`, `messaging` and `notifications` are the
+collaboration set - see [`collaboration.md`](collaboration.md). The rest are
+introduced incrementally in later sprints.
 
 ### API (target — foundation implemented)
 
@@ -75,13 +80,20 @@ Implemented: the `/graphql/` endpoint with a foundation schema and the
 
 PostgreSQL, configured entirely through environment variables — no
 credentials committed to source control. Implemented via `DATABASE_URL`.
-`identity`, `organizations`, `ideas` and `reviews` own the business models
+`identity`, `organizations`, `ideas`, `reviews`, `administration`, `teams`,
+`invitations`, `messaging` and `notifications` own the business models
 and migrations; every other domain is still only Django's built-in tables.
 
 ### Asynchronous Processing (target — not yet implemented)
 
 Redis + Celery for background jobs (email, notifications, AI processing,
 analytics, scheduled tasks). Not present yet.
+
+Nothing is queued today, and that is a deliberate state rather than a missing
+piece: every mail and every notification is written synchronously inside
+`transaction.on_commit` by the domain that decided the event, wrapped so it
+cannot fail the decision. A queue is what makes retry and digesting possible, and
+neither is needed at this volume - see [Email](#email-target--implemented).
 
 Redis (or Memcached, or a database) *is* nevertheless required today for
 cache: the Google ID-token replay check and the authentication rate limits
@@ -368,17 +380,36 @@ than left to review:
 
 Not yet implemented: an authenticated "link this Google account to my
 existing session" flow (today's Google sign-in only ever authenticates or
-provisions - it never links to an existing account), member invitations, a
-role-management UI, logout-everywhere, and audit logging. See
+provisions - it never links to an existing account), a role-management UI,
+logout-everywhere, and member-activity audit logging. Member invitations exist
+(`invitations`, see [`collaboration.md`](collaboration.md)) and the
+administrative audit trail exists (`administration.AdminAuditEntry`). See
 [`SECURITY.md`](../SECURITY.md).
 
 ### Email (target — implemented)
 
-Outgoing transactional mail for the two emailed-link flows, and nothing
-else. The platform sends no other mail: no notifications, no digests, no
-marketing, and no queue. Everything below is `identity/email.py` (transport)
-plus `identity.services` (decisions) plus the settings that point them at an
-SMTP server.
+Outgoing transactional mail for the flows that carry a decision or a link, and
+nothing else. **No marketing, no digests and no queue.** There are four senders,
+each with the same contract - plain text, from `DEFAULT_FROM_EMAIL`, to the
+*stored* address, sent on `transaction.on_commit`, and **never raising** (a
+delivery failure is logged; the event that caused it is already committed and
+valid):
+
+| Sender | Message |
+| ------ | ------- |
+| `identity/email.py` | Password reset and account activation - the two emailed-link flows, whose body *is* a credential |
+| `reviews/notifications.py` | The author's review decision, on commit |
+| `invitations/email.py` | An invitation to an organization or a team, addressed to the address on the invitation |
+| `notifications/email.py` | "You have notifications waiting", once per delivery event, linking to `/app/notifications` |
+
+Every one of them keeps the **full content behind authentication**: the
+notification email says a review report is ready and links to it rather than
+reproducing the report, and the invitation names the tenant, the role and the
+inviter and nothing the recipient is not yet entitled to - an inbox is readable
+by more than its owner and outlives the account's access. Everything below is
+`identity/email.py` (transport, and the rules the other three follow) plus
+`identity.services` (decisions) plus the settings that point them at an SMTP
+server.
 
 **Transport.** Plain SMTP through `django.core.mail`, so moving to a hosted
 provider later is an `EMAIL_BACKEND` change rather than a rewrite. Plain
@@ -427,11 +458,21 @@ optionally scoped to an organization for tenant isolation. The
 Organization → Membership → User tier and its authorization model are
 implemented (S1-006/S1-007/S1-008) - see
 [Security](#security-target--partly-implemented) for the enforcement model
-and the one bootstrap exception. `ideas.Idea` is the first resource hung off
-an organization, and requires one on every row (S2-001), so there is no idea
-that exists outside a tenant. A Department tier is still absent:
-`Idea.visibility` reserves a `department` value, but nothing sets or filters
-on it until that tier exists - see
+and the one bootstrap exception.
+
+**An idea is no longer required to have one.** `Idea.submission_context` is now
+one of `INDIVIDUAL`, `TEAM` or `ORGANIZATION`, and only the `ORGANIZATION`
+context names an organization: an individual or team idea has no tenant to
+validate it and goes straight to the platform, which is the whole point of
+letting somebody with no organization put an idea forward. A `TEAM` idea names
+a `teams.Team`, which is a **collaboration boundary and not a tenant** - it
+validates nothing and cannot approve anything, and its roles are separate tables
+over the same `organizations.Permission` records for exactly that reason (see
+[`collaboration.md`](collaboration.md)). The two nullable tenant columns are
+constrained so that exactly the one the context names is set.
+
+A Department tier is still absent: `Idea.visibility` reserves a `department`
+value, but nothing sets or filters on it until that tier exists - see
 [`ideas-domain.md`](ideas-domain.md#visibility).
 
 ### Ideas (target — partly implemented)
@@ -444,24 +485,29 @@ S2-006 added voting, and S2-007 added attachments and their upload/download
 endpoints.
 
 **Authorization is Sprint 1's, unchanged.** `ideas` adds no permission code and
-no `permissions.py`. Filing an idea requires an *active membership* in the
-target organization, resolved by `organizations.authorization.get_membership`,
-and editing or submitting requires *authorship* on top of that. Both halves
-are needed and for different reasons: membership is whether a person may act
-in that tenant at all, and it is re-checked on every write so that leaving an
-organization takes the ability to write into it with you; authorship is who
-owns the content, and a colleague in the same organization may not rewrite it.
-An earlier idea that `idea.create` should be a permission code was rejected -
-the question is already answered, and a second answer would be free to drift
-from the first.
+no `permissions.py`. What an idea needs in order to be filed depends on its
+`submission_context`, and `ideas.services._resolve_context` proves a different
+thing in each branch: an `INDIVIDUAL` idea needs nothing beyond being an
+authenticated user filing their own, a `TEAM` idea needs an active *team*
+membership (`teams.authorization`, since the team is not a tenant and filing is
+not submitting), and an `ORGANIZATION` idea needs an active organization
+membership resolved by `organizations.authorization.get_membership`. Editing
+and submitting require *authorship* on top of that. Membership is re-checked on
+every write so that leaving takes the ability to write into that tenant with
+you; authorship is who owns the content, and a colleague may not rewrite it. An
+earlier idea that `idea.create` should be a permission code was rejected - the
+question is already answered per context, and a second answer would be free to
+drift from the first.
 
-**The client is never trusted with ownership or tenancy.** `organizationId` is
-an input to a *decision* - the server authorizes that organization and then
-uses it - and the author is always the authenticated user, read from the
-access token. Neither appears in any input type, so "file this as somebody
-else" and "move this to another tenant" are not operations the API has the
-vocabulary for. Refusals never distinguish *no such idea* from *not yours*,
-so none of these operations can be used to discover which idea ids are real.
+**The client is never trusted with ownership or tenancy.** `submissionContext`,
+`organizationId` and `teamId` are inputs to a *decision* - the server proves
+the caller belongs to whichever tenant the chosen context names, refuses a
+context that carries the other tenant's id, and stores exactly the tenants that
+context allows - and the author is always the authenticated user, read from the
+access token. No input can name an author, so "file this as somebody else" and
+"move this to another tenant" are not operations the API has the vocabulary for.
+Refusals never distinguish *no such idea* from *not yours*, so none of these
+operations can be used to discover which idea ids are real.
 
 **Reads live in `ideas/selectors.py`, and the filter is not optional.** Every
 read goes through a selector that has already applied tenancy and visibility,
@@ -517,12 +563,25 @@ longer permits its move.
 **Submitting ends editability, not the author's access.** A submitted idea is
 refused by `updateIdea` - by its own author, in its own organization - except
 in `CHANGES_REQUESTED`, where the author revises the content (not the
-visibility) and resubmits (S3-005). Only an `ORGANIZATION` or `PUBLIC` idea
-can be submitted, because a reviewer can only review what they can read
-(S3-008, [`reviews-domain.md`](reviews-domain.md) D-6); a `PRIVATE` draft
-stays private until its author widens it. Review is queue-based self-claim
-with no assignment entity; nothing acts on an idea once it reaches
-`AUTOMATION_PROPOSAL`.
+visibility) and resubmits (S3-005). A `PRIVATE` draft stays private until its
+author widens it, because a reviewer can only review what they can read
+(S3-008, [`reviews-domain.md`](reviews-domain.md) D-6).
+
+**The platform track is a second half of the lifecycle, not a second
+organization stage.** An `ORGANIZATION` idea is confirmed by its organization
+first (`startOrganizationReview` / `completeOrganizationReview`, which are the
+organization's own review and not the platform's); an `INDIVIDUAL` or `TEAM`
+idea has no organization to confirm it and enters the platform track directly. Both arrive
+at `SUBMITTED`, so nothing downstream has to ask which way an idea came, and a
+team can never be the thing that validates or approves. The submission the
+platform holds is frozen at that moment (`platform_locked_at`,
+`platform_version`), the author's own go-ahead (`giveGoAhead`) is a separate,
+explicit act that receiving the report never sets, and a platform reviewer is an
+account holding the platform-scoped `administration.review_platform_submissions`
+permission rather than an organization role - so an organization Owner is never
+a platform approver. The platform queue is self-claim, with `assignPlatformReviewer` /
+`releasePlatformReviewer` as the one exception; nothing acts on an idea once it
+reaches `AUTOMATION_PROPOSAL`.
 
 See [`ideas-domain.md`](ideas-domain.md) for the entity design and the
 reasoning behind each decision above.
@@ -556,7 +615,55 @@ permission and Reviewer role, the review queue, starting and deciding a
 review with five fixed criteria, changes requested and resubmission,
 approval, the author's decision email, the `ideas.IdeaTransition` lifecycle
 audit trail, and the take-over of a review whose reviewer lost eligibility.
-Every other business domain is not started.
+
+The `administration` app adds the internal platform administration console
+(`/app/admin`): platform-scoped Django permissions kept separate from
+organization roles, cross-tenant read-only views of users, organizations, ideas,
+reviews and decisions, a small set of audited operations (account activation,
+organization roles, categories) and an append-only administrative audit trail.
+See [`administration.md`](administration.md).
+
+The collaboration set follows: `teams` (a collaboration boundary, not a tenant,
+with its own roles over the same permission codes), `invitations` (the only way
+anybody joins an organization or a team - bound to an address, single-use,
+expiring, revocable, digest-only token), `messaging` (private messages between
+named participants, never comments) and `notifications` (what the platform has
+decided, in-app plus email from one event). The idea submission contexts
+(`INDIVIDUAL` / `TEAM` / `ORGANIZATION`), the platform review track with its
+frozen submission versions and the author's go-ahead, the guided non-technical
+intake form and the developer handoff categories are also in. See
+[`collaboration.md`](collaboration.md) and
+[`ideas-domain.md`](ideas-domain.md). Opportunities, proposals, developers,
+projects, tasks and impact are not started.
+
+**`ideas-domain.md` and `reviews-domain.md` predate the platform track.** They
+describe the organization-only lifecycle and do not yet cover
+`submission_context`, `READY_FOR_IMPLEMENTATION`, submission versions, the
+author's go-ahead, the developer handoff or the platform report; the sections
+above and the code are authoritative for those.
+
+### Implemented (Collaboration)
+
+| Area | What exists |
+| ---- | ----------- |
+| Teams | `teams` app: `Team`, `TeamMembership`, and per-team roles over the **same** `organizations.Permission` codes; `createTeam`/`addTeamMember`/`leaveTeam`, `teams`/`team`/`teamMembers`. A team needs no organization, holds no review or approval permission, and its roles are separate tables because `organizations.Role` requires a tenant |
+| Invitations | `invitations.Invitation` for both scopes: address-bound, single-use via a conditional `UPDATE`, expiring, revocable, token stored as a SHA-256 digest; `sendOrganizationInvitation`/`sendTeamInvitation`/`revokeInvitation`/`acceptInvitation`, `invitationDetails` usable while signed out. **The only writer of a membership** |
+| Messaging | `messaging` app: `MessageThread`/`MessageParticipant`/`Message`; `messageThreads`/`messageThread`/`threadMessages`/`unreadThreadCount`, `startMessageThread`/`postMessage`/`markThreadRead`. Access is the participant list, so there is no "messages for idea X" query and no `message(id)` |
+| Notifications | `notifications.Notification` with 13 fixed kinds and a `DECISION_KINDS` subset that alone may link a report; `notifications`/`unreadNotificationCount`/`hasUnreadNotifications`, `markNotificationRead`/`markAllNotificationsRead`. One business event, two channels, both on commit, neither able to fail the decision |
+| Email | Four senders, one contract: `identity` (reset, activation), `reviews` (author's decision), `invitations`, `notifications`. Plain text, stored address, after commit, never raising, full content always behind authentication |
+| Frontend | `/app/teams`, `/app/teams/:teamId`, `/app/messages`, `/app/messages/:threadId`, `/app/notifications`, `/invitations/accept`; Teams and Messages in the app header, Messages with an unread badge from its own one-field query |
+| Not in the UI | An organization invitation panel, and a compose screen for a new private message. Both are implemented and authorized on the server; no component calls them |
+
+### Implemented (Platform administration)
+
+| Area | What exists |
+| ---- | ----------- |
+| Access model | `administration.*` Django permissions (`access_console`, `inspect_idea_content`, `manage_user_accounts`, `manage_organization_roles`, `manage_categories`), the "Platform administrators" group via `grant_platform_admin`; organization roles never imply them |
+| Console reads | `adminOverview`, `adminUsers`/`adminUser`, `adminOrganizations`/`adminOrganization`/`adminOrganizationMembers`, `adminIdeas`/`adminIdea`, `adminReviews`/`adminReview`, `adminCategories`, `adminAuditEntries`, `adminCapabilities`; server-side paging and filters, content redaction without `inspect_idea_content` |
+| Console operations | `adminSetUserActive`, `adminAssignMembershipRole`/`adminRemoveMembershipRole` (through the organization domain's own rules), `adminCreateCategory`/`adminUpdateCategory`/`adminSetCategoryActive` |
+| Audit | Append-only `administration.AdminAuditEntry` for every console operation, rule refusal of account/role changes, evidence download and admin grant |
+| Evidence | `GET /administration/attachments/<id>/download/`, permission-gated and audited, sharing the safe-download response with the ideas endpoint |
+| Frontend | `/app/admin` (lazy-loaded), "Admin" nav link offered from `adminCapabilities` |
 
 ### Implemented (Sprint 2)
 
@@ -579,7 +686,7 @@ Every other business domain is not started.
 | Lifecycle audit | Append-only `ideas.IdeaTransition` per status change; `ideaTransitions` (read-only) | S3-007 |
 | Integration and security | Take-over of a stalled review (`WITHDRAWN` + next round, D-2); `PRIVATE`/`DEPARTMENT` ideas refused at submission (D-6); two-tenant, race and end-to-end suites | S3-008 |
 | Categories and discovery | `list_discoverable_ideas` as the single read path, with `IdeaFilters` (category, status, search) that can only **narrow** what the visibility filter allowed, and `ideas/pagination.py` for bounded offset paging. `ideas`/`organizationIdeas` return an `IdeaPage`; there is no `visibility` or `authorId` filter to send | S2-004 |
-| Comments and discussion | `add_comment`/`update_comment`/`delete_comment` behind a `comments(ideaId)` query that filters by the idea's own visibility, so a comment is never more readable than the idea it is on. Edit and delete are author-only, with no elevated path and no new permission code | S2-005 |
+| Comments and discussion | `add_comment`/`update_comment`/`delete_comment` behind a `comments(ideaId)` query that filters by the idea's own visibility, so a comment is never more readable than the idea it is on. Edit and delete are author-only, with no elevated path and no new permission code. `add_comment` takes an optional `parent_id` for a **reply**, resolved through the same readable-comment selector and limited to one level by `Comment.clean`; `parentId` reports it and there is no nested `replies` selection, so grouping happens on the page a query already returned | S2-005 |
 | Voting & engagement | One vote per user per idea, enforced by a service check *and* the `unique_vote_per_user_idea` constraint. Voting is gated on idea visibility only, with no lifecycle condition - a vote is interest in the idea, not participation in a review. `voteCount`/`viewerHasVoted` are annotated onto the discovery page, so a page of ideas costs no extra queries | S2-006 |
 | Attachments & supporting evidence | `upload_attachment`/`delete_attachment`, gated on idea **authorship** (not merely readability) with no lifecycle condition. The storage key, recorded content type and display filename are all server-derived, never client-supplied; file type is checked by an extension allow-list *and* the file's own leading bytes. Binary transfer is HTTP (`ideas/views.py`), never GraphQL; metadata, listing and deletion are GraphQL (`attachments`/`attachment`/`deleteAttachment`) | S2-007 |
 | Idea authorization | An active membership in the idea's organization to file or act on an idea, **plus** authorship to edit or submit one or to add/remove its attachments. No `ideas/permissions.py` and no Ideas permission code - see [Ideas](#ideas-target--partly-implemented) | S2-002 |
@@ -640,8 +747,8 @@ How these are used day to day: [`development.md`](development.md),
   (D-11), listing stalled reviews in the review queue, and a frontend view
   of the lifecycle history (`ideaTransitions` is available to the API only)
 - A ranking or scoring of the votes that now exist, any "who voted" listing,
-  threaded comment replies, comment moderation and soft delete, and rate
-  limiting — this project has no throttling mechanism to extend. Also: an
+  comment replies **deeper than one level**, comment moderation and soft delete,
+  and rate limiting — this project has no throttling mechanism to extend. Also: an
   actual object-storage bucket for attachments (S2-007 implemented the
   operations against Django's filesystem backend; see
   [Storage](#storage-target--filesystem-today-object-storage-later)),
@@ -655,8 +762,14 @@ How these are used day to day: [`development.md`](development.md),
   ever authenticates or provisions a *new* account - it never links to an
   existing one, by verified email or otherwise)
 - The Department tier of multi-tenancy (`Idea.visibility` reserves a
-  `department` value but nothing sets or filters on it), member invitations,
-  a role-management or permission-editor UI, and logout-everywhere
+  `department` value but nothing sets or filters on it), a role-management or
+  permission-editor UI, and logout-everywhere
+- An organization invitation panel in the UI: `sendOrganizationInvitation` and
+  `organizationInvitations` are implemented and authorized, but no component
+  renders them yet, so an organization member can be invited over GraphQL only
+- A compose screen for private messages: `startMessageThread` exists and is
+  authorized, but no component calls it, so a conversation can only be started
+  over GraphQL today
 - Redis + Celery background processing
 - AI gateway
 - The object storage bucket itself, and a presigned/signed-URL upload or
@@ -664,8 +777,10 @@ How these are used day to day: [`development.md`](development.md),
   the upload/download operations, routed through this server against
   Django's filesystem storage backend; see
   [Storage](#storage-target--filesystem-today-object-storage-later))
-- A general audit log (the lifecycle trail `ideas.IdeaTransition` is the
-  only audit record; account and organization events are not recorded)
+- A general audit log. The idea lifecycle trail (`ideas.IdeaTransition`) and
+  the administrative trail (`administration.AdminAuditEntry`) exist; events
+  members perform themselves (sign-in, organization role changes made by an
+  Owner) are not recorded
 - React Query in the frontend
 - Deployment automation and any deployed environment (development, staging,
   production)
@@ -680,6 +795,12 @@ automation-platform/
 │   ├── identity/             # business domain: accounts, sessions, external identities, emailed links
 │   ├── organizations/        # business domain: organizations, memberships, roles, permissions
 │   ├── ideas/                # business domain: ideas, categories, comments, votes, attachments
+│   ├── reviews/              # business domain: review rounds, criteria, decisions
+│   ├── teams/                # business domain: collaboration boundaries (not tenants), their own roles
+│   ├── invitations/          # business domain: the only way a membership is created
+│   ├── messaging/            # business domain: private messages between named participants
+│   ├── notifications/        # business domain: what the platform decided, in-app and by email
+│   ├── administration/       # platform administration console: permissions, audit, admin reads/operations
 │   ├── tests/                # cross-cutting pytest suite (settings, security, integration)
 │   ├── manage.py
 │   ├── requirements.txt
@@ -702,6 +823,9 @@ automation-platform/
 │   ├── development.md
 │   ├── testing.md
 │   ├── ideas-domain.md       # business domain: ideas & problem submission
+│   ├── reviews-domain.md     # business domain: review & validation
+│   ├── administration.md     # platform administration console
+│   ├── collaboration.md     # teams, invitations, messaging and notifications
 │   └── git-workflow.md
 ├── infrastructure/           # Placeholder: no infrastructure implemented yet
 ├── scripts/                  # Placeholder: no scripts yet

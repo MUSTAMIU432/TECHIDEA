@@ -195,11 +195,18 @@ through the visibility filter, so **a reviewer cannot act on a `PRIVATE` or
 `title`, `description` (≥ 20 chars to submit), `category` (required to
 submit), `visibility`, `status`, `submitted_at`, `author`, `organization`.
 
-`problem_statement`, `proposed_solution` and `expected_benefit` exist on the
-model but are **not** writable through `IdeaInput` and **not** exposed on
-`IdeaType`. They are blank on every idea created through the API. Review
-criteria must not depend on them until they are wired (not an S3 task unless
-[D-8](#20-open-product-decisions) says otherwise).
+`problem_statement` and `proposed_solution` exist on the model but are
+**not** writable through `IdeaInput` and **not** exposed on `IdeaType`.
+
+**Update (guided intake form):** `expected_benefit` is now written by the
+intake form ("How would you know that this problem has been solved?"),
+alongside the rest of the problem story - what happens today, who does it and
+who it affects, how often and how long, what goes wrong, and what should
+improve (see `docs/ideas-domain.md`, "The problem story"). All of it is
+optional, exposed on `IdeaType`, shown to reviewers in the review workspace,
+and frozen into `Review.submission_snapshot["story"]`. The submission rule is
+unchanged, so criteria may use these answers as context but must not assume
+any of them is present.
 
 ### 1.6 Comments and attachments
 

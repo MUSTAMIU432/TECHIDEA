@@ -6,6 +6,267 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — Collaboration: teams, invitations, private messages and notifications
+
+Four small apps that answer four questions about the same thing - who works with
+you, how they got there, how you talk to them, and what the platform has told
+you. New [`docs/collaboration.md`](docs/collaboration.md).
+
+- **A team is a collaboration boundary, not a tenant.** The `teams` app has its
+  own `Team`, `TeamMembership`, `TeamRole`, `TeamRolePermission` and
+  `TeamMembershipRole`, with two seeded system roles per team (Owner, Member)
+  holding five codes: `team.view`, `team.update`, `team.members.view`,
+  `team.members.manage`, `team.ideas.submit`. The roles are **separate tables
+  over the same `organizations.Permission` records**, because
+  `organizations.Role` requires an organization and a team deliberately has
+  none - pointing at it would mean inventing a fake tenant that could be joined
+  and filtered for. So a team role cannot hold a review or approval permission:
+  no such code exists for it to hold. `createTeam` needs no organization, which
+  is the case the app exists for.
+- **Team operations.** `createTeam`, `addTeamMember`, `leaveTeam`; `teams`,
+  `team(id)` and `teamMembers`. `team(id)` answers null for a team you are not in
+  *and* for one that does not exist, so a team id cannot discover teams. Leaving
+  is refused while you are the only member - a team nobody can administer cannot
+  be repaired from the interface - and the team and its ideas stay as they are.
+- **Accepting an invitation is the only thing that creates a membership.** One
+  `invitations.Invitation` table serves organizations and teams, because the
+  security is identical: bound to an email address (a signed-in account with a
+  different address is refused, not switched), single-use (claimed with a
+  conditional `UPDATE`, so two clicks in two tabs make one membership), expiring,
+  revocable, and with only the SHA-256 digest of a 32-byte `secrets` token
+  stored. `role_slug` is resolved *at acceptance*, so a role the tenant has since
+  dropped fails loudly instead of granting the wrong permissions. Owner is not an
+  invitable **organization** role - that is a role change, and letting an
+  invitation create one would bypass the last-holder protection.
+- **Private messages are not comments.** `messaging` has `MessageThread`,
+  `MessageParticipant` and `Message`, and access comes from the participant
+  list, so there is no "messages for idea X" query and no `message(id)` field:
+  somebody who can read an idea cannot see that two of its readers are talking
+  about it. `idea` on a thread is context, never access - the creator must be
+  able to read it, and the recipients need not be. `startMessageThread`
+  continues an existing thread about the same idea rather than opening a second
+  one, and refuses a recipient id that does not resolve instead of silently
+  dropping them. The read position is per participant.
+- **Notifications are the platform speaking.** `notifications.Notification` has
+  13 fixed kinds, and `DECISION_KINDS` - the subset that is about a decision
+  rather than a queue - is the only thing that may render a review report link,
+  so a "somebody is waiting for you" nudge cannot point at an approval. One
+  business event, two channels: `deliver` writes the row and registers the email
+  from the same call, both on `transaction.on_commit`, the write wrapped so a
+  failure is logged, and the send never raising. `body` is bounded to 500
+  characters and carries no report contents - the email links to a page that
+  requires authentication. `notifications`/`unreadNotificationCount`,
+  `markNotificationRead`, `markAllNotificationsRead`.
+- **Email now has four senders, one contract.** `identity` (reset, activation),
+  `reviews` (the author's decision), `invitations` and `notifications`: plain
+  text, to the stored address, after commit, never raising, full content always
+  behind authentication. The invitation email is addressed to the address *on the
+  invitation* and contains nothing the recipient is not yet entitled to.
+- **Frontend.** `/app/teams` and `/app/teams/:teamId` (roster, leave,
+  invitations, and adding a colleague for the owner), `/app/messages` and
+  `/app/messages/:threadId`, `/app/notifications` with a bell in the app chrome,
+  and `/invitations/accept` - a **top-level** route, not an `/app` child,
+  because the recipient may have no account yet.
+- **Not in the UI, on purpose and recorded as a gap.** An organization
+  invitation panel and a compose screen for a new private message: both are
+  implemented and authorized on the server and the client has the requests, but
+  no component calls them. A people-picker needs a people directory, and this
+  API has none.
+
+### Added — Three ways to file an idea, and a platform that decides
+
+- **An organization is optional.** `Idea.submission_context` is now `INDIVIDUAL`,
+  `TEAM` or `ORGANIZATION` (migrations `ideas/0005`-`0006`), and only the
+  organization context names an organization. `ideas.services._resolve_context`
+  proves a different thing per branch - nothing beyond being an authenticated
+  user, an active *team* membership, or an active organization membership - and
+  refuses a context carrying the other tenant's id, so an individual idea cannot
+  be quietly filed for an organization. `INDIVIDUAL` and `TEAM` ideas go straight
+  to the platform, which is the point of letting somebody with no tenant put an
+  idea forward.
+- **The submission the platform holds is frozen.** Migration `ideas/0005` adds
+  `IdeaSubmissionVersion`; `ideas/versions.py` copies the content into one inside
+  the transaction that moves the idea to `SUBMITTED`, so "submitted" without a
+  version cannot commit. Answering feedback edits the working copy and produces
+  version n+1 beside version n - nothing is overwritten, and an old round's
+  review still describes the submission it read. `platform_locked_at` and
+  `platform_version` report the freeze rather than leaving the client to infer
+  it.
+- **Platform approval is not the owner's go-ahead.** `reviews/0003` adds
+  `Review.scope`, the per-scope rounds and `PlatformReviewReport`; the platform
+  queue is `platformReviewQueue`/`platformIntake`, a platform reviewer is an
+  account holding the platform-scoped
+  `administration.review_platform_submissions` permission rather than an
+  organization role, and `startReview`/`completeReview` are the organization
+  review while `startOrganizationReview`/`completeOrganizationReview` is the
+  organization's own. `submitToPlatform` and `giveGoAhead` are separate acts:
+  receiving the report, the notification or the email never sets the owner's
+  decision. `assignPlatformReviewer`/`releasePlatformReviewer` are the one
+  exception to the self-claim queue. The idea report is a page of its own at
+  `/app/ideas/:ideaId/report`.
+- **A handoff state.** `READY_FOR_IMPLEMENTATION` sits between approval and
+  `AUTOMATION_PROPOSAL`, and `seed_dev_categories` creates the twelve sample
+  categories the handoff needs (see the existing entry below).
+
+### Changed — The app bar, and one request per teams page
+
+- **Teams and Messages are reachable.** Both were routed and both were built, and
+  neither had a link in the app header: `/app/teams` and `/app/messages` could
+  only be reached by typing a URL. Unlike Reviews and Admin they are offered
+  unconditionally, because neither is gated by anything but a session - a team is
+  a collaboration boundary rather than a tenant, and a private message belongs to
+  its participants.
+- **Messages carries an unread badge.** Its own one-field query
+  (`unreadThreadCount`) asked once per mount, on the same terms as the
+  notifications bell: the bar renders on every authenticated page and the
+  conversation list renders on one, so reading the count out of the list would
+  have meant pulling every thread on every page. Capped at `99+`.
+- **`/app/teams` asks once.** `TeamList` and `CreateTeamForm` each mounted
+  `useMyTeams`, so the page made two requests for one answer. A page-scoped
+  `TeamsProvider` now serves both, which is the difference between one request
+  and two.
+- **Adding somebody who already has an account.** `addTeamMember` was
+  unreachable: it needs a user id, and this API has no people directory, so the
+  client had no honest way to name anybody. The team page now draws candidates
+  from the reader's **organization roster** - the only list of people the client
+  can name - minus those already on the team, and offers it to the owner only
+  (`addTeamMember` needs `team.members.manage`, and `ownerId` is the only
+  statement of that the client has, which narrows what is drawn rather than
+  granting it). Somebody outside that organization is invited by email, which is
+  still the main way in.
+- **Docs.** New [`docs/collaboration.md`](docs/collaboration.md);
+  [`architecture.md`](docs/architecture.md)'s app list, mail section,
+  multi-tenancy and Ideas sections corrected against the code above, and its
+  implementation-status table extended. `ideas-domain.md` and `reviews-domain.md`
+  predate the platform track and are marked as such rather than left to disagree
+  with it silently.
+
+### Added — Replies, and one open card section at a time
+
+- **A comment can be a reply.** Migration `ideas/0004` adds a nullable
+  self-reference `Comment.parent`; `CommentType.parentId` reports it and
+  `CreateCommentInput.parentId` sets it. A reply must name a comment the caller
+  can read, on the same idea, that is not itself a reply — one level of nesting
+  as a rule of the row rather than a depth field, so `comments(ideaId)` still
+  returns one chronological page and the client groups the page it already has.
+  There is deliberately no nested `replies` selection: it would be a second fetch
+  of rows already in that page. Deleting a comment `CASCADE`s to its replies
+  rather than promoting them, and a reply to a reply is refused everywhere.
+- **The reply is written inside the comment it answers.** "Reply" opens a box
+  under that comment — never more than one open — and the posted reply lands
+  nested beneath it inside the same box, instead of appearing as another card in
+  the thread. Pressing it again, or Cancel, closes the box; a refusal keeps it
+  open with the words still in it. Replies carry no "Reply" of their own, since
+  the server would refuse one.
+- **One section open per card, and per page.** Discussion, Evidence and Review
+  were three independent toggles per card, so a reader comparing ideas could
+  leave twenty discussions and twenty evidence lists open at once. They are now
+  one value: opening any section closes whatever was open, anywhere on the page,
+  and pressing the open one closes it. Each section is a fetch keyed on being
+  open, so this is also the difference between three requests and sixty.
+- **Docs.** [`docs/ideas-domain.md`](docs/ideas-domain.md): the entity table,
+  `add_comment`'s requirements, and a new section on replies.
+
+### Changed — The idea card's action bar
+
+- **Heavier, clearer cells.** The four cells were 1.75px strokes over 12px grey
+  words, which is unreadable at the glance a card's footer actually gets. Icons
+  are now 2px at 22px, labels 13px bold in `gray-700`, and an open section is
+  drawn as a filled surface rather than being left to `aria-expanded`.
+- **One icon weight, decided once.** A shared `CellIcon` sets the stroke weight
+  and the box, so a new glyph inherits them instead of choosing its own and the
+  row never ends up with four slightly different sizes. Its `size` is a named
+  step rather than a class callers append, because two Tailwind size utilities in
+  one string do not compose.
+- **Redrawn paperclip and review clipboard.** The old paperclip had three turns
+  and a tail running off the frame, and read as a grey smudge at 20px; both are
+  redrawn inside a 22px frame. The vote count is now brand-coloured and
+  `tabular-nums` when voted, so "mine" is legible without relying on the fill.
+
+### Fixed — A flaky admin-console route test
+
+- `routes.test.tsx` asserted on a `lazy` route with Testing Library's 1s default.
+  Under full-suite load the dynamic import plus the capability query sometimes
+  exceeded it, failing roughly one run in three and never in isolation. Those
+  assertions now pass an explicit `LAZY_ROUTE_TIMEOUT`.
+
+### Added — Platform administration console
+
+- **Access model.** A new `administration` app declares platform-scoped Django
+  permissions (`administration.access_console`, `inspect_idea_content`,
+  `manage_user_accounts`, `manage_organization_roles`, `manage_categories`).
+  They stay separate from organization roles: an Owner or Reviewer is never
+  a platform administrator. `python manage.py grant_platform_admin <email>
+  [--revoke]` manages the "Platform administrators" group. Superusers hold
+  every permission.
+- **Console GraphQL.** `adminCapabilities`, `adminOverview`,
+  `adminUsers`/`adminUser`, `adminOrganizations`/`adminOrganization`/
+  `adminOrganizationMembers`, `adminIdeas`/`adminIdea`,
+  `adminReviews`/`adminReview` (also the approvals view), `adminCategories`,
+  `adminAuditEntries`. All are authorized on the server, paged and filtered
+  in the database, and bounded in query count. Non-public idea content,
+  evidence and review feedback need `inspect_idea_content`; without it they
+  are withheld (`contentRestricted`). No credential is ever returned.
+- **Audited operations.** `adminSetUserActive` (revokes sessions; not your
+  own account; superusers only by superusers), `adminAssignMembershipRole` /
+  `adminRemoveMembershipRole` (the organization domain's own rules, last
+  Owner protected), `adminCreateCategory` / `adminUpdateCategory` /
+  `adminSetCategoryActive` (retire, never delete). There is no review or
+  approval override.
+- **Audit trail.** Migration `administration/0001` adds the append-only
+  `AdminAuditEntry` (read-only in Django Admin). It records every console
+  operation, rule refusals of account and role changes, evidence downloads
+  and admin grants.
+- **Evidence download.** `GET /administration/attachments/<id>/download/`,
+  gated on the content-inspection permission and audited. It shares the
+  safe-download response, now `ideas.views.attachment_file_response`.
+- **Frontend.** `/app/admin` (lazy-loaded) with Dashboard, Users,
+  Organizations, Ideas, Reviews, Approvals and Categories: tables, server
+  search/filters/paging, detail pages, status badges, confirmation dialogs
+  with audited reasons, and loading/empty/error/forbidden states. An "Admin"
+  nav link is offered only when `adminCapabilities` allows it.
+- **Refactor.** `organizations.services.grant_membership_role` /
+  `revoke_membership_role` hold the role-assignment rules, shared by the
+  member-facing mutations and the console.
+- **Docs.** New [`docs/administration.md`](docs/administration.md);
+  architecture and backend README updated.
+
+### Changed — Idea submission for non-technical authors
+
+- **Guided intake form.** `IdeaForm` is now an eight-step conversation about
+  the problem - the problem, how it happens today, the impact, what should
+  improve, how you would know it is solved, anything important, category &
+  visibility, supporting documents - with a progress list, Back/Next, every
+  step reachable at any time, and "Save draft" on every step. No question asks
+  about technology. Visibility options read "Only me", "My organization" and
+  "Everyone". Drafts need only a title on the client too (the server's rule);
+  the submission rule is unchanged.
+- **Problem story on `Idea`.** Migration `ideas/0003` adds optional columns
+  `current_process`, `current_tools` / `current_tools_other`, `performed_by`,
+  `affected_people`, `frequency`, `time_required`, `people_involved`,
+  `impacts` / `impact_details`, `improvement_goal`, `desired_outcome`,
+  `easier_for_people` and `important_considerations`, with CHECK constraints
+  on the closed vocabularies; the existing `expected_benefit` is now written.
+  Validated for shape in `ideas.services`, exposed on GraphQL `IdeaInput` /
+  `IdeaType` (enums `IdeaFrequency`, `IdeaImpact`, `IdeaCurrentTool`), and
+  included in the review submission snapshot (`story`).
+- **Supporting documents on create.** Files chosen on the last step are
+  uploaded through the existing attachment endpoint after the draft is
+  created and before it is submitted; a file that fails is named in the
+  confirmation. Editing an idea shows its live evidence on that step.
+- **Reviewers see the story.** The review workspace shows every answered
+  question under the description.
+- **One editing pipeline.** Editing a draft, or revising an idea a reviewer
+  sent back, now happens only on `/app/ideas/:ideaId/edit` - the same guided
+  form, on its own page. The side-panel editor beside the ideas list is
+  removed; "Edit draft" and "Revise idea" open the page.
+- **Upload surface.** The supporting-documents step is a drop zone beside the
+  file list, each file with its own bar (moving while in flight, full when
+  attached, red when refused). Edit mode uploads several files one after
+  another through `useAttachments`, whose append now builds on the latest
+  list so none is dropped. The form's step list sits in its own tinted pane
+  behind a full-height divider.
+
 ### Added — Sprint 3: Review & Validation
 
 - S3-001: Review & Validation domain architecture — `docs/reviews-domain.md`.
@@ -174,6 +435,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     record invariants, take-over and submission-visibility suites.
   - **Deferred:** stalled reviews in `reviewQueue`, a lifecycle-history
     (`ideaTransitions`) view in the frontend, membership invitation.
+
+### Added — Development tooling
+
+- Temporary development categories: `python manage.py seed_dev_categories`
+  creates twelve sample `Category` rows (`ideas/dev_categories.py`) so the idea
+  form can be exercised end to end before category management exists in
+  Django Admin. Additive and idempotent - existing categories, including
+  administrator edits, are never changed or removed - and refused with `DEBUG`
+  off unless `--allow-non-debug` is passed. The frontend still reads
+  categories only through the `categories` query; the idea form now says when
+  categories failed to load or none exist. See
+  `docs/ideas-domain.md#development-categories-temporary-seed`.
 
 ### Added — Sprint 2: Ideas & Problem Submission
 
