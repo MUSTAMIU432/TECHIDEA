@@ -27,6 +27,11 @@ from organizations.services import (
     create_organization_for_user,
 )
 from reviews.models import Review
+from reviews.tests.platform import (
+    build_idea,
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -34,7 +39,14 @@ DESCRIPTION = 'A description long enough to be usable.'
 QUEUE = """
 query Queue($organizationId: ID!, $offset: Int, $limit: Int) {
   reviewQueue(organizationId: $organizationId, offset: $offset, limit: $limit) {
-    items { id status authorId viewerCanStartReview viewerActiveReviewId }
+    items {
+      id
+      status
+      authorId
+      viewerCanStartReview
+      viewerCanStartOrganizationReview
+      viewerActiveReviewId
+    }
     pageInfo { offset limit totalCount hasNextPage hasPreviousPage }
   }
 }
@@ -58,9 +70,19 @@ query CanReview($organizationId: ID!) {
 
 IDEA = """
 query Idea($id: ID!) {
-  idea(id: $id) { id viewerCanStartReview viewerActiveReviewId }
+  idea(id: $id) {
+    id
+    viewerCanStartReview
+    viewerCanStartOrganizationReview
+    viewerActiveReviewId
+  }
 }
 """
+
+
+def fresh(user):
+    """`user` again from the database, so its permission cache is empty."""
+    return User.objects.get(pk=user.pk)
 
 
 def make_user(email):
@@ -80,18 +102,29 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        grant_platform_reviewer(user)
 
 
-def make_idea(organization, author, *, status=Idea.Status.SUBMITTED, visibility=None):
-    return Idea.objects.create(
+def make_idea(
+    organization, author, *, status=Idea.Status.SUBMITTED_TO_ORGANIZATION, visibility=None
+):
+    """
+    An idea in `status`, defaulted to the one `reviewQueue` holds.
+
+    `reviewQueue` is the **organization** queue, so `SUBMITTED_TO_ORGANIZATION` is
+    what "waiting" means here. The platform queue is a separate field with its own
+    tests.
+    """
+    return build_idea(
+        status=status,
         organization=organization,
         author=author,
         title='An idea',
         description=DESCRIPTION,
         category=Category.objects.create(name=f'Cat {Category.objects.count() + 1}'),
         visibility=visibility or Idea.Visibility.ORGANIZATION,
-        status=status,
-        submitted_at=None if status == Idea.Status.DRAFT else timezone.now(),
     )
 
 
@@ -147,6 +180,13 @@ def data(body):
 @pytest.mark.django_db
 class TestReviewQueue:
     def test_a_reviewer_sees_the_queue_with_capabilities(self, gql, world):
+        """
+        The organization's queue, with the organization's capability flag.
+
+        `viewerCanStartOrganizationReview` is the one that matters here;
+        `viewerCanStartReview` is the **platform** flag and is false - holding
+        `idea.review` in one organization says nothing about the platform track.
+        """
         idea = make_idea(world['acme'], world['author'])
 
         queue = data(gql(QUEUE, {'organizationId': world['acme'].pk}, world['reviewer']))[
@@ -156,9 +196,10 @@ class TestReviewQueue:
         assert queue['items'] == [
             {
                 'id': str(idea.pk),
-                'status': 'SUBMITTED',
+                'status': 'SUBMITTED_TO_ORGANIZATION',
                 'authorId': str(world['author'].pk),
-                'viewerCanStartReview': True,
+                'viewerCanStartOrganizationReview': True,
+                'viewerCanStartReview': False,
                 'viewerActiveReviewId': None,
             }
         ]
@@ -270,6 +311,15 @@ class TestIdeaReviews:
 
     @pytest.mark.parametrize('who', [None, 'member', 'globex_reviewer', 'globex_owner'])
     def test_nobody_else_gets_any_review(self, gql, world, idea, who):
+        """
+        A `PUBLIC` idea is readable by everybody; its platform review history is
+        not.
+
+        Because reading it needs the *platform* permission, and none of these
+        callers hold it. The organization Reviewer roles some of them do hold
+        grant nothing here - which is the isolation this phase introduced.
+        """
+        revoke_platform_reviewer(fresh(world[who])) if who else None
         Idea.objects.filter(pk=idea.pk).update(visibility=Idea.Visibility.PUBLIC)
 
         body = gql(HISTORY, {'ideaId': idea.pk}, world[who] if who else None)
@@ -306,12 +356,17 @@ class TestIdeaCapabilities:
     def capabilities(self, gql, idea, user):
         return data(gql(IDEA, {'id': idea.pk}, user))['idea']
 
-    def test_a_reviewer_on_a_submitted_idea(self, gql, world):
+    def test_an_organization_reviewer_on_an_idea_waiting_for_its_organization(self, gql, world):
+        """
+        The organization's flag is set for its own reviewer; the platform flag is
+        not, and is not set by holding `idea.review`.
+        """
         idea = make_idea(world['acme'], world['author'])
 
         assert self.capabilities(gql, idea, world['reviewer']) == {
             'id': str(idea.pk),
-            'viewerCanStartReview': True,
+            'viewerCanStartReview': False,
+            'viewerCanStartOrganizationReview': True,
             'viewerActiveReviewId': None,
         }
 
@@ -322,6 +377,15 @@ class TestIdeaCapabilities:
         assert self.capabilities(gql, idea, world[who])['viewerCanStartReview'] is False
 
     def test_another_organizations_reviewer_on_a_public_idea(self, gql, world):
+        """
+        Neither flag is set for a reviewer of another organization.
+
+        `viewerCanStartReview` is the platform one and they do not hold the
+        platform permission; `viewerCanStartOrganizationReview` is their own
+        organization's and this is not their organization. Worth pinning on a
+        `PUBLIC` idea, which they *can* read - reading a submission is not
+        deciding it.
+        """
         idea = make_idea(world['acme'], world['author'], visibility=Idea.Visibility.PUBLIC)
 
         capabilities = self.capabilities(gql, idea, world['globex_reviewer'])
@@ -334,6 +398,15 @@ class TestIdeaCapabilities:
         assert data(gql(IDEA, {'id': idea.pk}))['idea'] is None
 
     def test_an_inactive_reviewer(self, gql, world):
+        """
+        Losing the organization membership takes the idea with it.
+
+        **But** a platform reviewer would still see it, and would still see the
+        platform flags - platform review is cross-tenant and does not consult
+        membership. Which is exactly why `idea` here is organization-scoped and
+        not yet submitted: a submitted idea would be readable by anybody holding
+        the platform permission, membership or not.
+        """
         idea = make_idea(world['acme'], world['author'])
         Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
 
@@ -358,10 +431,16 @@ class TestIdeaCapabilities:
         assert self.capabilities(gql, idea, world['author'])['viewerActiveReviewId'] is None
 
     def test_resolving_capabilities_creates_nothing(self, gql, world):
+        """
+        Reading a capability flag writes nothing.
+
+        Both flags are reported per idea on every render, so a resolver that
+        created a review to answer them would turn a page into a workflow.
+        """
         idea = make_idea(world['acme'], world['author'])
 
         self.capabilities(gql, idea, world['reviewer'])
 
         assert not Review.objects.exists()
         idea.refresh_from_db()
-        assert idea.status == Idea.Status.SUBMITTED
+        assert idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION

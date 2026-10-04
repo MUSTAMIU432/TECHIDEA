@@ -8,6 +8,7 @@ production input is covered in test_settings.py.
 """
 
 import json
+import re
 import subprocess
 import sys
 
@@ -232,9 +233,30 @@ def test_production_cors_is_restricted_to_the_configured_origins():
     assert values == {
         'CORS_ALLOWED_ORIGINS': ['https://app.example.test'],
         'CORS_ALLOW_ALL_ORIGINS': False,
-        'CORS_URLS_REGEX': r'^/graphql/',
+        # GraphQL, plus the attachment byte-transfer endpoints (S2-007 and the
+        # console's audited evidence download), which live outside `/graphql/`
+        # and are unreachable from the browser without this - see the note at the
+        # setting. Endpoint-scoped rather than broad: what is restricted here is
+        # *which paths* may be called cross-origin, and that list is asserted
+        # path by path below and in `tests/test_cors.py`. The origin allow-list
+        # above is unchanged, so this widens no origin.
+        'CORS_URLS_REGEX': r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/)',
         'CSRF_TRUSTED_ORIGINS': ['https://app.example.test'],
     }
+
+
+def test_production_cors_pattern_covers_the_browser_api_and_nothing_else():
+    # The security property behind the pattern above, asserted as behaviour
+    # rather than as a copy of the string: the surfaces the app calls are
+    # covered, and everything else on this origin - Django's own admin, the
+    # health probe - is not.
+    pattern = settings_values(PRODUCTION, ['CORS_URLS_REGEX'])['CORS_URLS_REGEX']
+
+    for path in ('/graphql/', '/ideas/1/attachments/', '/administration/attachments/2/download/'):
+        assert re.match(pattern, path), path
+
+    for path in ('/admin/', '/health/', '/ideas/1/', '/ideas/1/comments/'):
+        assert not re.match(pattern, path), path
 
 
 def test_production_cors_defaults_to_no_cross_origin_access():

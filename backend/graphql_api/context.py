@@ -3,8 +3,7 @@ GraphQL request context (S1-005).
 
 The one place a resolver gets the current authenticated user from - see
 `identity.authentication.get_authenticated_user` for how it's actually
-derived from the request's `Authorization` header (JWT signature/expiry/
-type validation, then a fresh, `is_active`-filtered database lookup;
+ type validation, then a fresh, `is_active`-filtered database lookup;
 never a value the frontend can simply assert). Resolvers should read
 `info.context.user` rather than calling that function themselves, so
 there's exactly one mechanism authenticating a GraphQL request, not one

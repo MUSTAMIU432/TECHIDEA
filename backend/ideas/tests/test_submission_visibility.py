@@ -28,7 +28,8 @@ from organizations.services import (
     create_organization_for_user,
 )
 from reviews import eligibility
-from reviews.selectors import review_queue
+from reviews.selectors import platform_queue, review_queue
+from reviews.tests.platform import grant_platform_reviewer
 
 V = Idea.Visibility
 
@@ -54,6 +55,11 @@ def world(db):
         membership=Membership.objects.create(user=reviewer, organization=acme),
         role=Role.objects.get(organization=acme, slug=REVIEWER_ROLE_SLUG),
     )
+    # A second reviewer who belongs to no organization at all: platform review is
+    # authorized by a platform-scoped permission, so somebody outside every
+    # tenant is the normal case for it rather than the exception.
+    platform_reviewer = make_user('platform@example.com')
+    grant_platform_reviewer(platform_reviewer)
     category = Category.objects.create(name='Finance')
 
     def draft(visibility=None):
@@ -68,7 +74,26 @@ def world(db):
             ),
         )
 
-    return {'acme': acme, 'author': author, 'reviewer': reviewer, 'draft': draft}
+    def individual_draft(visibility=None):
+        return services.create_idea_in_context(
+            author,
+            services.IdeaInput(
+                title='Automate the invoice run',
+                description='We key every invoice in by hand, every month.',
+                category_id=category.pk,
+                visibility=visibility,
+            ),
+            submission_context=Idea.SubmissionContext.INDIVIDUAL,
+        )
+
+    return {
+        'acme': acme,
+        'author': author,
+        'reviewer': reviewer,
+        'platform_reviewer': platform_reviewer,
+        'draft': draft,
+        'individual_draft': individual_draft,
+    }
 
 
 class TestSubmission:
@@ -101,14 +126,43 @@ class TestSubmission:
 
     @pytest.mark.parametrize('visibility', [V.ORGANIZATION, V.PUBLIC])
     def test_a_reviewable_idea_is_submitted_and_queued(self, world, visibility):
+        """
+        Submitted, and queued for the reviewers who can actually read it.
+
+        An **organization** idea, so its reviewers are its own organization's -
+        which is why the queue is the organization's and the eligibility is the
+        organization one. `PUBLIC` is listed here too and is genuinely reviewable:
+        the rule is not "organization visibility or nothing", it is "a visibility
+        somebody waiting for it can read".
+        """
         idea = world['draft'](visibility)
 
         services.submit_idea(world['author'], idea.pk)
 
         idea.refresh_from_db()
-        assert idea.status == Idea.Status.SUBMITTED
-        assert eligibility.can_start_review(world['reviewer'], idea)
+        assert idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
+        assert eligibility.can_start_organization_review(world['reviewer'], idea)
         assert [i.pk for i in review_queue(world['reviewer'], world['acme'].pk).items] == [idea.pk]
+
+    def test_an_individual_idea_is_queued_for_the_platform(self, world):
+        """
+        The other half of the same rule, and the reason it is context-dependent.
+
+        An individual or team idea's reviewers are the platform's, who are outside
+        the filer's tenant - so the visibility that makes it reviewable is
+        `PUBLIC`, and it lands in the platform queue rather than any tenant's.
+        """
+        idea = world['individual_draft'](V.PUBLIC)
+
+        services.submit_idea(world['author'], idea.pk)
+
+        idea.refresh_from_db()
+        assert idea.status == Idea.Status.SUBMITTED
+        assert eligibility.can_start_review(world['platform_reviewer'], idea)
+        assert idea.pk in {i.pk for i in platform_queue(world['platform_reviewer']).items}
+        # And not in any organization's queue: the two tracks are separate
+        # workspaces, not two views of one list.
+        assert review_queue(world['reviewer'], world['acme'].pk).items == []
 
     def test_widening_the_draft_then_submitting_is_the_way_forward(self, world):
         idea = world['draft']()
@@ -123,7 +177,10 @@ class TestSubmission:
             ),
         )
 
-        assert services.submit_idea(world['author'], idea.pk).status == Idea.Status.SUBMITTED
+        assert (
+            services.submit_idea(world['author'], idea.pk).status
+            == Idea.Status.SUBMITTED_TO_ORGANIZATION
+        )
 
     def test_content_problems_are_still_reported_first(self, world):
         idea = world['draft']()

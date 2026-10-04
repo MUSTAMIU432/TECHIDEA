@@ -6,6 +6,7 @@ source =
     organizations
     ideas
     reviews
+    administration
 omit =
     */tests/*
     */migrations/*

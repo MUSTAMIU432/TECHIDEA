@@ -17,6 +17,10 @@ they are:
    comment and a comment on an idea the caller may not read all produce the
    same error, so neither a comment id nor an idea id becomes an oracle.
 4. **Content is validated, normalized and never truncated.**
+5. **A reply is a comment with a parent, and the parent is resolved, not
+   trusted.** Same idea, readable by the caller, and never itself a reply - so a
+   thread is one level deep and every one of those is a refusal rather than a
+   repair.
 """
 
 import pytest
@@ -309,6 +313,202 @@ class TestAddComment:
         # Commenting is not a lifecycle move and must not become one.
         assert idea.status == Idea.Status.SUBMITTED
         assert idea.submitted_at is not None
+
+
+# --- replies -----------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestReplies:
+    """
+    A reply is a comment that names the comment it answers, and this suite is
+    about the three things that naming must not become: a way to reply to
+    something the caller was never shown, a way to cross from one idea's thread
+    into another's, and a way to build a thread of arbitrary depth.
+    """
+
+    def test_a_comment_is_top_level_by_default(self, world):
+        """
+        `parent_id is None`, and asserted rather than assumed: a client that
+        groups by this field has no "both" case to handle.
+        """
+        idea = make_idea(world['organization'], world['author'])
+
+        comment = services.add_comment(world['colleague'], idea.pk, 'A comment.')
+
+        assert comment.parent_id is None
+
+    def test_a_reply_records_the_comment_it_answers(self, world):
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'How do you do this today?')
+
+        reply = services.add_comment(world['colleague'], idea.pk, 'By hand.', parent_id=parent.pk)
+
+        assert reply.parent_id == parent.pk
+        assert reply.idea_id == idea.pk
+
+    def test_a_reply_is_listed_with_the_thread_it_belongs_to(self, world):
+        """
+        Chronological order, unchanged, and the reply is simply one of the rows.
+        A nested `replies` query would be a second way to fetch the same comment
+        and could disagree with it; `parentId` lets a client group a page it was
+        already given.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        reply = services.add_comment(world['colleague'], idea.pk, 'An answer.', parent_id=parent.pk)
+
+        page = selectors.list_comments(world['author'], idea.pk)
+
+        assert [c.pk for c in page.items] == [parent.pk, reply.pk]
+        assert page.total_count == 2
+
+    def test_a_reply_cannot_come_from_another_tenant(self, world):
+        """
+        A `PUBLIC` idea is answered across tenants, so the outsider may comment
+        on it - but the *idea* they can read is the only thing the parent is
+        checked against, so a public thread is exactly where a cross-idea
+        parent would be attempted.
+        """
+        idea = submitted(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PUBLIC)
+        )
+        other_idea = make_idea(world['other'], world['outsider'])
+        parent = make_comment(other_idea, world['outsider'])
+
+        with pytest.raises(services.IdeaError) as refusal:
+            services.add_comment(world['outsider'], idea.pk, 'Wrong thread.', parent_id=parent.pk)
+
+        assert refusal.value.field == 'parentId'
+        assert Comment.objects.filter(content='Wrong thread.').count() == 0
+
+    def test_a_reply_cannot_quote_a_comment_nobody_can_see(self, world):
+        """
+        The parent goes through the same readable-comment selector as
+        everything else. Without that, a reply could hang off a comment on a
+        private idea - and the reply's own text would then be visible to people
+        who were never shown the thing it was about.
+        """
+        idea = submitted(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PUBLIC)
+        )
+        private = make_idea(world['organization'], world['author'])
+        hidden = make_comment(private, world['author'], 'Something private.')
+
+        with pytest.raises(services.IdeaError) as refusal:
+            services.add_comment(
+                world['colleague'], idea.pk, 'I can see that.', parent_id=hidden.pk
+            )
+
+        assert refusal.value.field == 'parentId'
+
+    def test_an_unknown_parent_is_refused_like_an_unreadable_one(self, world):
+        """
+        Same message for an id that does not exist and for one the caller may
+        not read, so a comment id is still not an oracle for which comments
+        exist.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+
+        with pytest.raises(services.IdeaError) as refusal:
+            services.add_comment(world['colleague'], idea.pk, 'Answering nothing.', parent_id=-1)
+
+        assert refusal.value.message == 'The comment you are replying to is unavailable.'
+
+    def test_a_reply_to_a_reply_is_refused(self, world):
+        """
+        One level of nesting, and it is a rule of the row (`Comment.clean`) as
+        well as of this function. A thread that could go deeper would need a
+        depth field, a recursive read, and a rule about when to stop - and
+        would read worse than the same conversation with the replies flat.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        reply = services.add_comment(world['colleague'], idea.pk, 'An answer.', parent_id=parent.pk)
+
+        with pytest.raises(services.IdeaError) as refusal:
+            services.add_comment(world['author'], idea.pk, 'And another.', parent_id=reply.pk)
+
+        assert refusal.value.field == 'parentId'
+        assert Comment.objects.filter(content='And another.').count() == 0
+
+    def test_a_reply_follows_the_discussion_rule(self, world):
+        """
+        A reply is participation in a decision, so a closed discussion closes
+        replies too - the same gate, checked before the parent is even resolved,
+        so the state is not reachable through the new argument.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        idea.status = Idea.Status.REJECTED
+        idea.save()
+
+        with pytest.raises(services.IdeaError) as refusal:
+            services.add_comment(world['colleague'], idea.pk, 'Too late.', parent_id=parent.pk)
+
+        assert refusal.value.reason == 'discussion_closed'
+
+    def test_deleting_a_comment_takes_its_replies_with_it(self, world):
+        """
+        `CASCADE`, and the alternative would be worse: a reply whose question
+        has been retracted has nothing to answer, and promoting it to a
+        top-level comment would republish somebody's words as though they had
+        been their own.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        services.add_comment(world['colleague'], idea.pk, 'An answer.', parent_id=parent.pk)
+
+        services.delete_comment(world['author'], parent.pk)
+
+        assert Comment.objects.count() == 0
+
+    def test_an_edit_cannot_move_a_reply_to_another_comment(self, world):
+        """
+        `update_comment` takes content and nothing else, so a reply cannot be
+        re-attached - which would otherwise be a way to re-point an existing
+        comment at a parent the author never had to be able to read.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        first = make_comment(idea, world['author'], 'First.')
+        second = make_comment(idea, world['author'], 'Second.')
+        reply = services.add_comment(world['colleague'], idea.pk, 'An answer.', parent_id=first.pk)
+
+        services.update_comment(world['colleague'], reply.pk, 'A better answer.')
+
+        reply.refresh_from_db()
+        assert reply.parent_id == first.pk
+        assert reply.parent_id != second.pk
+
+    def test_the_model_refuses_a_reply_to_itself(self, world):
+        """
+        Defence in depth on the one rule a database cannot express: a row
+        cannot be its own parent at create time, so this is only reachable by
+        pointing an existing comment at itself, and `full_clean` in `save` is
+        what makes it impossible.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        comment = make_comment(idea, world['author'])
+        comment.parent = comment
+
+        with pytest.raises(ValidationError):
+            comment.save()
+
+        assert Comment.objects.get(pk=comment.pk).parent_id is None
+
+    def test_the_model_refuses_a_reply_from_another_idea(self, world):
+        """
+        Also on the model, because the service's check is the one the GraphQL
+        path goes through and the admin does not.
+        """
+        idea = make_idea(world['organization'], world['author'])
+        elsewhere = make_idea(world['organization'], world['author'])
+        parent = make_comment(elsewhere, world['author'])
+
+        with pytest.raises(ValidationError):
+            Comment.objects.create(
+                idea=idea, author=world['colleague'], content='Wrong thread.', parent=parent
+            )
 
 
 # --- content ------------------------------------------------------------------------
@@ -794,19 +994,24 @@ class TestListComments:
         self, world, django_assert_num_queries
     ):
         """
-        Four: the membership lookup the visibility filter needs, the idea read
-        that resolves `idea_id` to something readable, the count, and the page
-        fetch. Pinned because a per-comment query sneaking in here would make
-        a page of 20 comments cost 40 queries without any test noticing, and
-        because the idea read is the price of resolving the idea *through* the
-        visibility filter rather than around it.
+        Three: the idea read that resolves `idea_id` to something readable, the
+        count, and the page fetch behind the list. Pinned because a per-comment
+        query sneaking in here would make a page of 20 comments cost 40 queries
+        without any test noticing, and because the idea read is the price of
+        resolving the idea *through* the visibility filter rather than around it.
+
+        The lookup the visibility filter needs about the caller - their
+        organizations, their teams, whether they hold the platform review
+        permission - is resolved once per request by `ideas.selectors`, so it is
+        warmed above rather than charged to every page. `TestQueryCost` in
+        `test_votes.py` pins that budget and names each lookup.
         """
         idea = make_idea(world['organization'], world['author'])
         for index in range(3):
             make_comment(idea, world['colleague'], f'Comment {index}')
         selectors.list_comments(world['author'], idea.pk, limit=2)
 
-        with django_assert_num_queries(4):
+        with django_assert_num_queries(3):
             selectors.list_comments(world['author'], idea.pk, limit=2)
 
     def test_serializing_a_page_costs_no_extra_queries(self, world, django_assert_num_queries):

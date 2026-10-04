@@ -37,6 +37,7 @@ from django.utils import timezone
 
 from ideas import services
 from ideas.models import Attachment, Comment, Idea, Vote
+from ideas.services import submit_idea
 from identity.models import User
 from identity.tokens import issue_access_token
 from organizations.models import Membership
@@ -72,15 +73,74 @@ def add_member(organization, user):
 
 
 def make_idea(organization, author, visibility, *, status=Idea.Status.DRAFT, title='An idea'):
+    """
+    An idea row, with the category submission requires.
+
+    The category is here rather than at the call sites because two of the paths
+    below submit for real, and "Choose a category before submitting this idea"
+    would be the first thing to fail in a test about tenancy.
+    """
+    from ideas.models import Category
+
+    category, _ = Category.objects.get_or_create(name='Integration Fixture')
     return Idea.objects.create(
         organization=organization,
         author=author,
         title=title,
         description=DESCRIPTION,
+        category=category,
         visibility=visibility,
         status=status,
         submitted_at=None if status == Idea.Status.DRAFT else timezone.now(),
     )
+
+
+def make_submitted_platform_idea(organization, author, visibility):
+    """
+    An idea the platform has actually been sent, walked through the journey.
+
+    Not `make_idea(..., status=SUBMITTED)`: that writes a row which claims to
+    have been submitted without ever freezing a submission version, and the
+    platform reviewer who must be able to *read* such an idea cannot - the
+    visibility filter looks for the version. Every test that needs a
+    platform-reviewer-vs-idea question to reach the authorization check rather
+    than the visibility one has to build it this way.
+    """
+    from ideas.services import submit_to_platform
+    from reviews.tests.platform import confirm_for_organization
+
+    idea = make_idea(organization, author, visibility)
+    submit_idea(author, idea.pk)
+    idea.refresh_from_db()
+    confirm_for_organization(idea)
+    idea.refresh_from_db()
+    submit_to_platform(author, idea.pk)
+    idea.refresh_from_db()
+    return idea
+
+
+def make_private_submitted_idea(tenant):
+    """
+    A `PRIVATE` idea that really reached the platform - by writing the row,
+    because a private idea cannot be submitted at all.
+
+    That is the point being tested elsewhere in this file, and it means this row
+    is the one case in the suite that has to be manufactured: it is the state the
+    submission rule exists to prevent, holding it still so the *readability* rule
+    can be checked against it. An idea like this can only exist because S3-008
+    predates the rule.
+    """
+    idea = make_idea(tenant.organization, tenant.author, Idea.Visibility.PRIVATE)
+    # Written directly, and that is the whole point of the helper: the state is
+    # now unreachable on purpose. `submit_idea` refuses a private idea, and so
+    # would `submit_to_platform`, because a reviewer who could not read it would
+    # be waiting for it in vain. This row exists only so the *readability* rule
+    # can be checked against an idea that claims to be waiting - which is the
+    # situation S3-008 was written for, and the one a reader has to get right.
+    idea.status = Idea.Status.SUBMITTED
+    idea.submitted_at = timezone.now()
+    idea.save()
+    return idea
 
 
 def attach(idea):
@@ -216,9 +276,17 @@ TRANSITION = """
 mutation ($id: ID!, $to: IdeaStatus!) {
   transitionIdea(id: $id, to: $to) { success message }
 }"""
+# `submissionContext` is required on the input: an idea always says which of the
+# three contexts it is being filed in, because the context decides who reviews it
+# and a tenant cannot be inferred from the row any more.
 CREATE_IDEA = """
-mutation ($org: ID!) {
-  createIdea(input: {organizationId: $org, idea: {title: "New"}}) { success message }
+mutation ($org: ID!, $ctx: SubmissionContext!) {
+  createIdea(input: {submissionContext: $ctx, organizationId: $org,
+                      idea: {title: "New"}}) { success message }
+}"""
+CREATE_IDEA_NO_TENANT = """
+mutation {
+  createIdea(input: {submissionContext: INDIVIDUAL, idea: {title: "New"}}) { success message }
 }"""
 
 
@@ -412,6 +480,10 @@ def test_a_former_member_loses_every_membership_gated_operation(client, world):
     token = token_for(a.author)
     draft = a.org_idea
     attachment = attachment_of(draft)
+    # Built **before** anyone leaves: submitting needs an active member to do it,
+    # and what is under test afterwards is what a former member cannot do - not
+    # whether a former member can still file.
+    submitted = make_submitted_platform_idea(a.organization, a.colleague, Idea.Visibility.PUBLIC)
     Membership.objects.filter(user=a.author, organization=a.organization).update(
         status=Membership.Status.INACTIVE
     )
@@ -430,7 +502,12 @@ def test_a_former_member_loses_every_membership_gated_operation(client, world):
         is False
     )
     assert (
-        gql(client, CREATE_IDEA, {'org': a.organization.pk}, token)['createIdea']['success']
+        gql(
+            client,
+            CREATE_IDEA,
+            {'org': a.organization.pk, 'ctx': 'ORGANIZATION'},
+            token,
+        )['createIdea']['success']
         is False
     )
 
@@ -442,10 +519,11 @@ def test_a_former_member_loses_every_membership_gated_operation(client, world):
     assert not graphql_can_read(client, draft, former_colleague)
     assert download(client, draft.pk, attachment.pk, former_colleague).status_code == 404
 
-    # A former reviewer cannot review.
-    submitted = make_idea(
-        a.organization, a.author, Idea.Visibility.PUBLIC, status=Idea.Status.SUBMITTED
-    )
+    # A former member cannot review an organization's ideas. The refusal is by the
+    # *read* - an idea in a tenant you have left is invisible, exactly as it is to
+    # a stranger - which is a stronger outcome than a role check: it also stops
+    # this being a probe for which idea ids exist in a tenant somebody used to
+    # belong to.
     Membership.objects.filter(user=a.owner, organization=a.organization).update(
         status=Membership.Status.INACTIVE
     )
@@ -453,6 +531,15 @@ def test_a_former_member_loses_every_membership_gated_operation(client, world):
         client, TRANSITION, {'id': submitted.pk, 'to': 'UNDER_REVIEW'}, token_for(a.owner)
     )['transitionIdea']
     assert result['success'] is False
+    submitted.refresh_from_db()
+    assert submitted.status == Idea.Status.SUBMITTED
+
+    # And on the idea their own organization *owns*, leaving the organization makes
+    # it invisible to them - refused by the read, exactly as to a stranger, which
+    # is what stops the endpoint being a probe for which idea ids exist in a
+    # tenant somebody used to belong to. (`submitted` above is `PUBLIC`, which is
+    # readable by anyone signed in, so it cannot show that.)
+    assert not graphql_can_read(client, a.org_idea, token_for(a.owner))
 
     draft.refresh_from_db()
     submitted.refresh_from_db()
@@ -480,7 +567,12 @@ def test_a_valid_token_for_a_deactivated_account_authenticates_nothing(client, w
     # GraphQL: no reads, no writes - even of the account's own ideas.
     assert not graphql_can_read(client, own_idea, token)
     assert (
-        gql(client, CREATE_IDEA, {'org': a.organization.pk}, token)['createIdea']['success']
+        gql(
+            client,
+            CREATE_IDEA,
+            {'org': a.organization.pk, 'ctx': 'ORGANIZATION'},
+            token,
+        )['createIdea']['success']
         is False
     )
     assert gql(client, VOTE, {'id': own_idea.pk}, token)['voteIdea']['success'] is False
@@ -541,8 +633,12 @@ def test_submitting_a_private_idea_does_not_make_it_reviewer_visible(client, wor
     """
     a = world['a']
     reviewer = token_for(a.owner)
-    private = a.private_idea
-    assert private.status == Idea.Status.SUBMITTED
+    # Submitted to the **platform** by walking the journey. The point of the test
+    # is that a submitted idea is no more readable than a draft one, so the idea
+    # has to be genuinely submitted - written directly into `SUBMITTED`, the
+    # tenant's reviewer would not even be able to resolve it, and the refusal
+    # would be testing the wrong thing.
+    private = make_private_submitted_idea(a)
 
     assert not graphql_can_read(client, private, reviewer)
     queue = gql(client, ORG_IDEAS, {'org': a.organization.pk, 'status': 'SUBMITTED'}, reviewer)
@@ -556,19 +652,30 @@ def test_submitting_a_private_idea_does_not_make_it_reviewer_visible(client, wor
     assert private.status == Idea.Status.SUBMITTED
     assert private.visibility == Idea.Visibility.PRIVATE
 
-    # Control: the same reviewer on a visible submitted idea.
-    visible = make_idea(
-        a.organization, a.author, Idea.Visibility.ORGANIZATION, status=Idea.Status.SUBMITTED
-    )
+    # Control: the same reviewer on a visible idea waiting for **organization**
+    # review - which is the review this tenant's reviewer is authorized to make.
+    # The two tracks are separate capabilities on separate queues, so the control
+    # asks for the organization one; a platform reviewer would be offered this and
+    # not the organization one, which is `test_submission_visibility` in the
+    # service suite.
+    visible = make_idea(a.organization, a.author, Idea.Visibility.ORGANIZATION)
+    submit_idea(a.author, visible.pk)
+    visible.refresh_from_db()
+
     offered = gql(
         client,
-        'query($id: ID!) { idea(id: $id) { viewerCanStartReview } }',
+        'query($id: ID!) { idea(id: $id) { viewerCanStartOrganizationReview } }',
         {'id': visible.pk},
         reviewer,
-    )['idea']['viewerCanStartReview']
+    )['idea']['viewerCanStartOrganizationReview']
     assert offered is True
-    moved = gql(client, start, {'id': visible.pk}, reviewer)
-    assert moved['startReview']['success'] is True
+    started = gql(
+        client,
+        'mutation($id: ID!) { startOrganizationReview(ideaId: $id) { success message } }',
+        {'id': visible.pk},
+        reviewer,
+    )['startOrganizationReview']
+    assert started['success'] is True
 
 
 # --- 10. secondary resources go through the idea ---------------------------------------
@@ -637,7 +744,10 @@ def test_an_anonymous_caller_gets_no_protected_ideas_operation(client, world):
     assert not graphql_can_read(client, idea, None)
     assert gql(client, ALL_IDEAS)['ideas']['items'] == []
     for mutation, variables, root in (
-        (CREATE_IDEA, {'org': a.organization.pk}, 'createIdea'),
+        # The individual context, deliberately: it is the one that needs no
+        # organization, so this is the filing a stranger is most likely to try,
+        # and it must still be refused - there is nothing here to be a member of.
+        (CREATE_IDEA_NO_TENANT, {}, 'createIdea'),
         (UPDATE_IDEA, {'id': idea.pk}, 'updateIdea'),
         (TRANSITION, {'id': idea.pk, 'to': 'SUBMITTED'}, 'transitionIdea'),
         (CREATE_COMMENT, {'id': idea.pk}, 'createComment'),

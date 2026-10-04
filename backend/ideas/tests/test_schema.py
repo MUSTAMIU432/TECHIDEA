@@ -185,6 +185,7 @@ def create_complete_via_api(gql, ada, **overrides):
         'createIdea',
         {
             'input': {
+                'submissionContext': 'ORGANIZATION',
                 'organizationId': str(ada['organization'].pk),
                 'idea': idea_input(
                     categoryId=str(category.pk), **{'visibility': 'ORGANIZATION', **overrides}
@@ -204,6 +205,7 @@ def create_via_api(gql, ada, **overrides):
         'createIdea',
         {
             'input': {
+                'submissionContext': 'ORGANIZATION',
                 'organizationId': str(ada['organization'].pk),
                 'idea': idea_input(**overrides),
             }
@@ -226,7 +228,13 @@ class TestCreateIdeaMutation:
             gql,
             CREATE_IDEA,
             'createIdea',
-            {'input': {'organizationId': str(organization.pk), 'idea': idea_input()}},
+            {
+                'input': {
+                    'submissionContext': 'ORGANIZATION',
+                    'organizationId': str(organization.pk),
+                    'idea': idea_input(),
+                }
+            },
         )
 
         assert result['success'] is False
@@ -266,6 +274,7 @@ class TestCreateIdeaMutation:
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(ada['organization'].pk),
                     'idea': idea_input(visibility='DEPARTMENT'),
                 }
@@ -287,7 +296,13 @@ class TestCreateIdeaMutation:
             gql,
             CREATE_IDEA,
             'createIdea',
-            {'input': {'organizationId': str(other.pk), 'idea': idea_input()}},
+            {
+                'input': {
+                    'submissionContext': 'ORGANIZATION',
+                    'organizationId': str(other.pk),
+                    'idea': idea_input(),
+                }
+            },
             bearer=token,
         )
 
@@ -301,6 +316,7 @@ class TestCreateIdeaMutation:
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(ada['organization'].pk),
                     'idea': idea_input(title='   '),
                 }
@@ -318,6 +334,7 @@ class TestCreateIdeaMutation:
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(ada['organization'].pk),
                     'idea': idea_input(categoryId='999999'),
                 }
@@ -337,6 +354,7 @@ class TestCreateIdeaMutation:
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(ada['organization'].pk),
                     'idea': idea_input(categoryId=str(category.pk)),
                 }
@@ -511,13 +529,22 @@ class TestUpdateIdeaMutation:
 
 @pytest.mark.django_db
 class TestSubmitIdeaMutation:
-    def test_a_complete_draft_becomes_submitted(self, gql, ada):
+    def test_a_complete_draft_is_put_in_front_of_its_organization(self, gql, ada):
+        """
+        One `submitIdea` mutation, and where it lands depends on the context.
+
+        This idea is an **organization** submission, so submitting it hands it to
+        its own organization for confirmation - not to the platform. The
+        response says so in the same words, because a fixed "submitted" string
+        would leave the author wondering where to look.
+        """
         created = create_complete_via_api(gql, ada)['idea']
 
         result = run(gql, SUBMIT_IDEA, 'submitIdea', {'id': created['id']}, bearer=ada['token'])
 
         assert result['success'] is True
-        assert result['idea']['status'] == 'SUBMITTED'
+        assert result['idea']['status'] == 'SUBMITTED_TO_ORGANIZATION'
+        assert 'organization' in result['message']
 
     def test_submission_stamps_submitted_at(self, gql, ada):
         created = create_complete_via_api(gql, ada)['idea']
@@ -694,6 +721,7 @@ class TestQueries:
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(ada['organization'].pk),
                     'idea': idea_input(categoryId=str(category.pk)),
                 }

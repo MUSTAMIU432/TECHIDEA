@@ -57,8 +57,15 @@ INSTALLED_APPS = [
     # adapter layer that exposes them.
     'identity',
     'organizations',
+    'teams',
     'ideas',
     'reviews',
+    'invitations',
+    'notifications',
+    'messaging',
+    # Platform administration (the internal console): reads and changes the
+    # domains above through their own rules, so it comes after all of them.
+    'administration',
     'graphql_api',
 ]
 
@@ -144,6 +151,16 @@ PASSWORD_RESET_TOKEN_LIFETIME = timedelta(
     minutes=env.int('PASSWORD_RESET_TOKEN_LIFETIME_MINUTES', default=60)
 )
 ACTIVATION_TOKEN_LIFETIME = timedelta(hours=env.int('ACTIVATION_TOKEN_LIFETIME_HOURS', default=48))
+
+# How long an organization or team invitation stays acceptable. Longer than the
+# other two links, and for a different reason: a password reset and an activation
+# are things the recipient is *already* waiting for and can do in a minute, while
+# an invitation is an email somebody may read on their own schedule, decide about,
+# and only then click. The window has to cover "I saw this on Monday" without
+# becoming a durable credential - it is single-use, revocable, bound to one
+# address, and only its digest is stored, so the risk of a longer window is a
+# wider window rather than a permanent one.
+INVITATION_TOKEN_LIFETIME = timedelta(days=env.int('INVITATION_TOKEN_LIFETIME_DAYS', default=7))
 
 
 # Cache framework
@@ -340,17 +357,44 @@ STORAGES = {
 
 # The hard ceiling on one uploaded file, enforced server-side in
 # `ideas.attachments.validate_size` before anything is read into storage - a
-# client-side check is a courtesy, never the boundary. 10 MB comfortably fits
-# the supported evidence types (a PDF, a screenshot, a spreadsheet) without
-# letting a single idea's evidence become a multi-gigabyte liability.
-ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=10 * 1024 * 1024)
+# client-side check is a courtesy, never the boundary. 50 MB fits the evidence
+# this domain is actually given (a scanned document, a photo of a whiteboard, an
+# exported spreadsheet with its supporting tabs) without letting one idea's
+# evidence become a liability.
+#
+# This is *not* the only thing standing between a browser and the disk. Django's
+# own `DATA_UPLOAD_MAX_MEMORY_SIZE` does not apply to multipart file parts - it
+# bounds the non-file fields - so a large upload is streamed and spooled to a
+# temporary file rather than rejected outright, and `ideas.views` refuses an
+# unauthorized caller before the body is parsed at all. A deployment still wants
+# a limit at its proxy: nothing here stops a web server reading bytes off a
+# socket.
+ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=50 * 1024 * 1024)
 
 
 # CORS
-# Only the GraphQL API is meant to be called from the browser app. The
-# allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a wildcard).
+# The browser app calls two surfaces, not one: the GraphQL API, and the handful
+# of HTTP endpoints that carry attachment *bytes* (S2-007, and the console's
+# audited evidence download). Those are outside `/graphql/`, so they have to be
+# named here or the browser blocks the response.
+#
+# This is not cosmetic. The frontend and backend run on different origins even
+# in local development (:5173 vs :8000), so an upload is a cross-origin request:
+# with no `Access-Control-Allow-Origin` on the response the browser discards it
+# and `fetch` rejects, which the client reports as "we could not reach the
+# server" - a message that is wrong in a way that sends people looking at the
+# server instead of at the request. Same for the preflight: an `Authorization`
+# header makes the request non-simple, so `OPTIONS` is asked first, and a URL
+# outside this pattern is answered 405 with no CORS headers at all.
+#
+# Named endpoint by endpoint, deliberately. A broader pattern would quietly make
+# `/admin/` or `/health/` reachable from the browser, which is the opposite of
+# what this list is for.
+#
+# The allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a
+# wildcard).
 
-CORS_URLS_REGEX = r'^/graphql/'
+CORS_URLS_REGEX = r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/)'
 # Explicit so a stray setting elsewhere can never open the API to every origin.
 CORS_ALLOW_ALL_ORIGINS = False
 # Sprint 1 (S1-003): the refresh-token cookie requires the browser to send

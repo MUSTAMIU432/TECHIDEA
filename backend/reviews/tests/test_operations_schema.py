@@ -15,7 +15,6 @@ when called directly, which is how an attacker would call it:
 import json
 
 import pytest
-from django.utils import timezone
 
 from ideas.models import Category, Idea
 from identity.models import User
@@ -27,6 +26,11 @@ from organizations.services import (
     create_organization_for_user,
 )
 from reviews.models import Review
+from reviews.tests.platform import (
+    build_idea,
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 
@@ -82,18 +86,31 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        grant_platform_reviewer(user)
+
+
+def platform_reviews(idea):
+    """`idea`'s **platform** reviews; the organization's confirmation is another track."""
+    return Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM)
 
 
 def make_idea(organization, author, *, status=Idea.Status.SUBMITTED, visibility=None):
-    return Idea.objects.create(
+    """
+    An idea in `status`.
+
+    `SUBMITTED` means on the platform, so building it walks the organization
+    stage as well - which is why the review counts below are platform-scoped.
+    """
+    return build_idea(
+        status=status,
         organization=organization,
         author=author,
         title='Automate the invoice run',
         description='A description long enough to be usable.',
         category=Category.objects.create(name=f'Cat {Category.objects.count() + 1}'),
         visibility=visibility or Idea.Visibility.ORGANIZATION,
-        status=status,
-        submitted_at=timezone.now(),
     )
 
 
@@ -204,12 +221,35 @@ class TestStartReview:
         assert payload['success'] is False
         assert payload['message'] == 'You are not allowed to review this idea.'
 
-    def test_an_inactive_member(self, gql, world):
+    def test_losing_the_organization_membership_does_not_stop_a_platform_reviewer(self, gql, world):
+        """
+        Platform review never consults organization membership.
+
+        The counterpart of `test_an_organization_loss_is_not_a_platform_loss` in
+        `test_takeover.py`, from the other side: somebody who has left the
+        organization that owns the idea is still a platform reviewer, so they can
+        still claim it. That is what "independent" means in practice - an
+        organization reorganising its membership does not disturb the platform's
+        work.
+        """
         Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
 
         payload = ok(gql(START, {'ideaId': world['idea'].pk}, world['reviewer']), 'startReview')
 
+        assert payload['success'] is True
+
+    def test_losing_the_platform_permission_does_stop_them(self, gql, world):
+        """
+        And the permission is what does stop them, however they are otherwise
+        connected to the organization.
+        """
+        Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
+
+        payload = ok(gql(START, {'ideaId': world['idea'].pk}, world['reviewer']), 'startReview')
+
         assert payload['success'] is False
+        assert payload['message'] == 'Idea is unavailable.'
 
     def test_wrong_organization_and_guessed_ids_answer_alike(self, gql, world):
         cross = ok(gql(START, {'ideaId': world['idea'].pk}, world['globex_owner']), 'startReview')
@@ -219,19 +259,27 @@ class TestStartReview:
         assert cross['message'] == 'Idea is unavailable.'
 
     def test_a_public_idea_is_still_not_another_organizations_to_review(self, gql, world):
+        """
+        Being able to read a submission is not being able to decide it.
+
+        A `PUBLIC` idea is readable by every signed-in user - including another
+        organization's owner - and they are still refused here. What they lack is
+        the platform permission, and nothing about visibility can supply it.
+        """
+        revoke_platform_reviewer(User.objects.get(pk=world['globex_owner'].pk))
         idea = make_idea(world['acme'], world['author'], visibility=Idea.Visibility.PUBLIC)
 
         payload = ok(gql(START, {'ideaId': idea.pk}, world['globex_owner']), 'startReview')
 
         assert payload['message'] == 'You are not allowed to review this idea.'
-        assert not Review.objects.filter(idea=idea).exists()
+        assert not Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM).exists()
 
     def test_an_idea_already_under_review(self, gql, world, started):
         payload = ok(gql(START, {'ideaId': world['idea'].pk}, world['second']), 'startReview')
 
         assert payload['success'] is False
         assert payload['message'] == 'This idea is not waiting for review.'
-        assert Review.objects.filter(idea=world['idea']).count() == 1
+        assert platform_reviews(world['idea']).count() == 1
 
     def test_transition_idea_cannot_be_used_instead(self, gql, world):
         payload = ok(
@@ -240,7 +288,7 @@ class TestStartReview:
         )
 
         assert payload['success'] is False
-        assert not Review.objects.exists()
+        assert not platform_reviews(world['idea']).exists()
 
 
 @pytest.mark.django_db

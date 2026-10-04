@@ -10,6 +10,11 @@ this layer:
   the text itself, so "post as somebody else" is not a request this schema can
   express. Asserted by *sending* such a request and requiring the type system
   to reject it.
+- **`parentId` is the one thing a client names about a comment's shape, and it
+  is resolved rather than trusted.** A reply must name a comment the caller can
+  read, on the same idea, that is not itself a reply - so a reply cannot quote
+  something nobody was shown, cannot cross into another idea's thread, and
+  cannot build a thread deeper than one level.
 - **A refusal is a payload, not a crash.** A rejected comment comes back as
   `success: false` with a message and a `field`, like every other mutation in
   this schema, because a thrown GraphQL error tells the client the server is
@@ -37,7 +42,7 @@ DESCRIPTION = 'A description long enough to be usable.'
 COMMENTS_QUERY = """
 query Comments($ideaId: ID!, $offset: Int, $limit: Int) {
   comments(ideaId: $ideaId, offset: $offset, limit: $limit) {
-    items { id ideaId authorId content createdAt updatedAt }
+    items { id ideaId authorId content parentId createdAt updatedAt }
     pageInfo { offset limit totalCount hasNextPage hasPreviousPage }
   }
 }
@@ -49,7 +54,7 @@ mutation CreateComment($input: CreateCommentInput!) {
     success
     message
     field
-    comment { id ideaId authorId content createdAt updatedAt }
+    comment { id ideaId authorId content parentId createdAt updatedAt }
   }
 }
 """
@@ -197,12 +202,26 @@ def world(client: Client):
     }
 
 
-def create(gql, bearer, idea_id, content='A comment.'):
+def create(gql, bearer, idea_id, content='A comment.', parent_id=None):
+    """
+    Post a comment, optionally as a reply to `parent_id`.
+
+    The argument is only sent when it was asked for, for the same reason the
+    discovery filters are: an explicit `null` is a different request from an
+    absent field, and this client has no business asserting a default the
+    server already has.
+    """
     return run(
         gql,
         CREATE_COMMENT,
         'createComment',
-        {'input': {'ideaId': str(idea_id), 'comment': {'content': content}}},
+        {
+            'input': {
+                'ideaId': str(idea_id),
+                'comment': {'content': content},
+                **({'parentId': str(parent_id)} if parent_id is not None else {}),
+            }
+        },
         bearer=bearer,
     )
 
@@ -578,6 +597,221 @@ class TestCreateComment:
         )
 
         assert 'errors' in response.json()
+
+
+# --- replying -----------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCreateReply:
+    """
+    The boundary for a reply. What matters here is only that `parentId` is
+    carried both ways and that every way of getting it wrong comes back as a
+    refusal payload rather than as a comment attached to the wrong thread.
+    """
+
+    def test_a_top_level_comment_reports_no_parent(self, gql, world):
+        idea = make_idea(world['organization'], world['author'])
+
+        result = create(gql, world['colleague_token'], idea.pk)
+
+        # Asserted rather than assumed: a client grouping by this field has no
+        # "both" case to handle.
+        assert result['comment']['parentId'] is None
+
+    def test_a_reply_reports_the_comment_it_answers(self, gql, world):
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'How is this done today?')
+
+        result = create(gql, world['colleague_token'], idea.pk, 'By hand.', parent_id=parent.pk)
+
+        assert result['success'] is True
+        assert result['comment']['parentId'] == str(parent.pk)
+        assert Comment.objects.get(content='By hand.').parent_id == parent.pk
+
+    def test_the_discussion_reports_the_parent_so_a_client_can_group_it(self, gql, world):
+        """
+        One field and no second query. A nested `replies` field would be a
+        second fetch of comments already in this page, free to disagree with it.
+        """
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        create(gql, world['colleague_token'], idea.pk, 'An answer.', parent_id=parent.pk)
+
+        page = run(
+            gql,
+            COMMENTS_QUERY,
+            'comments',
+            {'ideaId': str(idea.pk)},
+            bearer=world['colleague_token'],
+        )
+
+        assert [item['parentId'] for item in page['items']] == [None, str(parent.pk)]
+
+    def test_a_reply_to_another_ideas_comment_is_refused(self, gql, world):
+        idea = submitted(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PUBLIC)
+        )
+        elsewhere = make_comment(
+            make_idea(world['other'], world['outsider']), world['outsider'], 'Another thread.'
+        )
+
+        result = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': str(elsewhere.pk),
+                    'comment': {'content': 'Wrong thread.'},
+                }
+            },
+            bearer=world['colleague_token'],
+        )
+
+        assert result['field'] == 'parentId'
+        assert Comment.objects.filter(content='Wrong thread.').count() == 0
+
+    def test_a_reply_to_an_unreadable_comment_is_refused(self, gql, world):
+        """
+        A `PUBLIC` idea's thread is exactly where a colleague would try to quote
+        a private one, so the parent is resolved against the same readability
+        rule as the comment list itself.
+        """
+        idea = submitted(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PUBLIC)
+        )
+        hidden = make_comment(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PRIVATE),
+            world['author'],
+            'Something private.',
+        )
+
+        result = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': str(hidden.pk),
+                    'comment': {'content': 'I can see that.'},
+                }
+            },
+            bearer=world['colleague_token'],
+        )
+
+        assert result['message'] == 'The comment you are replying to is unavailable.'
+
+    def test_an_unknown_parent_answers_like_an_unreadable_one(self, gql, world):
+        idea = submitted(make_idea(world['organization'], world['author']))
+        hidden = make_comment(
+            make_idea(world['organization'], world['author'], visibility=Idea.Visibility.PRIVATE),
+            world['author'],
+        )
+        token = world['colleague_token']
+
+        unknown = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': '999999',
+                    'comment': {'content': 'Answering nothing.'},
+                }
+            },
+            bearer=token,
+        )
+        invisible = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': str(hidden.pk),
+                    'comment': {'content': 'Answering nothing.'},
+                }
+            },
+            bearer=token,
+        )
+
+        assert unknown == invisible
+
+    def test_a_reply_to_a_reply_is_refused(self, gql, world):
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        first_reply = Comment.objects.create(
+            idea=idea, author=world['colleague'], content='An answer.', parent=parent
+        )
+
+        result = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': str(first_reply.pk),
+                    'comment': {'content': 'And another.'},
+                }
+            },
+            bearer=world['author_token'],
+        )
+
+        assert result['field'] == 'parentId'
+        assert Comment.objects.filter(content='And another.').count() == 0
+
+    def test_a_reply_cannot_be_forged_into_another_ideas_thread(self, gql, world):
+        """
+        The idea is authorized first and the parent is checked against *that*
+        idea, so naming another idea's comment cannot move the reply there
+        either: there is no `ideaId` the client could pair it with.
+        """
+        other = make_idea(world['other'], world['outsider'])
+        parent = make_comment(other, world['outsider'])
+
+        result = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(other.pk),
+                    'parentId': str(parent.pk),
+                    'comment': {'content': 'Not yours.'},
+                }
+            },
+            bearer=world['author_token'],
+        )
+
+        assert result['message'] == 'Idea is unavailable.'
+        assert Comment.objects.filter(content='Not yours.').count() == 0
+
+    def test_a_reply_follows_a_closed_discussion(self, gql, world):
+        idea = submitted(make_idea(world['organization'], world['author']))
+        parent = make_comment(idea, world['author'], 'A question.')
+        idea.status = Idea.Status.REJECTED
+        idea.save()
+
+        result = fails(
+            gql,
+            CREATE_COMMENT,
+            'createComment',
+            {
+                'input': {
+                    'ideaId': str(idea.pk),
+                    'parentId': str(parent.pk),
+                    'comment': {'content': 'Too late.'},
+                }
+            },
+            bearer=world['colleague_token'],
+        )
+
+        assert result['message'] == 'This idea is no longer open for discussion.'
 
 
 # --- updating -----------------------------------------------------------------------

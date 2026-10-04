@@ -18,7 +18,7 @@ from ideas.models import Category, Idea
 from identity.models import User
 from organizations.models import Membership
 from organizations.services import CreateOrganizationInput, create_organization_for_user
-from reviews.models import Review, ReviewCriterionAssessment
+from reviews.models import SCOPE_DECISIONS, Review, ReviewCriterionAssessment
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 SNAPSHOT = {'title': 'An idea', 'description': 'A description long enough.', 'category': 'Ops'}
@@ -110,15 +110,59 @@ class TestReview:
         assert review.is_completed
 
     def test_the_decisions_are_the_idea_statuses_they_lead_to(self):
-        # Plus `WITHDRAWN` (S3-008): a take-over, which leads to no status and
-        # is deliberately not one.
+        """
+        One vocabulary, two scopes.
+
+        The platform's three verdicts are idea statuses, and `CONFIRMED` - the
+        organization track's one decision - leads to `ORGANIZATION_CONFIRMED`.
+        `WITHDRAWN` is the odd one out: a take-over leads to no status at all,
+        which is what makes it a release rather than a verdict.
+        """
         assert set(Review.Decision.values) == {
             Idea.Status.CHANGES_REQUESTED,
             Idea.Status.APPROVED,
             Idea.Status.REJECTED,
+            Review.Decision.CONFIRMED,
             Review.Decision.WITHDRAWN,
         }
         assert Review.Decision.WITHDRAWN not in Idea.Status.values
+
+    def test_each_scope_may_record_only_its_own_decisions(self, world):
+        """
+        "An organization cannot approve" and "the platform cannot confirm",
+        as a property of the rows rather than of a service.
+
+        Both directions are refused by the model, so no future code path - a
+        resolver, a management command, a bulk write - can produce an
+        organization review that says `APPROVED`.
+        """
+        for scope, allowed in (
+            (
+                Review.Scope.ORGANIZATION,
+                {Review.Decision.CONFIRMED, Review.Decision.CHANGES_REQUESTED},
+            ),
+            (
+                Review.Scope.PLATFORM,
+                {
+                    Review.Decision.APPROVED,
+                    Review.Decision.REJECTED,
+                    Review.Decision.CHANGES_REQUESTED,
+                },
+            ),
+        ):
+            assert set(SCOPE_DECISIONS[scope]) == allowed, scope
+            for decision in Review.Decision.values:
+                if decision == Review.Decision.WITHDRAWN or decision in allowed:
+                    continue
+                with pytest.raises(ValidationError):
+                    Review.objects.create(
+                        idea=world['idea'],
+                        reviewer=world['reviewer'],
+                        scope=scope,
+                        round=world['idea'].reviews.count() + 1,
+                        decision=decision,
+                        submission_snapshot=SNAPSHOT,
+                    )
 
     def test_the_author_cannot_be_the_reviewer(self, world):
         with pytest.raises(ValidationError):

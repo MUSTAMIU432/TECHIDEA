@@ -36,7 +36,11 @@ VALID_PASSWORD = 'a-strong-unique-pass-1'
 OTHER_PASSWORD = 'another-strong-pass-2'
 MIN_DESCRIPTION = 'x' * services.MIN_DESCRIPTION_LENGTH
 # A visibility reviewers can read: the last submission rule (S3-008, D-6).
+# Organization visibility for an organization idea; **public** for an individual
+# or team one, whose reviewers are the platform's and are outside the filer's
+# tenant - which is exactly why the rule is context-dependent.
 REVIEWABLE = Idea.Visibility.ORGANIZATION
+DIRECT_REVIEWABLE = Idea.Visibility.PUBLIC
 
 
 def make_user(email='ada@example.com', **overrides):
@@ -521,11 +525,40 @@ class TestUpdateIdea:
 
 @pytest.mark.django_db
 class TestSubmitIdea:
-    def test_a_complete_draft_becomes_submitted(self):
+    def test_an_organization_draft_goes_to_its_organization(self):
+        """
+        `submit_idea` resolves the target from the idea's context, so the same
+        call lands in different places: an organization draft is put in front of
+        its organization, which is the only stage that comes before the platform.
+        """
         user = make_user()
         organization, _ = make_organization(owner=user)
         category = make_category()
         idea = make_idea(organization, user, category=category, visibility=REVIEWABLE)
+
+        submitted = services.submit_idea(user, idea.pk)
+
+        assert submitted.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
+        submitted.refresh_from_db()
+        assert submitted.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
+
+    def test_an_individual_draft_goes_straight_to_the_platform(self):
+        """
+        And an individual idea has no organization in the way, so submission *is*
+        submission. The two contexts share one operation and one button; only the
+        stage differs.
+        """
+        user = make_user()
+        idea = services.create_idea_in_context(
+            user,
+            services.IdeaInput(
+                title='Mine alone',
+                description=MIN_DESCRIPTION,
+                visibility=DIRECT_REVIEWABLE,
+                category_id=make_category().pk,
+            ),
+            submission_context=Idea.SubmissionContext.INDIVIDUAL,
+        )
 
         submitted = services.submit_idea(user, idea.pk)
 
@@ -684,10 +717,12 @@ class TestSubmitIdea:
 
     def test_submission_does_not_advance_past_submitted(self):
         """
-        Review (`UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED`)
-        and `AUTOMATION_PROPOSAL` are Sprint 3's. Asserted so that a later
-        change to this method cannot quietly ship a review workflow by
-        accident.
+        Review (`UNDER_REVIEW`, `CHANGES_REQUESTED`, `REJECTED`, `APPROVED`),
+        the organization's decisions, the owner's go-ahead and the hand-off to
+        Sprint 4 are all other people's moves. Asserted so that a later change to
+        this method cannot quietly ship a workflow by accident: submitting an
+        idea moves it exactly one stage, and the author does not get to choose
+        which.
         """
         user = make_user()
         organization, _ = make_organization(owner=user)
@@ -695,8 +730,12 @@ class TestSubmitIdea:
 
         submitted = services.submit_idea(user, idea.pk)
 
-        assert submitted.status == Idea.Status.SUBMITTED
+        assert submitted.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
         assert submitted.status not in {
+            Idea.Status.ORGANIZATION_CHANGES_REQUESTED,
+            Idea.Status.ORGANIZATION_CONFIRMED,
+            Idea.Status.SUBMITTED,
+            Idea.Status.READY_FOR_IMPLEMENTATION,
             Idea.Status.UNDER_REVIEW,
             Idea.Status.CHANGES_REQUESTED,
             Idea.Status.REJECTED,

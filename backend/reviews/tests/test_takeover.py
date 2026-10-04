@@ -26,9 +26,10 @@ from django.core.exceptions import ValidationError
 from django.db import connections
 from django.utils import timezone
 
-from ideas.models import Category, Idea, IdeaTransition
+from ideas.models import Idea, IdeaTransition
 from identity.models import User
 from identity.tokens import issue_access_token
+from notifications.models import Notification
 from organizations.models import Membership, MembershipRole, Role
 from organizations.services import (
     REVIEWER_ROLE_SLUG,
@@ -37,6 +38,11 @@ from organizations.services import (
 )
 from reviews import eligibility, selectors, services
 from reviews.models import Review, ReviewCriterionAssessment
+from reviews.tests.platform import (
+    grant_platform_reviewer,
+    make_submitted,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 CRITERIA = ReviewCriterionAssessment.Criterion.values
@@ -60,6 +66,11 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        # The organization Reviewer role above still governs the organization
+        # review queue, which is a separate track with separate rules.
+        grant_platform_reviewer(user)
     return membership
 
 
@@ -73,29 +84,43 @@ def completion(review, decision='approved', feedback='Worth doing.'):
     )
 
 
-# Every way the holder of a review can stop being its reviewer.
-def _leave(world):
-    Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
-
-
-def _lose_role(world):
-    MembershipRole.objects.filter(membership__user=world['reviewer']).delete()
+# Every way the holder of a platform review can stop being a platform reviewer.
+#
+# Each of these removes something that **actually** decides platform review. The
+# organization Reviewer role is deliberately not one of them: platform review is
+# authorized by a platform permission and never consults an organization role, so
+# dropping that role would leave the reviewer perfectly eligible and these tests
+# would pass for the wrong reason. `test_losing_the_organization_role_is_not_a_loss`
+# pins that separately.
+def _lose_permission(world):
+    revoke_platform_reviewer(world['reviewer'])
 
 
 def _deactivate(world):
     User.objects.filter(pk=world['reviewer'].pk).update(is_active=False)
 
 
-def _removed(world):
-    MembershipRole.objects.filter(membership__user=world['reviewer']).delete()
-    Membership.objects.filter(user=world['reviewer']).delete()
+def _lose_permission_and_leave(world):
+    revoke_platform_reviewer(world['reviewer'])
+    Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
+
+
+def _leave(world):
+    """
+    Just the membership, with the platform permission left in place.
+
+    Kept as its own loss because it is the one that *should not* count: platform
+    review does not consult organization membership at all, so a reviewer who
+    leaves the organization is still a platform reviewer. `test_leaving_the
+    organization_is_not_a_loss` pins that.
+    """
+    Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
 
 
 LOSSES = {
-    'membership deactivated': _leave,
-    'reviewer role removed': _lose_role,
+    'platform permission removed': _lose_permission,
     'account deactivated': _deactivate,
-    'membership removed': _removed,
+    'permission removed and membership deactivated': _lose_permission_and_leave,
 }
 
 
@@ -119,15 +144,17 @@ def world(db):
     ).organization
     globex_reviewer = make_user('reviewer@globex.example')
     add_member(globex, globex_reviewer, reviewer=True)
-    idea = Idea.objects.create(
-        organization=acme,
-        author=author,
+    # Globex's reviewer is left as an **organization** reviewer and nothing more:
+    # the platform permission is taken away again straight after `add_member`
+    # granted it. Holding `idea.review` somewhere - even as a reviewer, even on a
+    # PUBLIC idea - must grant nothing on the platform track, and the refusals
+    # below are what prove it.
+    revoke_platform_reviewer(globex_reviewer)
+    idea = make_submitted(
+        acme,
+        author,
         title='Automate the invoice run',
         description='We key every invoice in by hand, every month.',
-        category=Category.objects.create(name='Finance'),
-        visibility=Idea.Visibility.ORGANIZATION,
-        status=S.SUBMITTED,
-        submitted_at=timezone.now(),
     )
     return {
         'acme': acme,
@@ -150,13 +177,30 @@ def started(world):
 
 @pytest.fixture
 def stalled(world, started):
-    _leave(world)
+    """
+    A review whose reviewer is no longer eligible to decide it.
+
+    The loss is the **platform permission**, not the organization membership -
+    see the `LOSSES` table. Leaving the organization is deliberately *not* a
+    platform loss, and `test_organization_loss_is_not_a_platform_loss` asserts
+    that, so a stalled review here has to be stalled for the real reason.
+    """
+    _lose_permission(world)
     return started
 
 
-def reviews_of(idea):
+def reviews_of(idea, scope=Review.Scope.PLATFORM):
+    """
+    One track's rounds as `(round, reviewer, decision)`.
+
+    **Scoped, and defaulted to the platform track**, because an idea in this
+    fixture has already been confirmed by its organization before it reaches the
+    platform - so an unscoped list would start with the organization's
+    confirmation and every assertion about "round 1" would be about the wrong
+    review. Pass `scope=ORGANIZATION` to see the other half.
+    """
     return list(
-        Review.objects.filter(idea=idea)
+        Review.objects.filter(idea=idea, scope=scope)
         .order_by('round')
         .values_list('round', 'reviewer__email', 'decision')
     )
@@ -187,6 +231,39 @@ class TestTakeOver:
         ]
         assert Idea.objects.get(pk=world['idea'].pk).status == S.UNDER_REVIEW
 
+    @pytest.mark.parametrize(
+        'loss',
+        [
+            # The organization Reviewer role does not decide platform review.
+            lambda world: MembershipRole.objects.filter(
+                membership__user=world['reviewer']
+            ).delete(),
+            # Nor does organization membership.
+            lambda world: Membership.objects.filter(user=world['reviewer']).update(
+                status=Membership.Status.INACTIVE
+            ),
+        ],
+        ids=('reviewer role removed', 'membership deactivated'),
+    )
+    def test_organization_loss_is_not_a_platform_loss(self, world, started, loss):
+        """
+        Losing something on the *organization* side does not stall a review.
+
+        The converse of the `LOSSES` table, and the assertion that keeps it
+        honest: if dropping the role silently *did* count, the take-over tests
+        would still pass while proving the wrong thing. It is also the practical
+        reason the tracks are separate - an organization may reorganise its
+        reviewers without disrupting the platform's work.
+        """
+        loss(world)
+
+        with pytest.raises(services.ReviewError, match='not waiting for review'):
+            services.start_review(world['second'], world['idea'].pk)
+
+        started.refresh_from_db()
+        assert started.completed_at is None, 'the round was withdrawn'
+        assert reviews_of(world['idea']) == [(1, 'reviewer@acme.example', None)]
+
     def test_the_withdrawn_round_records_who_held_it_and_when_it_was_released(self, world, stalled):
         before = timezone.now()
         new = services.start_review(world['second'], world['idea'].pk)
@@ -201,12 +278,19 @@ class TestTakeOver:
         assert new.submission_snapshot == stalled.submission_snapshot
 
     def test_no_status_moves_so_no_transition_is_recorded(self, world, stalled):
-        before = IdeaTransition.objects.filter(idea=world['idea']).count()
+        before = list(
+            IdeaTransition.objects.filter(idea=world['idea']).values_list('pk', flat=True)
+        )
 
         services.start_review(world['second'], world['idea'].pk)
 
-        # Only the original start: the fixture's idea was stored as submitted.
-        assert IdeaTransition.objects.filter(idea=world['idea']).count() == before == 1
+        # Nothing new. A take-over completes one round and opens the next
+        # *without moving the idea*, so there is no status change to record - the
+        # two review rows are the whole record.
+        assert (
+            list(IdeaTransition.objects.filter(idea=world['idea']).values_list('pk', flat=True))
+            == before
+        )
 
     def test_nobody_is_emailed(self, world, stalled, django_capture_on_commit_callbacks):
         with django_capture_on_commit_callbacks(execute=True):
@@ -214,15 +298,23 @@ class TestTakeOver:
 
         assert mail.outbox == []
 
-    def test_the_decision_email_never_reports_a_withdrawn_round(self, world, stalled):
-        # Defence in depth: the take-over schedules no email, and the sender
-        # itself refuses a withdrawn review if one ever reached it.
-        from reviews.notifications import send_review_decision_email
+    def test_a_take_over_decides_nothing_so_it_notifies_nobody(
+        self, world, stalled, django_capture_on_commit_callbacks
+    ):
+        """
+        A take-over is not a decision.
 
-        services.start_review(world['second'], world['idea'].pk)
-        send_review_decision_email(stalled.pk)
+        Defence in depth: withdrawing round 1 and opening round 2 decides nothing
+        about the idea, so it produces no notification and no email. The
+        notification service is only ever reached from a decision, so there is no
+        sender here to refuse a withdrawn round - the rule is enforced by the fact
+        that nothing calls it.
+        """
+        with django_capture_on_commit_callbacks(execute=True):
+            services.start_review(world['second'], world['idea'].pk)
 
         assert mail.outbox == []
+        assert not Notification.objects.filter(idea=world['idea']).exists()
 
     def test_the_take_over_is_logged_with_ids_only(self, world, stalled, caplog):
         caplog.set_level(logging.INFO, logger='reviews.services')
@@ -283,7 +375,8 @@ class TestTakeOver:
 
     def test_the_new_reviewer_can_be_taken_over_from_in_turn(self, world, stalled):
         services.start_review(world['second'], world['idea'].pk)
-        MembershipRole.objects.filter(membership__user=world['second']).delete()
+        # The second reviewer's *platform* permission is what makes them stallable.
+        revoke_platform_reviewer(fresh(world['second']))
 
         services.start_review(world['third'], world['idea'].pk)
 
@@ -301,7 +394,9 @@ class TestRefusals:
     def assert_untouched(self, world, review):
         review.refresh_from_db()
         assert review.completed_at is None
-        assert Review.objects.filter(idea=world['idea']).count() == 1
+        # One **platform** review: the organization's confirmation that got the
+        # idea onto the platform is a separate round in the other track.
+        assert reviews_of(world['idea']) == [(1, 'reviewer@acme.example', None)]
         assert Idea.objects.get(pk=world['idea'].pk).status == S.UNDER_REVIEW
 
     def test_an_eligible_reviewers_review_is_never_taken(self, world, started):
@@ -330,6 +425,13 @@ class TestRefusals:
 
     @pytest.mark.parametrize('who', ['globex_reviewer', 'globex_owner'])
     def test_another_organization_even_on_a_public_idea(self, world, stalled, who):
+        """
+        Holding `idea.review` in another organization is not platform review.
+
+        Worth pinning on a PUBLIC idea, because a public idea is readable by
+        every signed-in user: being able to *read* the submission must not imply
+        being able to *decide* it.
+        """
         Idea.objects.filter(pk=world['idea'].pk).update(visibility=Idea.Visibility.PUBLIC)
 
         with pytest.raises(services.ReviewError) as exc_info:
@@ -347,7 +449,11 @@ class TestRefusals:
         self.assert_untouched(world, stalled)
 
     def test_an_ineligible_would_be_taker(self, world, stalled):
+        # `second` is a platform reviewer *and* an organization member; losing the
+        # organization membership is not enough to stop them, so the platform
+        # permission has to go as well.
         Membership.objects.filter(user=world['second']).update(status=Membership.Status.INACTIVE)
+        revoke_platform_reviewer(fresh(world['second']))
 
         with pytest.raises(services.ReviewError):
             services.start_review(world['second'], world['idea'].pk)
@@ -356,14 +462,14 @@ class TestRefusals:
     @pytest.mark.parametrize('decision', ['approved', 'rejected', 'changes_requested'])
     def test_a_completed_review_cannot_be_taken_over(self, world, started, decision):
         services.complete_review(world['reviewer'], completion(started, decision))
-        _leave(world)
+        _lose_permission(world)
 
         with pytest.raises(services.ReviewError):
             services.start_review(world['second'], world['idea'].pk)
 
         started.refresh_from_db()
         assert started.decision == decision
-        assert Review.objects.filter(idea=world['idea']).count() == 1
+        assert len(reviews_of(world['idea'])) == 1
 
     def test_withdrawn_is_not_a_decision_a_reviewer_can_record(self, world, started):
         with pytest.raises(services.ReviewError) as exc_info:
@@ -391,7 +497,8 @@ class TestCapabilities:
         idea.refresh_from_db()
         assert not eligibility.can_start_review(world['second'], idea)
 
-        _leave(world)
+        # Only losing the platform permission stalls it.
+        _lose_permission(world)
 
         assert eligibility.can_start_review(world['second'], idea)
         for who in ('reviewer', 'author', 'member', 'globex_reviewer'):
@@ -411,8 +518,13 @@ class TestCapabilities:
         author_view = selectors.list_idea_reviews(world['author'], world['idea'].pk)
         reviewer_view = selectors.list_idea_reviews(world['third'], world['idea'].pk)
 
-        assert [r.decision for r in author_view.reviews] == [Review.Decision.WITHDRAWN]
-        assert [r.round for r in reviewer_view.reviews] == [1, 2]
+        assert [r.decision for r in author_view.reviews] == [
+            Review.Decision.CONFIRMED,
+            Review.Decision.WITHDRAWN,
+        ]
+        # `third` is a platform reviewer, so they see the organization's
+        # confirmation too - both tracks, each numbering its own rounds.
+        assert [r.round for r in reviewer_view.reviews] == [1, 1, 2]
         assert selectors.list_idea_reviews(world['member'], world['idea'].pk).reviews == []
 
 
@@ -422,7 +534,7 @@ class TestCapabilities:
 @pytest.mark.django_db(transaction=True)
 def test_two_concurrent_take_overs_produce_exactly_one(world):
     services.start_review(world['reviewer'], world['idea'].pk)
-    _leave(world)
+    _lose_permission(world)
     barrier = threading.Barrier(2)
     winners, errors = [], []
 
@@ -445,9 +557,15 @@ def test_two_concurrent_take_overs_produce_exactly_one(world):
     assert errors == ['This idea is not waiting for review.']
     rows = reviews_of(world['idea'])
     assert [(r, d) for r, _e, d in rows] == [(1, Review.Decision.WITHDRAWN), (2, None)]
-    assert Review.objects.get(round=2).reviewer_id == winners[0]
+    assert (
+        Review.objects.get(idea=world['idea'], scope=Review.Scope.PLATFORM, round=2).reviewer_id
+        == winners[0]
+    )
     assert Idea.objects.get(pk=world['idea'].pk).status == S.UNDER_REVIEW
-    assert IdeaTransition.objects.filter(idea=world['idea']).count() == 1  # the start only
+    # Four moves and no more: the author's submit, the organization's
+    # confirmation, the author's submit to the platform, and the reviewer's
+    # claim. The take-over itself moves nothing, which is the point.
+    assert IdeaTransition.objects.filter(idea=world['idea']).count() == 4
 
 
 # --- GraphQL ----------------------------------------------------------------------------
@@ -465,7 +583,7 @@ query Idea($id: ID!) { idea(id: $id) { status viewerCanStartReview viewerActiveR
 """
 
 HISTORY = """
-query History($ideaId: ID!) { ideaReviews(ideaId: $ideaId) { round decision reviewerId } }
+query History($ideaId: ID!) { ideaReviews(ideaId: $ideaId) { scope round decision reviewerId } }
 """
 
 COMPLETE = """
@@ -514,8 +632,15 @@ class TestGraphQL:
         }
         assert result['idea']['status'] == 'UNDER_REVIEW'
 
-        history = gql(HISTORY, {'ideaId': idea_id}, world['second'])['ideaReviews']
-        assert [(r['round'], r['decision']) for r in history] == [(1, 'WITHDRAWN'), (2, None)]
+        all_rows = gql(HISTORY, {'ideaId': idea_id}, world['second'])['ideaReviews']
+        # Both tracks, each numbering its own rounds: the organization's
+        # confirmation is its round 1, the platform's withdrawn round and its
+        # replacement are rounds 1 and 2.
+        assert [(r['scope'], r['round'], r['decision']) for r in all_rows] == [
+            ('ORGANIZATION', 1, 'CONFIRMED'),
+            ('PLATFORM', 1, 'WITHDRAWN'),
+            ('PLATFORM', 2, None),
+        ]
 
     def test_nobody_is_offered_an_eligible_reviewers_review(self, gql, world, started):
         for who in ('second', 'member', 'author'):

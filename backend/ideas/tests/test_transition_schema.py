@@ -24,9 +24,11 @@ import json
 import pytest
 from django.test import Client
 
+from ideas.go_ahead import confirm_go_ahead
 from ideas.models import Category, Idea
 from identity.models import User
 from organizations.models import Membership, MembershipRole, Role
+from reviews.tests.platform import confirm_for_organization, grant_platform_reviewer
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -182,17 +184,118 @@ def world(client: Client):
     organization, _ = make_organization(owner=author)
     reviewer = make_user('reviewer@example.com')
     add_member(organization, reviewer, system_role=True)
+    # A second reviewer, and the distinction is the whole point: `reviewer`
+    # validates the organization's own ideas, `platform_reviewer` reviews
+    # submissions to the platform and belongs to no organization at all. The
+    # platform half is authorized by a platform-scoped permission, so granting
+    # it is the only way to build somebody who may make these moves - which is
+    # why the platform-track cases below cannot borrow the organization reviewer.
+    platform_reviewer = make_user('platform@example.com')
+    grant_platform_reviewer(platform_reviewer)
+    # Somebody who is *both*: an active member of the organization who also
+    # holds the platform review permission, and therefore files their own ideas
+    # as well as reviewing other people's. Needed for the self-review property
+    # at the list boundary - a person who holds the permission and is the author
+    # is offered nothing on their own idea, and that is only observable on an
+    # account that can do both.
+    platform_author = make_user('platform-author@example.com')
+    add_member(organization, platform_author)
+    grant_platform_reviewer(platform_author)
     member = make_user('member@example.com')
     add_member(organization, member)
     return {
         'organization': organization,
+        'platform_author': platform_author,
+        'platform_author_token': sign_in(client, platform_author),
         'author': author,
         'author_token': sign_in(client, author),
         'reviewer': reviewer,
         'reviewer_token': sign_in(client, reviewer),
+        'platform_reviewer': platform_reviewer,
+        'platform_reviewer_token': sign_in(client, platform_reviewer),
         'member': member,
         'member_token': sign_in(client, member),
     }
+
+
+def platform_idea(world, *, status=Idea.Status.SUBMITTED, author=None):
+    """
+    An organization-context idea that really reached the platform.
+
+    Built through the journey - the author's submit, the organization's
+    confirmation, the author's submit-on - because a platform reviewer outside
+    the tenant can only *read* an idea the platform actually received: the
+    visibility filter looks for a frozen submission version, so a `SUBMITTED`
+    row written directly would be invisible to them and these cases would be
+    testing a refusal rather than the boundary they are about.
+    """
+    from ideas.services import submit_idea, submit_to_platform
+
+    idea = make_idea(world['organization'], author or world['author'])
+    submit_idea(idea.author, idea.pk)
+    idea.refresh_from_db()
+    confirm_for_organization(idea)
+    idea.refresh_from_db()
+    submit_to_platform(idea.author, idea.pk)
+    idea.refresh_from_db()
+    if status != Idea.Status.SUBMITTED:
+        idea.status = status
+        idea.save()
+    return idea
+
+
+def platform_approve(world, idea, reviewer=None):
+    """
+    Approve a submitted idea through the real review operations.
+
+    Not `idea.status = 'approved'`: the go-ahead refuses an approval whose report
+    was never generated, and the report is written by the approval's own
+    transaction. Writing the status by hand would produce an idea that cannot
+    legitimately be handed over, which is a state the product has no name for -
+    so the review is started and completed the way the review workspace does it.
+    """
+    from reviews import services as review_services
+
+    reviewer = reviewer or world['platform_reviewer']
+    review = review_services.start_review(reviewer, idea.pk)
+    review_services.complete_review(
+        reviewer,
+        review_services.CompleteReviewInput(
+            idea_id=idea.pk,
+            review_id=review.pk,
+            decision='approved',
+            feedback='Worth automating.',
+            assessments=tuple(
+                review_services.AssessmentInput(criterion, 'meets', f'on {criterion}')
+                for criterion in (
+                    'PROBLEM_CLARITY',
+                    'AUTOMATION_SUITABILITY',
+                    'FEASIBILITY',
+                    'EXPECTED_BENEFIT',
+                    'EVIDENCE',
+                )
+            ),
+        ),
+    )
+    return Idea.objects.get(pk=idea.pk)
+
+
+def individual_idea(world, author=None, **overrides):
+    """An INDIVIDUAL-context idea: no organization, so submission is submission."""
+    from ideas.services import IdeaInput, create_idea_in_context
+
+    fields = {
+        'title': 'An idea of my own',
+        'description': DESCRIPTION,
+        'visibility': Idea.Visibility.PUBLIC,
+        'category_id': Category.objects.create(name=f'Cat {Category.objects.count() + 1}').pk,
+    }
+    fields.update(overrides)
+    return create_idea_in_context(
+        author or world['author'],
+        IdeaInput(**fields),
+        submission_context=Idea.SubmissionContext.INDIVIDUAL,
+    )
 
 
 def _introspect(gql, query, variables=None):
@@ -245,12 +348,54 @@ class TestTransitionIdeaMutation:
     )
     def test_a_reviewer_cannot_make_a_review_move_through_it(self, gql, world, from_status, to):
         """
-        S3-004: starting and deciding a review are `startReview` /
-        `completeReview`, which leave a `Review`. Through `transitionIdea` they
-        would leave none, so they are refused here - as a payload, with the
-        idea unmoved - even for a reviewer who could otherwise make them.
+        S3-004: starting and deciding a review are the review workspace's
+        operations, which leave a `Review`. Through `transitionIdea` they would
+        leave none, so they are refused here - as a payload, with the idea
+        unmoved - even for a reviewer who could otherwise make them.
+
+        Driven by the **platform** reviewer, because all four pairs are the
+        platform track's; the organization's two pairs are checked the same way
+        in `test_an_organization_reviewer_cannot_make_theirs_through_it`.
         """
-        idea = make_idea(world['organization'], world['author'], status=from_status)
+        idea = platform_idea(world, status=from_status)
+
+        result = run(
+            gql,
+            TRANSITION,
+            'transitionIdea',
+            {'id': str(idea.pk), 'to': to},
+            bearer=world['platform_reviewer_token'],
+        )
+
+        assert result['success'] is False
+        assert 'review workspace' in result['message']
+        assert Idea.objects.get(pk=idea.pk).status == from_status
+
+    @pytest.mark.parametrize(
+        ('from_status', 'to'),
+        [
+            ('SUBMITTED_TO_ORGANIZATION', 'ORGANIZATION_CONFIRMED'),
+            ('SUBMITTED_TO_ORGANIZATION', 'ORGANIZATION_CHANGES_REQUESTED'),
+        ],
+    )
+    def test_an_organization_reviewer_cannot_make_theirs_through_it(
+        self, gql, world, from_status, to
+    ):
+        """
+        The same boundary on the organization's track, with the organization
+        Reviewer - somebody who *can* make both moves, in the review workspace.
+
+        Asserted separately rather than folded into the platform cases because
+        the two reviewer kinds are different permissions and a single
+        parametrization would quietly let the organization reviewer stand in for
+        the platform one.
+        """
+        # GraphQL spells the enum `SUBMITTED_TO_ORGANIZATION`; the column spells
+        # it `submitted_to_organization`. Passed as one string and lowered once,
+        # so the parametrization reads as the API does and the comparison below
+        # is against the stored value.
+        stored = from_status.lower()
+        idea = make_idea(world['organization'], world['author'], status=stored)
 
         result = run(
             gql,
@@ -262,35 +407,77 @@ class TestTransitionIdeaMutation:
 
         assert result['success'] is False
         assert 'review workspace' in result['message']
-        assert Idea.objects.get(pk=idea.pk).status == from_status
+        assert Idea.objects.get(pk=idea.pk).status == stored
 
-    def test_a_reviewer_hands_off_an_approved_idea(self, gql, world):
-        idea = make_idea(world['organization'], world['author'], status=Idea.Status.APPROVED)
+    def test_the_developer_handoff_follows_the_go_ahead(self, gql, world):
+        """
+        The hand-off to Sprint 4, and the fact that it is not reachable from
+        `APPROVED` any more.
+
+        Two things are asserted, because either alone would be misleading: the
+        authorized move succeeds, and the shortcut a reader would assume still
+        works - a platform reviewer handing an approved idea straight over -
+        is refused. The refusal is the author's, and no permission buys it.
+        """
+        idea = platform_approve(world, platform_idea(world))
+        assert idea.status == Idea.Status.APPROVED
+
+        premature = run(
+            gql,
+            TRANSITION,
+            'transitionIdea',
+            {'id': str(idea.pk), 'to': 'AUTOMATION_PROPOSAL'},
+            bearer=world['platform_reviewer_token'],
+        )
+        assert premature['success'] is False
+        assert Idea.objects.get(pk=idea.pk).status == 'approved'
+
+        confirm_go_ahead(world['author'], idea.pk)
 
         result = run(
             gql,
             TRANSITION,
             'transitionIdea',
             {'id': str(idea.pk), 'to': 'AUTOMATION_PROPOSAL'},
-            bearer=world['reviewer_token'],
+            bearer=world['platform_reviewer_token'],
         )
 
         assert result['success'] is True
         assert result['idea']['status'] == 'AUTOMATION_PROPOSAL'
 
     def test_the_author_submits_a_draft(self, gql, world):
-        idea = make_idea(world['organization'], world['author'])
+        """
+        An organization draft goes to its organization, not to the platform.
 
-        result = run(
+        One mutation and one target in the enum, so the *client* has to know
+        which door it is opening - unlike `submitIdea`, which resolves the target
+        from the idea's context. That is the distinction worth pinning at the
+        boundary: `transitionIdea` is the raw lifecycle, `submitIdea` is the
+        operation a person actually presses.
+        """
+        organization_draft = make_idea(world['organization'], world['author'])
+
+        to_organization = run(
             gql,
             TRANSITION,
             'transitionIdea',
-            {'id': str(idea.pk), 'to': 'SUBMITTED'},
+            {'id': str(organization_draft.pk), 'to': 'SUBMITTED_TO_ORGANIZATION'},
+            bearer=world['author_token'],
+        )
+        assert to_organization['success'] is True
+        assert to_organization['idea']['submittedAt'] is not None
+
+        individual_draft = individual_idea(world)
+        to_platform = run(
+            gql,
+            TRANSITION,
+            'transitionIdea',
+            {'id': str(individual_draft.pk), 'to': 'SUBMITTED'},
             bearer=world['author_token'],
         )
 
-        assert result['success'] is True
-        assert result['idea']['submittedAt'] is not None
+        assert to_platform['success'] is True
+        assert to_platform['idea']['submittedAt'] is not None
 
     def test_an_illegal_transition_is_a_payload(self, gql, world):
         """
@@ -492,14 +679,25 @@ class TestAvailableTransitionsField:
 
     def test_a_list_reports_the_viewers_moves_per_item(self, gql, world):
         """
-        Per item, not per request: a reviewer looking at a list of somebody
-        else's approved ideas is offered the hand-off on each, and offered
-        nothing on their own.
+        Per item, not per request: a platform reviewer looking at a list is
+        offered the hand-off on each idea that has been through it, and nothing
+        on the ideas that have not - or on their own.
         """
-        theirs = make_idea(world['organization'], world['author'], status=Idea.Status.APPROVED)
-        mine = make_idea(world['organization'], world['reviewer'], status=Idea.Status.APPROVED)
+        theirs = platform_approve(world, platform_idea(world))
+        confirm_go_ahead(world['author'], theirs.pk)
+        theirs.refresh_from_db()
+        assert theirs.status == Idea.Status.READY_FOR_IMPLEMENTATION
+        # The same viewer's **own** idea, at the same point in the journey, so
+        # the only difference between the two rows is who wrote it. Holding the
+        # platform permission is not a licence to review yourself: the
+        # self-review rule offers the author nothing, which is what stops a
+        # reviewer handing their own approved idea to the developer track.
+        mine = platform_approve(world, platform_idea(world, author=world['platform_author']))
+        confirm_go_ahead(world['platform_author'], mine.pk)
+        mine.refresh_from_db()
+        assert mine.status == Idea.Status.READY_FOR_IMPLEMENTATION
 
-        page = run(gql, IDEAS_QUERY, 'ideas', bearer=world['reviewer_token'])
+        page = run(gql, IDEAS_QUERY, 'ideas', bearer=world['platform_author_token'])
         by_id = {idea['id']: idea['availableTransitions'] for idea in page['items']}
 
         assert by_id[str(theirs.pk)] == ['AUTOMATION_PROPOSAL']
@@ -512,7 +710,7 @@ class TestAvailableTransitionsField:
 @pytest.mark.django_db
 class TestPayloadShape:
     def test_a_success_reports_the_state_and_where_it_went_next(self, gql, world):
-        idea = make_idea(world['organization'], world['author'])
+        idea = individual_idea(world)
 
         result = run(
             gql,
@@ -544,14 +742,32 @@ class TestPayloadShape:
         assert result['success'] is False
         assert result['field'] is None
 
-    def test_an_incomplete_submission_is_refused_without_a_field(self, gql, world):
+    @pytest.mark.parametrize(
+        'to',
+        ['SUBMITTED', 'SUBMITTED_TO_ORGANIZATION'],
+        ids=['individual', 'organization'],
+    )
+    def test_an_incomplete_submission_is_refused_without_a_field(self, gql, world, to):
+        """
+        The completeness rule at the boundary, on **both** stages.
+
+        The two stages submit the same idea, so they must accept the same idea:
+        `SUBMISSION_TARGETS` deliberately includes `SUBMITTED_TO_ORGANIZATION`
+        for exactly this reason, and an organization reviewer cannot read a
+        `PRIVATE` idea, so submitting one to the organization would park it in a
+        queue nobody in that organization could ever reach. Both refusals are
+        about the *idea* - a field that is blank - so neither carries a `field`.
+        """
         idea = make_idea(world['organization'], world['author'], description='')
+        if to == 'SUBMITTED':
+            # An individual idea, because `SUBMITTED` is that context's door.
+            idea = individual_idea(world, description='')
 
         result = run(
             gql,
             TRANSITION,
             'transitionIdea',
-            {'id': str(idea.pk), 'to': 'SUBMITTED'},
+            {'id': str(idea.pk), 'to': to},
             bearer=world['author_token'],
         )
 

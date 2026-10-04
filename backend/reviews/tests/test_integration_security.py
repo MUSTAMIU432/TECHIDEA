@@ -34,6 +34,11 @@ from organizations.services import (
 from reviews import services
 from reviews.models import Review, ReviewCriterionAssessment
 from reviews.tests.invariants import assert_review_records_consistent
+from reviews.tests.platform import (
+    confirm_for_organization,
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 S = Idea.Status
 CRITERIA = ReviewCriterionAssessment.Criterion.values
@@ -56,6 +61,18 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # A **platform** reviewer as well as an organization one, because this
+        # fixture builds submissions and their reviews - and platform review is
+        # authorized by a platform permission and nothing else.
+        #
+        # That makes every holder of it cross-tenant-readable, which is the point
+        # of platform review but the opposite of what the isolation tests below
+        # are about. Those tests therefore **revoke it** from their caller first,
+        # so they measure organization isolation rather than accidentally measuring
+        # the platform track; and
+        # `test_a_platform_reviewer_reads_across_tenants_and_cannot_act_on_someone
+        # _elses_review` is what covers the platform side deliberately.
+        grant_platform_reviewer(user)
 
 
 def completion(review, decision, feedback='Because.'):
@@ -90,6 +107,14 @@ def build_tenant(name, category):
             ),
         )
         idea_services.submit_idea(author, created.pk)
+        # An organization idea is validated by its organization before the
+        # platform sees it, so getting it to the platform takes three moves by
+        # three actors. The organization helper reviewer does the middle one; the
+        # author submits on.
+        created.refresh_from_db()
+        confirm_for_organization(created)
+        created.refresh_from_db()
+        idea_services.submit_to_platform(author, created.pk)
         return created
 
     ideas = {}
@@ -206,12 +231,31 @@ def test_nothing_of_another_tenants_reviews_is_reachable(gql, tenants, home, awa
     own_idea = tenants[home]['ideas'][Idea.Visibility.ORGANIZATION]['waiting']
     before = snapshot()
 
+    # Measure **organization** isolation: the caller keeps their organization
+    # Reviewer role and loses only the platform permission, so this test cannot
+    # pass or fail because of the platform track.
+    if who == 'reviewer':
+        revoke_platform_reviewer(caller)
+
     assert gql(QUEUE, {'o': other['organization'].pk}, caller) == {'reviewQueue': {'items': []}}
     assert gql(CAN_REVIEW, {'o': other['organization'].pk}, caller) == {'viewerCanReviewIn': False}
+
+    # Their own tenant's history, for comparison, and it is deliberately not
+    # uniform: the **author** sees their own idea's reviews, while an organization
+    # Owner or Reviewer sees its lifecycle (every row names who moved it) but not
+    # the platform reviews. Two different audiences with two different claims -
+    # which is the split this phase introduced.
+    if who == 'author':
+        assert gql(REVIEWS, {'i': own_idea.pk}, caller)['ideaReviews']
+    else:
+        assert gql(REVIEWS, {'i': own_idea.pk}, caller) == {'ideaReviews': []}
+    assert gql(TRANSITIONS, {'i': own_idea.pk}, caller)['ideaTransitions']
 
     for states in other['ideas'].values():
         for key in ('waiting', 'in_review', 'decided'):
             idea_id = states[key].pk
+            # Unreadable to this caller, whatever the idea's visibility: they are
+            # in another organization and hold nothing platform-scoped.
             assert gql(REVIEWS, {'i': idea_id}, caller) == {'ideaReviews': []}
             assert gql(TRANSITIONS, {'i': idea_id}, caller) == {'ideaTransitions': []}
             assert gql(START, {'i': idea_id}, caller)['startReview']['success'] is False
@@ -235,8 +279,71 @@ def test_nothing_of_another_tenants_reviews_is_reachable(gql, tenants, home, awa
     assert snapshot() == before
 
 
+def test_a_platform_reviewer_reads_across_tenants_and_cannot_act_on_someone_elses_review(
+    gql, tenants
+):
+    """
+    Platform review is cross-tenant, and that is the point of it.
+
+    A platform reviewer has no organization of their own here, so this is the
+    assertion that separates the two tracks completely: they can *read* every
+    organization's submissions and review history, and can *act* on none of them
+    - not on an open review somebody else holds, and not on a review they are not
+    the reviewer of.
+    """
+    reviewer = tenants['acme']['reviewer']
+    grant_platform_reviewer(reviewer)
+
+    for tenant in ('acme', 'globex'):
+        for states in tenants[tenant]['ideas'].values():
+            for key in ('waiting', 'in_review', 'decided'):
+                idea_id = states[key].pk
+                rows = gql(REVIEWS, {'i': idea_id}, reviewer)['ideaReviews']
+                assert rows, f'{tenant}/{key} is readable to a platform reviewer'
+                assert gql(TRANSITIONS, {'i': idea_id}, reviewer)['ideaTransitions']
+                # Called **once** and kept: `startReview` is a mutation, so
+                # asking twice would claim it and then be refused, and the second
+                # answer would say nothing about the first.
+                claim = gql(START, {'i': idea_id}, reviewer)['startReview']
+                if key == 'waiting':
+                    # Waiting submissions are exactly what a platform reviewer may
+                    # claim - across every tenant, which is the point.
+                    assert claim['success'] is True, (tenant, key, states[key].visibility, claim)
+                else:
+                    assert claim['success'] is False, (tenant, key, claim)
+
+                # Deciding somebody else's open review is refused, and so is
+                # borrowing a review id across ideas.
+                open_review = states['open_review']
+                result = gql(COMPLETE, complete_vars(open_review.idea_id, open_review.pk), reviewer)
+                # For `waiting` the platform reviewer has just claimed it above, so
+                # they now hold that review - and completing somebody else's is
+                # what is still refused.
+                if key != 'waiting':
+                    assert result['completeReview']['success'] is False
+                borrowed = gql(COMPLETE, complete_vars(idea_id, open_review.pk), reviewer)
+                assert borrowed['completeReview']['success'] is False
+
+    # And nothing of the other tenant's *private* legacy rows. The platform
+    # reviewer branch in the visibility filter is deliberately narrow - only an
+    # idea that was actually submitted to the platform - so an idea that was never
+    # submitted stays unreadable however platform-scoped the reader is.
+    for visibility in (Idea.Visibility.PRIVATE, Idea.Visibility.DEPARTMENT):
+        hidden = tenants['globex']['hidden'][visibility].pk
+        assert gql(REVIEWS, {'i': hidden}, reviewer) == {'ideaReviews': []}
+        assert gql(TRANSITIONS, {'i': hidden}, reviewer) == {'ideaTransitions': []}
+
+    # ...and once claimed, it is theirs: the same claim is refused a second time
+    # because an eligible reviewer's open review is never taken from them.
+    already = tenants['globex']['ideas'][Idea.Visibility.PUBLIC]['waiting'].pk
+    assert gql(START, {'i': already}, reviewer)['startReview']['success'] is False
+
+
 def test_unavailable_and_nonexistent_answer_alike(gql, tenants):
     caller = tenants['acme']['reviewer']
+    # Not a platform reviewer, or they could read the other tenant's submission
+    # and this pair would not be alike for the wrong reason.
+    revoke_platform_reviewer(caller)
     foreign = tenants['globex']['ideas'][Idea.Visibility.ORGANIZATION]['waiting'].pk
     missing = Idea.objects.order_by('-pk').first().pk + 1000
 
@@ -301,11 +408,40 @@ def _input_field_names(graphql_type, seen=None):
 def test_the_only_writes_to_reviews_and_the_trail_are_the_two_review_operations():
     mutations = root_schema._schema.mutation_type.fields
 
-    assert {m for m in mutations if 'eview' in m} == {'startReview', 'completeReview'}
+    # Four review mutations, because there are two tracks - and no way to write a
+    # `Review` row directly, in either of them.
+    # Every mutation that writes a `Review` row, in either track. Scoped on the
+    # names that *start or complete* a review so that routing
+    # (`assignPlatformReviewer`) is not counted here - it writes a `ReviewAssignment`,
+    # which is a different table and a different operation.
+    review_mutations = [
+        m
+        for m in mutations
+        if m.startswith(
+            ('startReview', 'completeReview', 'startOrganization', 'completeOrganization')
+        )
+    ]
+    assert set(review_mutations) == {
+        'startReview',
+        'completeReview',
+        'startOrganizationReview',
+        'completeOrganizationReview',
+    }
     assert {m for m in mutations if 'ransition' in m} == {'transitionIdea'}
+    # The owner's go-ahead is the only way into `READY_FOR_IMPLEMENTATION`, and
+    # it is a mutation rather than a status a client can ask for.
+    assert {m for m in mutations if 'GoAhead' in m} == {'giveGoAhead'}
     # No write input carries a status, a reviewer, an actor, a round or a time:
     # each is the server's to decide.
-    for mutation in ('createIdea', 'updateIdea', 'submitIdea', 'startReview', 'completeReview'):
+    for mutation in (
+        'createIdea',
+        'updateIdea',
+        'submitIdea',
+        'startReview',
+        'completeReview',
+        'startOrganizationReview',
+        'completeOrganizationReview',
+    ):
         names = set(mutations[mutation].args)
         for argument in mutations[mutation].args.values():
             names |= _input_field_names(argument.type)
@@ -408,6 +544,12 @@ def one_tenant(db):
         ),
     )
     idea_services.submit_idea(author, idea.pk)
+    # On to the platform: an organization idea is confirmed by its organization
+    # first, and only the author submits it afterwards.
+    idea.refresh_from_db()
+    confirm_for_organization(idea)
+    idea.refresh_from_db()
+    idea_services.submit_to_platform(author, idea.pk)
     return {'author': author, 'reviewer': reviewer, 'second': second, 'idea': idea}
 
 
@@ -443,7 +585,9 @@ def test_two_reviewers_starting_at_once_leave_one_review(one_tenant):
     )
 
     assert sorted(kind for kind, _ in outcomes) == ['ok', 'refused']
-    assert Review.objects.filter(idea=one_tenant['idea']).count() == 1
+    # One **platform** review: the organization's confirmation that got the idea
+    # onto the platform is a separate round in the other track.
+    assert Review.objects.filter(idea=one_tenant['idea'], scope=Review.Scope.PLATFORM).count() == 1
     assert_review_records_consistent(one_tenant['idea'])
 
 
@@ -470,7 +614,7 @@ def test_resubmission_racing_the_completion_that_allows_it(one_tenant):
         assert idea.status == S.SUBMITTED
     else:
         assert idea.status == S.CHANGES_REQUESTED
-    assert Review.objects.filter(idea=idea).count() == 1
+    assert Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM).count() == 1
     assert_review_records_consistent(idea)
 
 

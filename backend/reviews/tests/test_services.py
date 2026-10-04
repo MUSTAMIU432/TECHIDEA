@@ -34,6 +34,11 @@ from organizations.services import (
 )
 from reviews import services
 from reviews.models import Review, ReviewCriterionAssessment
+from reviews.tests.platform import (
+    build_idea,
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -57,20 +62,38 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        # The organization Reviewer role above still governs the organization
+        # review queue, which is a separate track with separate rules.
+        grant_platform_reviewer(user)
     return membership
 
 
 def make_idea(organization, author, *, status=Idea.Status.SUBMITTED, visibility=None):
-    return Idea.objects.create(
+    """
+    An idea in `status`.
+
+    `SUBMITTED` means **on the platform**, so building it walks the organization
+    stage as well - an organization idea is confirmed by its organization before
+    the platform ever sees it, and a fixture that skipped that would be asserting
+    a journey that cannot happen. Every other status is written directly, because
+    those are the states these tests are *about*.
+    """
+    return build_idea(
+        status=status,
         organization=organization,
         author=author,
         title='Automate the invoice run',
         description=DESCRIPTION,
         category=Category.objects.create(name=f'Cat {Category.objects.count() + 1}'),
         visibility=visibility or Idea.Visibility.ORGANIZATION,
-        status=status,
-        submitted_at=None if status == Idea.Status.DRAFT else timezone.now(),
     )
+
+
+def platform_reviews(idea):
+    """`idea`'s **platform** reviews - the organization round is a different track."""
+    return Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM)
 
 
 def assessments(rating='meets', **overrides):
@@ -165,7 +188,7 @@ class TestStartReview:
 
         with pytest.raises(services.ReviewError, match='not waiting for review'):
             services.start_review(world['second'], world['idea'].pk)
-        assert Review.objects.filter(idea=world['idea']).count() == 1
+        assert platform_reviews(world['idea']).count() == 1
 
     @pytest.mark.parametrize('who', ['author', 'member'])
     def test_readers_who_are_not_its_reviewers(self, world, who):
@@ -181,13 +204,33 @@ class TestStartReview:
             services.start_review(world['owner'], idea.pk)
 
     def test_another_organizations_reviewer_on_a_public_idea(self, world):
+        """
+        Holding `idea.review` in another organization is not platform review.
+
+        Pinned on a `PUBLIC` idea, because a public idea is readable by every
+        signed-in user: being able to *read* the submission must not imply being
+        able to *decide* it.
+        """
+        # Globex's reviewer is an **organization** reviewer and nothing more: the
+        # platform permission this file's helper grants is taken away again.
+        revoke_platform_reviewer(User.objects.get(pk=world['globex_reviewer'].pk))
         idea = make_idea(world['acme'], world['author'], visibility=Idea.Visibility.PUBLIC)
 
         with pytest.raises(services.ReviewError, match='not allowed to review'):
             services.start_review(world['globex_reviewer'], idea.pk)
 
     def test_unreadable_ideas_answer_like_missing_ones(self, world):
-        private = make_idea(world['acme'], world['author'], visibility=Idea.Visibility.PRIVATE)
+        # Written in a reviewable state rather than submitted to one: a private
+        # idea cannot be submitted, which is the same rule from the other side.
+        # What matters here is only that a reviewer cannot *read* it.
+        private = make_idea(
+            world['acme'],
+            world['author'],
+            status=Idea.Status.SUBMITTED_TO_ORGANIZATION,
+            visibility=Idea.Visibility.PRIVATE,
+        )
+
+        revoke_platform_reviewer(User.objects.get(pk=world['globex_reviewer'].pk))
 
         for who, idea_id in (
             ('globex_reviewer', world['idea'].pk),
@@ -210,20 +253,33 @@ class TestStartReview:
             services.start_review(world['reviewer'], world['idea'].pk)
 
     def test_an_inactive_membership(self, world):
+        # Platform review does not consult organization membership, so losing it
+        # alone is not enough to stop somebody claiming - the **platform**
+        # permission has to go as well. `test_an_organization_loss_is_not_a
+        # platform_loss` in `test_takeover.py` is the converse.
         Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
 
         with pytest.raises(services.ReviewError):
             services.start_review(world['reviewer'], world['idea'].pk)
 
     def test_a_removed_role_takes_effect_whatever_the_client_was_shown(self, world):
-        """The stale-capability case: eligible when the page loaded, not now."""
-        MembershipRole.objects.filter(
-            membership__user=world['reviewer'], role__slug=REVIEWER_ROLE_SLUG
-        ).delete()
+        """
+        The stale-capability case: eligible when the page loaded, not now.
+
+        Removed here is the **platform permission**, because that is what
+        platform review is authorized by. Removing the organization Reviewer role
+        would leave them perfectly able to act and this test would pass for the
+        wrong reason.
+        """
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
 
         with pytest.raises(services.ReviewError, match='not allowed to review'):
-            services.start_review(world['reviewer'], world['idea'].pk)
-        assert not Review.objects.exists()
+            services.start_review(User.objects.get(pk=world['reviewer'].pk), world['idea'].pk)
+        # No platform review was opened. (The organization confirmation that got
+        # this idea onto the platform is a round in the other track and is
+        # already there.)
+        assert platform_reviews(world['idea']).count() == 0
 
 
 @pytest.mark.django_db(transaction=True)
@@ -257,8 +313,8 @@ def test_concurrent_starts_produce_exactly_one_review(world):
     assert len(winners) == 1
     assert len(errors) == 1
     assert isinstance(errors[0], services.ReviewError)
-    assert Review.objects.filter(idea=idea).count() == 1
-    assert Review.objects.get(idea=idea).reviewer_id == winners[0]
+    assert platform_reviews(idea).count() == 1
+    assert Review.objects.get(idea=idea, scope=Review.Scope.PLATFORM).reviewer_id == winners[0]
     assert Idea.objects.get(pk=idea.pk).status == Idea.Status.UNDER_REVIEW
 
 
@@ -348,12 +404,22 @@ class TestCompleteReview:
 
     @pytest.mark.parametrize('who', ['author', 'member', 'globex_reviewer'])
     def test_nobody_else_learns_anything(self, world, started, who):
+        """
+        One message for every refusal, and nothing that identifies the review.
+
+        `globex_reviewer` is an organization reviewer in *another* tenant, and
+        they can read this `PUBLIC` submission - so their refusal is about acting,
+        not about seeing, and lands further along: they are past the review row
+        before the "is this my review?" check runs. All three answers are
+        deliberately indistinguishable to somebody guessing ids.
+        """
         with pytest.raises(services.ReviewError) as exc_info:
             services.complete_review(world[who], completion(started))
 
         assert exc_info.value.message in {
             'Idea is unavailable.',
             'You are not allowed to review this idea.',
+            'Review is unavailable.',
         }
         self.assert_untouched(world, started)
 
@@ -394,10 +460,12 @@ class TestCompleteReview:
         assert started.assessments.count() == len(CRITERIA)
 
     def test_a_reviewer_who_lost_eligibility_mid_review(self, world, started):
-        Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
+        # The permission, for the reason `test_a_removed_role_takes_effect_...`
+        # explains.
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
 
         with pytest.raises(services.ReviewError):
-            services.complete_review(world['reviewer'], completion(started))
+            services.complete_review(User.objects.get(pk=world['reviewer'].pk), completion(started))
         self.assert_untouched(world, started)
 
     def test_anonymous(self, world, started):

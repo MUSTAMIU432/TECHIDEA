@@ -27,6 +27,11 @@ from organizations.services import (
 )
 from reviews import eligibility, selectors
 from reviews.models import Review
+from reviews.tests.platform import (
+    build_idea,
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -53,21 +58,34 @@ def add_member(organization, user, *, reviewer=False, status=Membership.Status.A
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        # The organization Reviewer role above still governs the organization
+        # review queue, which is a separate track with separate rules.
+        grant_platform_reviewer(user)
     return membership
 
 
-def make_idea(organization, author, *, status=Idea.Status.SUBMITTED, visibility=None, **extra):
-    return Idea.objects.create(
+def make_idea(
+    organization, author, *, status=Idea.Status.SUBMITTED_TO_ORGANIZATION, visibility=None, **extra
+):
+    """
+    An idea in `status`, defaulted to the one the **organization** queue holds.
+
+    `review_queue` is the organization's queue, so `SUBMITTED_TO_ORGANIZATION` is
+    what "waiting" means here; the platform queue has its own tests below with
+    their own default.
+    """
+    return build_idea(
+        status=status,
+        submitted_at=extra.pop('submitted_at', None),
         organization=organization,
         author=author,
         title=extra.pop('title', 'An idea'),
         description=DESCRIPTION,
         category=Category.objects.create(name=f'Cat {Category.objects.count() + 1}'),
         visibility=visibility or Idea.Visibility.ORGANIZATION,
-        status=status,
-        submitted_at=None
-        if status == Idea.Status.DRAFT
-        else extra.pop('submitted_at', None) or timezone.now(),
+        **extra,
     )
 
 
@@ -112,6 +130,11 @@ def world():
     }
 
 
+def fresh(user):
+    """`user` again from the database, so its permission cache is empty."""
+    return User.objects.get(pk=user.pk)
+
+
 def queue_ids(user, organization, **kwargs):
     return [idea.pk for idea in selectors.review_queue(user, organization.pk, **kwargs).items]
 
@@ -126,9 +149,17 @@ class TestQueueContents:
 
     @pytest.mark.parametrize(
         'status',
-        [s for s in Idea.Status.values if s != Idea.Status.SUBMITTED],
+        [s for s in Idea.Status.values if s != Idea.Status.SUBMITTED_TO_ORGANIZATION],
     )
     def test_every_other_status_is_excluded(self, world, status):
+        """
+        Only `SUBMITTED_TO_ORGANIZATION` is in the organization's queue.
+
+        Including `SUBMITTED` - an idea already with the platform is not this
+        organization's to confirm any more - and including `ORGANIZATION_CONFIRMED`,
+        which has *left* the tenant. And `AUTOMATION_PROPOSAL`/`READY_FOR_IMPLEMENTATION`,
+        which are finished.
+        """
         make_idea(world['acme'], world['author'], status=status)
 
         assert queue_ids(world['reviewer'], world['acme']) == []
@@ -259,24 +290,37 @@ class TestQueueIsReadOnly:
 
         assert not Review.objects.exists()
         idea.refresh_from_db()
-        assert idea.status == Idea.Status.SUBMITTED
+        assert idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
 
     def test_every_queued_idea_is_one_the_viewer_can_start(self, world):
         make_idea(world['acme'], world['author'])
         make_idea(world['acme'], world['member'])
 
         for idea in selectors.review_queue(world['reviewer'], world['acme'].pk).items:
-            assert idea.viewer_can_start_review is True
+            assert idea.viewer_can_start_organization_review is True
             # The page's shortcut agrees with the per-idea rule it replaces.
-            assert eligibility.can_start_review(world['reviewer'], idea)
+            assert eligibility.can_start_organization_review(world['reviewer'], idea)
+
+            # ...and nothing on this queue is on the platform's.
+            assert eligibility.can_start_review(world['reviewer'], idea) is False
 
     def test_the_queue_costs_a_fixed_number_of_queries(self, world, django_assert_num_queries):
         for _ in range(8):
             make_idea(world['acme'], world['author'])
 
-        # Membership + permission (eligibility), membership (organization
-        # feed), active organizations (visibility), count, rows. Not per idea.
-        with django_assert_num_queries(6):
+        # Eight for eight ideas is the point: a page of fifty must cost what a
+        # page of one costs.
+        #
+        # Nine for eight ideas, and the same nine for fifty: membership and
+        # permission (eligibility), membership again (the organization feed), the
+        # three tenant facts the visibility filter needs - active organizations,
+        # active teams, and whether this user is a platform reviewer - the two
+        # vote-count subqueries, the page count, and the rows. **Not one per
+        # idea**, which is the property this number exists to protect: the tenant
+        # facts are memoised per request (`ideas.selectors._organization_ids`,
+        # `_team_ids`, `_is_platform_reviewer`) precisely so that building a second
+        # queryset in the same request does not repeat them.
+        with django_assert_num_queries(9):
             page = selectors.review_queue(world['reviewer'], world['acme'].pk)
             assert len(page.items) == 8
             for idea in page.items:
@@ -312,11 +356,37 @@ class TestHistory:
         assert selectors.list_idea_reviews(world['member'], idea.pk).reviews == []
 
     def test_a_public_ideas_readers_elsewhere_see_nothing(self, world, rounds):
+        """
+        A `PUBLIC` idea is readable by everybody; its platform review history is
+        not.
+
+        Because platform review is authorized by a platform permission, somebody
+        holding only an *organization* role in another tenant sees nothing - which
+        is the isolation this file exists to pin. A platform reviewer would see
+        it; `test_a_platform_reviewer_sees_the_history` covers that separately.
+        """
         idea = rounds[0].idea
         Idea.objects.filter(pk=idea.pk).update(visibility=Idea.Visibility.PUBLIC)
 
         for who in ('outsider', 'globex_reviewer', 'globex_owner', 'member'):
-            assert selectors.list_idea_reviews(world[who], idea.pk).reviews == [], who
+            revoke_platform_reviewer(fresh(world[who]))
+            assert selectors.list_idea_reviews(fresh(world[who]), idea.pk).reviews == [], who
+
+    def test_a_platform_reviewer_sees_the_history(self, world, rounds):
+        """
+        The other side of the same coin: the platform permission is what makes a
+        submission's history readable across tenants, and nothing else does.
+        """
+        idea = rounds[0].idea
+        Idea.objects.filter(pk=idea.pk).update(visibility=Idea.Visibility.PUBLIC)
+        outsider = fresh(world['outsider'])
+        assert selectors.list_idea_reviews(outsider, idea.pk).reviews == []
+
+        grant_platform_reviewer(fresh(world['outsider']))
+
+        history = selectors.list_idea_reviews(fresh(world['outsider']), idea.pk)
+        assert history.reviews == list(rounds)
+        assert history.viewer_is_reviewer is True
 
     def test_another_organizations_reviewer_guessing_the_id(self, world, idea, rounds):
         assert selectors.list_idea_reviews(world['globex_reviewer'], idea.pk).reviews == []
@@ -361,14 +431,29 @@ class TestActiveReview:
         assert selectors.active_review_id_for(world['reviewer'], idea) is None
 
     def test_a_former_reviewer_has_no_active_review(self, world):
+        """
+        Losing the **platform** permission takes the active review with it.
+
+        Organization membership is not involved: platform review never consults it,
+        so an inactive organization membership would not stop somebody deciding a
+        submission they already hold.
+        """
         idea = make_idea(world['acme'], world['author'], status=Idea.Status.UNDER_REVIEW)
         make_review(idea, world['reviewer'])
-        Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
+        revoke_platform_reviewer(fresh(world['reviewer']))
 
-        assert selectors.active_review_id_for(world['reviewer'], idea) is None
+        assert selectors.active_review_id_for(fresh(world['reviewer']), idea) is None
 
     def test_no_query_outside_under_review(self, world, django_assert_num_queries):
-        idea = make_idea(world['acme'], world['author'])
+        """
+        No query at all for an idea that is not under review.
+
+        The status is checked first and answers without touching the database for
+        every state but `UNDER_REVIEW` - which matters because the capability flag
+        is resolved for every idea a client renders, and most of them are not under
+        review.
+        """
+        idea = make_idea(world['acme'], world['author'], status=Idea.Status.SUBMITTED)
 
         with django_assert_num_queries(0):
             assert selectors.active_review_id_for(world['reviewer'], idea) is None

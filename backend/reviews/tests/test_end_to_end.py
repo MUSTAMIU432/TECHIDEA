@@ -27,10 +27,14 @@ from django.test import Client
 
 from ideas.models import Category, Idea, IdeaTransition
 from identity.models import User
+from notifications.models import Notification
 from organizations.models import Membership
 from reviews.models import Review, ReviewCriterionAssessment
-from reviews.notifications import REVIEW_DECISION_SUBJECT
 from reviews.tests.invariants import assert_review_records_consistent
+from reviews.tests.platform import (
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 PASSWORD = 'a-strong-unique-pass-1'
 CRITERIA = [c.upper() for c in ReviewCriterionAssessment.Criterion.values]
@@ -95,13 +99,18 @@ query Queue($organizationId: ID!) {
   reviewQueue(organizationId: $organizationId) { items { id } pageInfo { totalCount } }
 }
 """
+ORG_QUEUE = """
+query OrgQueue($organizationId: ID!) {
+  organizationReviewQueue(organizationId: $organizationId) { id }
+}
+"""
 CAN_REVIEW = """
 query CanReview($organizationId: ID!) { viewerCanReviewIn(organizationId: $organizationId) }
 """
 REVIEWS = """
 query Reviews($ideaId: ID!) {
   ideaReviews(ideaId: $ideaId) {
-    id round reviewerId decision feedback completedAt submissionSnapshot
+    id scope round reviewerId decision feedback completedAt submissionSnapshot
     assessments { criterion rating note }
   }
 }
@@ -119,6 +128,25 @@ mutation Start($ideaId: ID!) {
 COMPLETE = """
 mutation Complete($input: CompleteReviewInput!) {
   completeReview(input: $input) { success message field review { decision } idea { status } }
+}
+"""
+SUBMIT_TO_PLATFORM = """
+mutation ToPlatform($id: ID!) {
+  submitToPlatform(id: $id) { success message idea { status } }
+}
+"""
+START_ORGANIZATION = """
+mutation StartOrg($ideaId: ID!) {
+  startOrganizationReview(ideaId: $ideaId) {
+    success message review { id round } idea { status }
+  }
+}
+"""
+COMPLETE_ORGANIZATION = """
+mutation CompleteOrg($input: CompleteOrganizationReviewInput!) {
+  completeOrganizationReview(input: $input) {
+    success message field review { decision } idea { status }
+  }
 }
 """
 
@@ -231,6 +259,22 @@ def platform(db, client, staff, category):
         )['assignRoleToMembership']
         assert assigned['success'], assigned
 
+    # Platform review is authorized by a platform permission and nothing else,
+    # and there is no member-facing way to grant one - it is a staff act, like
+    # the Django admin grants in `administration`. The two people who review in
+    # these flows are given it directly.
+    #
+    # Note that the *organization* Reviewer role above is what they hold for the
+    # organization track, and the two are independent: a test that needs the
+    # separation must not simply rely on `add_member(..., reviewer=True)`.
+    #
+    # `globex` is deliberately **not** granted it: that owner is the "somebody
+    # from another organization" in the authorization flows below, and giving
+    # them the platform permission would make them a legitimate reader of a
+    # submission - which is exactly what those flows assert they are not.
+    for name in ('reviewer', 'second'):
+        grant_platform_reviewer(User.objects.get(pk=api.ids[name]))
+
     category_id = api.run(CATEGORIES)['categories'][0]['id']
     api.acme_id, api.globex_id = acme_id, globex_id
     api.reviewer_role = reviewer_role
@@ -258,15 +302,55 @@ def draft_idea(
     if visibility:
         idea_input['visibility'] = visibility
     created = api.run(
-        CREATE_IDEA, {'input': {'organizationId': api.acme_id, 'idea': idea_input}}, 'author'
+        CREATE_IDEA,
+        {
+            'input': {
+                'submissionContext': 'ORGANIZATION',
+                'organizationId': api.acme_id,
+                'idea': idea_input,
+            }
+        },
+        'author',
     )['createIdea']
     assert created['success'], created
     return created['idea']['id']
 
 
 def submitted_idea(api):
+    """
+    An organization idea that has reached the platform.
+
+    Three moves, by three different actors, because that is the journey an
+    organization-context idea now takes: the author submits it **to their
+    organization**, an organization reviewer confirms it, and only then does the
+    **owner** submit it to the platform. Each step is asserted, because a test
+    that skipped the middle one would be asserting a journey that cannot happen.
+    """
     idea_id = draft_idea(api, visibility='ORGANIZATION')
-    assert api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')['submitIdea']['success']
+
+    assert api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')['submitIdea']['idea'] == {
+        'status': 'SUBMITTED_TO_ORGANIZATION'
+    }
+
+    started = api.run(START_ORGANIZATION, {'ideaId': idea_id}, 'reviewer')[
+        'startOrganizationReview'
+    ]
+    assert started['success'], started
+    confirmed = api.run(
+        COMPLETE_ORGANIZATION,
+        {
+            'input': {
+                'ideaId': idea_id,
+                'reviewId': started['review']['id'],
+                'decision': 'CONFIRMED',
+                'feedback': 'This is what we want to submit.',
+            }
+        },
+        'reviewer',
+    )['completeOrganizationReview']
+    assert confirmed['success'], confirmed
+
+    assert api.run(SUBMIT_TO_PLATFORM, {'id': idea_id}, 'author')['submitToPlatform']['success']
     return idea_id
 
 
@@ -295,8 +379,16 @@ def start_and_decide(api, idea_id, decision, feedback='', as_='reviewer'):
 
 
 def decision_emails():
-    # Registration sends activation emails too; only the review's are counted.
-    return [m for m in mail.outbox if m.subject == REVIEW_DECISION_SUBJECT]
+    """
+    The emails that carry a platform decision.
+
+    Filtered by the notification's own subject, which is the notification's
+    title - so this is "every email the platform's notification channel sent",
+    not "every email". Registration sends activation emails too, and the point of
+    this helper is to count decisions without counting those.
+    """
+    titles = set(Notification.objects.values_list('title', flat=True))
+    return [message for message in mail.outbox if message.subject in titles]
 
 
 def history(api, idea_id, as_='author'):
@@ -375,20 +467,62 @@ def test_flow_new_idea_to_approval(platform, django_capture_on_commit_callbacks)
         'visibility': 'ORGANIZATION',
         'description': 'We key every invoice in by hand, every month.',
     }
+    # An organization idea goes to its **organization** first.
     assert api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')['submitIdea']['idea'] == {
-        'status': 'SUBMITTED'
+        'status': 'SUBMITTED_TO_ORGANIZATION'
     }
 
-    # The reviewer finds it in the queue and is offered the start.
-    queue = api.run(QUEUE, {'organizationId': api.acme_id}, 'reviewer')['reviewQueue']
-    assert [item['id'] for item in queue['items']] == [idea_id]
-    assert api.run(IDEA, {'id': idea_id}, 'reviewer')['idea']['viewerCanStartReview'] is True
+    # The reviewer finds it in the organization queue and is offered the start.
+    queue = api.run(ORG_QUEUE, {'organizationId': api.acme_id}, 'reviewer')
+    assert [item['id'] for item in queue['organizationReviewQueue']] == [idea_id]
 
+    # The author cannot be in their own organization's review queue.
+    assert (
+        api.run(ORG_QUEUE, {'organizationId': api.acme_id}, 'author')['organizationReviewQueue']
+        == []
+    )
+
+    org_started = api.run(START_ORGANIZATION, {'ideaId': idea_id}, 'reviewer')[
+        'startOrganizationReview'
+    ]
+    assert org_started['idea'] == {'status': 'SUBMITTED_TO_ORGANIZATION'}
+
+    # Confirming is what moves it, and it is not platform approval.
+    org_confirmed = api.run(
+        COMPLETE_ORGANIZATION,
+        {
+            'input': {
+                'ideaId': idea_id,
+                'reviewId': org_started['review']['id'],
+                'decision': 'CONFIRMED',
+                'feedback': 'This is what we want to submit.',
+            }
+        },
+        'reviewer',
+    )['completeOrganizationReview']
+    assert org_confirmed['idea'] == {'status': 'ORGANIZATION_CONFIRMED'}
+
+    # Now the **owner** submits it to the platform.
+    assert api.run(SUBMIT_TO_PLATFORM, {'id': idea_id}, 'author')['submitToPlatform']['idea'] == {
+        'status': 'SUBMITTED'
+    }
+    assert (
+        api.run(ORG_QUEUE, {'organizationId': api.acme_id}, 'reviewer')['organizationReviewQueue']
+        == []
+    )
+
+    # Only a platform reviewer may now claim it.
+    assert api.run(IDEA, {'id': idea_id}, 'reviewer')['idea']['viewerCanStartReview'] is True
     started = api.run(START, {'ideaId': idea_id}, 'reviewer')['startReview']
     assert started['idea'] == {'status': 'UNDER_REVIEW'}
-    assert api.run(QUEUE, {'organizationId': api.acme_id}, 'reviewer')['reviewQueue']['items'] == []
-    # The author sees nothing of a review still being written.
-    assert api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews'] == []
+    assert api.run(IDEA, {'id': idea_id}, 'owner')['idea']['viewerCanStartReview'] is False
+    # The author sees no platform review while one is still being written, but
+    # they do see the organization's confirmation - they are who it was about.
+    assert [
+        review['scope']
+        for review in api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews']
+        if review['completedAt'] is None
+    ] == []
 
     with django_capture_on_commit_callbacks(execute=True):
         completed = api.run(
@@ -399,25 +533,46 @@ def test_flow_new_idea_to_approval(platform, django_capture_on_commit_callbacks)
     assert completed['review'] == {'decision': 'APPROVED'}
     assert completed['idea'] == {'status': 'APPROVED'}
 
-    # The author is told, once, without the feedback in the email.
+    # The author is told, once, through both channels of the one event: the
+    # in-app notification and its email. The email says a review is complete and
+    # what the author has to do next; the report's own contents stay behind
+    # authentication, so neither the feedback nor the criteria are in it.
+    notification = Notification.objects.get(user_id=api.ids['author'])
+    assert notification.kind == 'idea.platform_approved'
+    assert notification.report_id is not None
+    assert 'go-ahead' in notification.body
+
     (email,) = decision_emails()
     assert email.to == ['author@example.com']
-    assert 'Approved' in email.body
+    assert email.subject == notification.title
+    assert 'approved for the next stage' in email.body
+    assert 'go-ahead' in email.body
     assert 'Clear win.' not in email.body
 
-    # The author reads the decision, the feedback and all five criteria.
-    (review,) = api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews']
-    assert (review['round'], review['decision'], review['feedback']) == (
-        1,
-        'APPROVED',
-        'Clear win.',
-    )
+    # The author reads the decision, the feedback and all five criteria - and the
+    # organization's confirmation that came before it.
+    reviews = api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews']
+    # Each track numbers its own rounds from 1: the organization's confirmation is
+    # its round 1, and the platform's approval is *its* round 1 - which is what
+    # lets the approval report say "platform review round 1" and mean it.
+    assert [(r['round'], r['scope'], r['decision']) for r in reviews] == [
+        (1, 'ORGANIZATION', 'CONFIRMED'),
+        (1, 'PLATFORM', 'APPROVED'),
+    ]
+    (review,) = [r for r in reviews if r['scope'] == 'PLATFORM']
+    assert (review['decision'], review['feedback']) == ('APPROVED', 'Clear win.')
     assert review['reviewerId'] == api.ids['reviewer']
     assert review['submissionSnapshot'] is None
     assert sorted(a['criterion'] for a in review['assessments']) == sorted(CRITERIA)
 
+    # The organization stage is part of the history, and it is two different
+    # actors: the **author** submits to their organization, the **reviewer**
+    # confirms it, and the author submits it on. Organization confirmation is not
+    # platform submission and the audit trail says so.
     assert history(api, idea_id) == [
-        ('DRAFT', 'SUBMITTED', api.ids['author']),
+        ('DRAFT', 'SUBMITTED_TO_ORGANIZATION', api.ids['author']),
+        ('SUBMITTED_TO_ORGANIZATION', 'ORGANIZATION_CONFIRMED', api.ids['reviewer']),
+        ('ORGANIZATION_CONFIRMED', 'SUBMITTED', api.ids['author']),
         ('SUBMITTED', 'UNDER_REVIEW', api.ids['reviewer']),
         ('UNDER_REVIEW', 'APPROVED', api.ids['reviewer']),
     ]
@@ -436,8 +591,11 @@ def test_flow_changes_requested_to_a_second_round(platform, django_capture_on_co
             api, idea_id, 'CHANGES_REQUESTED', 'Say how many invoices a month.'
         )
 
-    # The author sees the feedback and is offered the resubmission.
-    (round_one,) = api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews']
+    # The author sees the feedback and is offered the resubmission. The history
+    # holds the organization confirmation too - they are the person it was about -
+    # so this picks the platform round out of it rather than expecting one row.
+    reviews = api.run(REVIEWS, {'ideaId': idea_id}, 'author')['ideaReviews']
+    (round_one,) = [review for review in reviews if review['scope'] == 'PLATFORM']
     assert (round_one['decision'], round_one['feedback']) == (
         'CHANGES_REQUESTED',
         'Say how many invoices a month.',
@@ -466,17 +624,25 @@ def test_flow_changes_requested_to_a_second_round(platform, django_capture_on_co
     assert api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')['submitIdea']['idea'] == {
         'status': 'SUBMITTED'
     }
-    # Resubmitting creates no review: only a reviewer's start does.
-    assert Review.objects.filter(idea_id=idea_id).count() == reviews_before_resubmission == 1
+    # Resubmitting creates no review: only a reviewer's start does. Two reviews
+    # already exist - the organization confirmation and the platform round that
+    # asked for changes - and a third appearing here would mean the resubmission
+    # had quietly opened one.
+    assert Review.objects.filter(idea_id=idea_id).count() == reviews_before_resubmission == 2
 
     with django_capture_on_commit_callbacks(execute=True):
         second = start_and_decide(api, idea_id, 'APPROVED', as_='second')
 
-    rounds = api.run(REVIEWS, {'ideaId': idea_id}, 'second')['ideaReviews']
-    assert [(r['round'], r['decision']) for r in rounds] == [
-        (1, 'CHANGES_REQUESTED'),
-        (2, 'APPROVED'),
+    all_rounds = api.run(REVIEWS, {'ideaId': idea_id}, 'second')['ideaReviews']
+    # Rounds are numbered per **idea**, across both tracks: round 1 is the
+    # organization's confirmation, round 2 the platform round that asked for
+    # changes, round 3 the one that approved it.
+    assert [(r['round'], r['scope'], r['decision']) for r in all_rounds] == [
+        (1, 'ORGANIZATION', 'CONFIRMED'),
+        (1, 'PLATFORM', 'CHANGES_REQUESTED'),
+        (2, 'PLATFORM', 'APPROVED'),
     ]
+    rounds = [r for r in all_rounds if r['scope'] == 'PLATFORM']
     assert second['id'] != first['id']
     # Round one is exactly as it was, and each round reviewed its own content.
     assert {k: rounds[0][k] for k in round_one if k != 'submissionSnapshot'} == {
@@ -485,8 +651,14 @@ def test_flow_changes_requested_to_a_second_round(platform, django_capture_on_co
     assert rounds[0]['submissionSnapshot']['description'] != revised
     assert rounds[1]['submissionSnapshot']['description'] == revised
 
+    # The organization stage is part of the history, and it is two different
+    # actors: the **author** submits to their organization, the **reviewer**
+    # confirms it, and the author submits it on. Organization confirmation is not
+    # platform submission and the audit trail says so.
     assert history(api, idea_id) == [
-        ('DRAFT', 'SUBMITTED', api.ids['author']),
+        ('DRAFT', 'SUBMITTED_TO_ORGANIZATION', api.ids['author']),
+        ('SUBMITTED_TO_ORGANIZATION', 'ORGANIZATION_CONFIRMED', api.ids['reviewer']),
+        ('ORGANIZATION_CONFIRMED', 'SUBMITTED', api.ids['author']),
         ('SUBMITTED', 'UNDER_REVIEW', api.ids['reviewer']),
         ('UNDER_REVIEW', 'CHANGES_REQUESTED', api.ids['reviewer']),
         ('CHANGES_REQUESTED', 'SUBMITTED', api.ids['author']),
@@ -535,21 +707,50 @@ def test_flow_rejection_is_terminal(platform):
             assert moved['transitionIdea']['success'] is False
 
     assert history(api, idea_id)[-1] == ('UNDER_REVIEW', 'REJECTED', api.ids['reviewer'])
-    assert len(history(api, idea_id)) == 3
+    # Five moves: the author's submit to the organization, the organization's
+    # confirmation, the author's submit to the platform, the reviewer claiming it
+    # and the verdict.
+    assert len(history(api, idea_id)) == 5
     assert_review_records_consistent(Idea.objects.get(pk=idea_id))
 
 
 # --- flow 4: everybody else is refused ------------------------------------------------
 
 
-def _refused_everywhere(api, name, idea_id, review_id):
-    """Every review operation, as `name` (or anonymously when None)."""
+def _refused_everywhere(
+    api, name, idea_id, review_id, *, sees_platform_history=False, sees_lifecycle=False
+):
+    """
+    Every review operation, as `name` (or anonymously when None).
+
+    `sees_platform_history` for the one case where reading is still allowed: a
+    **second platform reviewer** can read the platform review history - they are
+    exactly the people the track exists for - but still cannot act on somebody
+    else's open review. Reading and acting are separate permissions here, so a
+    refusal test that asserted "cannot see it either" would be asserting the wrong
+    thing.
+    """
+    # The organization queue is empty: `reviewQueue` is the *organization* track's
+    # queue and the idea is with the platform, so nobody is waiting on an
+    # organization reviewer at this point.
     assert api.run(QUEUE, {'organizationId': api.acme_id}, name)['reviewQueue']['items'] == []
-    assert api.run(CAN_REVIEW, {'organizationId': api.acme_id}, name) == {
-        'viewerCanReviewIn': False
-    }
-    assert api.run(REVIEWS, {'ideaId': idea_id}, name)['ideaReviews'] == []
-    assert api.run(TRANSITIONS, {'ideaId': idea_id}, name)['ideaTransitions'] == []
+    # Only the **platform** track is asserted here. The organization review is
+    # not expected to be hidden from the author - they are the person it was
+    # about - so scoping to this track is what makes the assertion mean one
+    # thing.
+    platform_reviews = [
+        review
+        for review in api.run(REVIEWS, {'ideaId': idea_id}, name)['ideaReviews']
+        if review['scope'] == 'PLATFORM'
+    ]
+    assert len(platform_reviews) == (1 if sees_platform_history else 0)
+    # The lifecycle history is readable by the author, the organization's
+    # reviewers and the platform reviewers - and by nobody else, because every
+    # row names the member who made the move. Losing *platform* review does not
+    # take it away from somebody who is still an organization reviewer, which is
+    # the independence of the two tracks showing up in a read.
+    transitions = api.run(TRANSITIONS, {'ideaId': idea_id}, name)['ideaTransitions']
+    assert (transitions != []) is sees_lifecycle
     assert api.run(START, {'ideaId': idea_id}, name)['startReview']['success'] is False
     completed = api.run(COMPLETE, complete_input(idea_id, review_id, 'APPROVED'), name)
     assert completed['completeReview']['success'] is False
@@ -569,8 +770,7 @@ def test_flow_authorization_failures(platform, visibility):
     history - whatever the idea's visibility.
     """
     api = platform
-    idea_id = draft_idea(api, visibility=visibility)
-    api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')
+    idea_id = submitted_idea(api)
     started = api.run(START, {'ideaId': idea_id}, 'reviewer')['startReview']
     review_id = started['review']['id']
     snapshot = (
@@ -612,7 +812,17 @@ def test_flow_authorization_failures(platform, visibility):
         is False
     )
 
-    # A reviewer whose role the owner removed.
+    # A reviewer who loses the **platform** permission. Note that this is not the
+    # organization Reviewer role: platform review never consults it, so removing
+    # that role would leave this reviewer perfectly able to act and the test would
+    # pass for the wrong reason. The role removal is asserted separately below,
+    # where it is the *organization* track that should be affected.
+    revoke_platform_reviewer(User.objects.get(pk=api.ids['second']))
+    _refused_everywhere(api, 'second', idea_id, review_id, sees_lifecycle=True)
+
+    # The organization Reviewer role, removed from the same person, changes
+    # nothing about their platform review - which is what makes the two tracks
+    # independent, and the reason the order above matters.
     removed = api.run(
         REMOVE_ROLE,
         {
@@ -624,22 +834,41 @@ def test_flow_authorization_failures(platform, visibility):
         'owner',
     )['removeRoleFromMembership']
     assert removed['success'], removed
-    _refused_everywhere(api, 'second', idea_id, review_id)
+    # `viewerCanReviewIn` answers the *organization* question, and `second` no
+    # longer holds the organization Reviewer role - so it is now false. The
+    # platform permission, which was what was actually taken above, was never
+    # consulted by this field at all.
+    assert api.run(CAN_REVIEW, {'organizationId': api.acme_id}, 'second') == {
+        'viewerCanReviewIn': False
+    }
 
     assert snapshot == (
         list(IdeaTransition.objects.filter(idea_id=idea_id).values_list('pk', flat=True)),
         list(Review.objects.filter(idea_id=idea_id).values('pk', 'completed_at', 'reviewer_id')),
     )
 
-    # Finally the reviewer's own membership is deactivated by staff: they can no
-    # longer complete, and their review becomes one another reviewer may take.
-    staff_deactivates_member(api.staff, api.ids['reviewer'], api.acme_id)
-    _refused_everywhere(api, 'reviewer', idea_id, review_id)
+    # Finally the reviewer's platform permission is withdrawn: they can no longer
+    # complete, and their review becomes one another reviewer may take over.
+    revoke_platform_reviewer(User.objects.get(pk=api.ids['reviewer']))
+    _refused_everywhere(api, 'reviewer', idea_id, review_id, sees_lifecycle=True)
     assert snapshot[1] == list(
         Review.objects.filter(idea_id=idea_id).values('pk', 'completed_at', 'reviewer_id')
     )
-    assert api.run(IDEA, {'id': idea_id}, 'owner')['idea']['viewerCanStartReview'] is True
-    taken = api.run(START, {'ideaId': idea_id}, 'owner')['startReview']
+
+    # The organization owner holds `idea.review` and nothing platform-scoped, so
+    # they can see the submission and cannot claim it - which is the whole of
+    # "an organization reviewer cannot platform-approve".
+    assert api.run(IDEA, {'id': idea_id}, 'owner')['idea']['viewerCanStartReview'] is False
+
+    # `second` had the platform permission taken above, so right now nobody is
+    # left who can take this review over. Granting it back is what makes them
+    # eligible - and it is the permission, not any role, that does it.
+    assert api.run(IDEA, {'id': idea_id}, 'second')['idea']['viewerCanStartReview'] is False
+    grant_platform_reviewer(User.objects.get(pk=api.ids['second']))
+    assert api.run(IDEA, {'id': idea_id}, 'second')['idea']['viewerCanStartReview'] is True
+    taken = api.run(START, {'ideaId': idea_id}, 'second')['startReview']
     assert taken['success'] is True
+    # Platform round 2: the first platform round was withdrawn when the original
+    # reviewer lost the permission, and rounds are numbered per track.
     assert taken['review']['round'] == 2
     assert_review_records_consistent(Idea.objects.get(pk=idea_id))

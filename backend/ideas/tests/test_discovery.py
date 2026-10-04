@@ -650,17 +650,21 @@ class TestStatusFilter:
 
     def test_every_known_status_is_accepted(self, world):
         """
-        All seven, including the review-only states: a client must be able to
-        ask for them even though only some are reachable in this sprint, and
-        an unknown *name* is what should be refused.
+        All eleven, including the organization's own three and the review-only
+        states: a client must be able to ask for any of them, and an unknown
+        *name* is what should be refused.
         """
         assert set(Idea.Status.values) == {
             'draft',
+            'submitted_to_organization',
+            'organization_changes_requested',
+            'organization_confirmed',
             'submitted',
             'under_review',
             'changes_requested',
             'rejected',
             'approved',
+            'ready_for_implementation',
             'automation_proposal',
         }
         for status in Idea.Status.values:
@@ -782,9 +786,8 @@ class TestPagination:
 
     def test_paging_costs_a_fixed_number_of_queries(self, world, django_assert_num_queries):
         """
-        Three queries per page and no more, whatever the page size: the
-        membership lookup the visibility filter needs, the `COUNT` behind
-        `total_count`, and the page fetch itself.
+        Two queries per page and no more, whatever the page size: the `COUNT`
+        behind `total_count` and the page fetch itself.
 
         Pinned for two reasons. The count is a genuine trade — the cheaper
         alternative is to fetch `limit + 1` rows and infer "has more" from a
@@ -792,14 +795,23 @@ class TestPagination:
         number people use to decide between refining the search and paging.
         And the invariance matters: a per-row query sneaking back in here would
         turn a page of 20 into 40 queries without any test noticing.
+
+        What the visibility filter needs to know about the caller — their
+        organizations, their teams, whether they hold the platform review
+        permission — is resolved once per request by `ideas.selectors` and is
+        not part of this per-page cost; `TestQueryCost` in `test_votes.py` pins
+        that budget and names each lookup.
         """
         self._make(world, 4)
         reader = world['reader']
+        # Warm the request-scoped tenant facts, as any second page in the same
+        # request would find them.
+        selectors.list_discoverable_ideas(reader, limit=4)
 
-        with django_assert_num_queries(3):
+        with django_assert_num_queries(2):
             selectors.list_discoverable_ideas(reader, limit=1)
 
-        with django_assert_num_queries(3):
+        with django_assert_num_queries(2):
             selectors.list_discoverable_ideas(reader, limit=4)
 
     def test_the_count_is_cheaper_than_materializing_everything(
@@ -813,8 +825,9 @@ class TestPagination:
         """
         self._make(world, 4)
         reader = world['reader']
+        selectors.list_discoverable_ideas(reader, limit=4)
 
-        with django_assert_num_queries(3) as captured:
+        with django_assert_num_queries(2) as captured:
             selectors.list_discoverable_ideas(reader, limit=2)
 
         count_query = next(q['sql'] for q in captured.captured_queries if 'COUNT' in q['sql'])

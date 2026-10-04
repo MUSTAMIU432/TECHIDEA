@@ -36,14 +36,22 @@ def review_queue(
     limit: object = None,
 ) -> Page[Idea]:
     """
-    One page of the ideas waiting for review in `organization_id`, oldest
-    submission first.
+    One page of the ideas waiting for **organization** review in
+    `organization_id`, oldest submission first.
 
-    Empty - not an error, and not distinguishable from an empty queue - for
-    anybody who is not a reviewer in that organization: an anonymous caller,
-    a non-member, a member without `idea.review`, an inactive membership, or a
-    reviewer of some *other* organization. So `organizationId` cannot be used
-    to probe which organizations exist or who reviews them.
+    **This is the organization's queue, not the platform's.** The platform has its
+    own, and it is not tenant-scoped at all (`reviews.platform_review.platform_queue`
+    - the platform reviews submissions from every organization, so a queue keyed by
+    organization would be the wrong shape). This one is the organization's
+    reviewers' work: ideas its members have put forward for the organization to
+    confirm. Keeping the name and the shape is deliberate - it has always meant
+    "this organization's queue" - and the *status* it filters on is what changed.
+
+    Empty - not an error, and not distinguishable from an empty queue - for anybody
+    who is not a reviewer in that organization: an anonymous caller, a non-member,
+    a member without `idea.review`, an inactive membership, or a reviewer of some
+    *other* organization. So `organizationId` cannot be used to probe which
+    organizations exist or who reviews them.
 
     What is in the queue, and why:
 
@@ -51,41 +59,72 @@ def review_queue(
       `list_organization_ideas`, which is membership-gated and
       visibility-filtered. Another tenant's `PUBLIC` idea is readable
       platform-wide but is never in this organization's queue;
-    - **`SUBMITTED` only**. An `UNDER_REVIEW` idea has already been taken up
-      by a reviewer, so it is not waiting for anybody; drafts and decided
-      ideas are not reviewable at all;
-    - **never the caller's own ideas**, which they could not review anyway;
-    - **readable ones only**, so a submitted `PRIVATE` idea is not here - the
-      reviewer could not open it (`docs/reviews-domain.md` D-6).
+    - **organization-context ideas only**. A team or individual idea has no
+      organization to confirm it, so it is in no organization's queue - and the
+      `submission_context` filter is what says so, rather than the idea simply
+      failing a status check;
+    - **`SUBMITTED_TO_ORGANIZATION` only**. An idea the organization has already
+      confirmed has left the tenant; a draft has not been put forward; and a
+      decided one is history;
+    - **never the caller's own ideas**, which they could not review anyway - a
+      queue that showed somebody their own submission would invite them to try,
+      at the worst possible moment;
+    - **readable ones only**, so a `PRIVATE` idea is not here - the reviewer could
+      not open it.
 
-    Oldest submission first, because a queue is served in order of arrival;
-    `pk` breaks ties so every page is deterministic and `offset` pages
-    correctly.
+    Oldest submission first, because a queue is served in order of arrival; `pk`
+    breaks ties so every page is deterministic and `offset` pages correctly.
 
-    The caller is eligible to start a review of every idea on the page, once
-    the start-review operation exists (S3-004), so each is marked
-    `viewer_can_start_review = True` - the answer
-    `eligibility.can_start_review` would give, established for the whole page
-    by the filters above instead of re-derived per idea with its own queries.
+    Every idea on the page is marked `viewer_can_start_organization_review = True`,
+    established by the filters above rather than re-derived per idea with its own
+    queries - so a page of fifty costs the same two queries a page of one does.
     """
-    if not eligibility.is_reviewer_in(user, organization_id):
+    if not eligibility.is_organization_reviewer_in(user, organization_id):
         return empty_page(offset, limit)
 
     queryset = (
         idea_selectors.list_organization_ideas(user, organization_id)
-        .filter(status=Idea.Status.SUBMITTED)
+        .filter(
+            status=Idea.Status.SUBMITTED_TO_ORGANIZATION,
+            submission_context=Idea.SubmissionContext.ORGANIZATION,
+        )
         .exclude(author=user)
         .order_by('submitted_at', 'pk')
     )
 
-    page = paginate(
-        idea_selectors.annotate_vote_state(queryset, user),
-        offset=offset,
-        limit=limit,
-    )
+    page = paginate(idea_selectors.annotate_vote_state(queryset, user), offset=offset, limit=limit)
     for idea in page.items:
-        idea.viewer_can_start_review = True
+        idea.viewer_can_start_organization_review = True
     return page
+
+
+def platform_queue(
+    user: User | None,
+    *,
+    offset: object = 0,
+    limit: object = None,
+) -> Page[Idea]:
+    """
+    One page of the submissions waiting for **platform** review, oldest first.
+
+    Not keyed by organization - platform review is cross-tenant - and paged through
+    the same `ideas.pagination.Page` so the client handles one page shape.
+    """
+    from reviews import platform_review
+
+    if not eligibility.is_platform_reviewer(user):
+        return empty_page(offset, limit)
+
+    queryset = (
+        idea_selectors._base_queryset()
+        .filter(
+            idea_selectors.platform_reviewer_filter(user),
+            status__in=platform_review.PLATFORM_STAGES,
+        )
+        .exclude(author=user)
+        .order_by('submitted_at', 'pk')
+    )
+    return paginate(idea_selectors.annotate_vote_state(queryset, user), offset=offset, limit=limit)
 
 
 @dataclass(frozen=True)

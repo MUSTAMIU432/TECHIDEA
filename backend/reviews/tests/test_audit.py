@@ -34,6 +34,10 @@ from organizations.services import (
 )
 from reviews import services
 from reviews.models import ReviewCriterionAssessment
+from reviews.tests.platform import (
+    grant_platform_reviewer,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 S = Idea.Status
@@ -56,6 +60,44 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        grant_platform_reviewer(user)
+
+
+def organization_actor(organization):
+    """
+    The email of the helper reviewer who confirms this tenant's ideas.
+
+    Asked of `reviews.tests.platform` rather than written out here, so the audit
+    assertion and the fixture that produced the row cannot drift apart.
+    """
+    from reviews.tests.platform import organization_reviewer_for
+
+    return organization_reviewer_for(organization).email
+
+
+def send_to_platform(user, idea):
+    """
+    Take an idea from `DRAFT` to the platform, through every stage an
+    organization-context idea must pass.
+
+    Three moves by three actors, and all of them are asserted individually
+    elsewhere in this file. Repeating them in one helper keeps the tests here
+    about the *audit trail* rather than about re-deriving the journey, and the
+    trail it produces is the interesting thing: the author's submit, the
+    organization's confirmation and the author's submit-on are three rows with
+    three actors, which is exactly what a reader of the history needs to see.
+    """
+    from reviews.tests.platform import confirm_for_organization
+
+    idea_services.submit_idea(user, idea.pk)
+    idea.refresh_from_db()
+    confirm_for_organization(idea)
+    idea.refresh_from_db()
+    idea_services.submit_to_platform(user, idea.pk)
+    idea.refresh_from_db()
+    return idea
 
 
 def decide(review, decision, feedback='Because.'):
@@ -118,12 +160,54 @@ def world(db):
 
 class TestRecording:
     def test_submission_is_recorded_as_the_authors(self, world):
+        """
+        The author's own submit is one row, naming them.
+
+        Kept as its own test because "the author submitted it" is the fact the
+        whole audit trail hangs off, and because the organization stage below adds
+        two more rows by two other people - which is precisely what makes it
+        worth reading.
+        """
         idea_services.submit_idea(world['author'], world['idea'].pk)
 
-        assert trail(world['idea']) == [(S.DRAFT, S.SUBMITTED, 'author@acme.example')]
+        assert trail(world['idea']) == [
+            (S.DRAFT, S.SUBMITTED_TO_ORGANIZATION, 'author@acme.example')
+        ]
+
+    def test_the_organization_stage_is_recorded_as_three_actors(self, world):
+        """
+        The organization's confirmation is its own row, and the submit-on is the
+        author's again.
+
+        Three rows, three actors: the author, the organization, the author. An
+        organization confirming an idea is an organizational *fact* and must not
+        look in the history like the platform having accepted it.
+        """
+        from reviews.tests.platform import confirm_for_organization, organization_reviewer_for
+
+        idea = world['idea']
+        idea_services.submit_idea(world['author'], idea.pk)
+        idea.refresh_from_db()
+        # Named from the helper itself rather than a second copy of its email
+        # rule: the trail must say *who*, and deriving it here keeps the two in
+        # step.
+        confirmation_actor = organization_reviewer_for(world['acme']).email
+        confirm_for_organization(idea)
+        idea.refresh_from_db()
+        idea_services.submit_to_platform(world['author'], idea.pk)
+
+        assert trail(idea) == [
+            (S.DRAFT, S.SUBMITTED_TO_ORGANIZATION, 'author@acme.example'),
+            (
+                S.SUBMITTED_TO_ORGANIZATION,
+                S.ORGANIZATION_CONFIRMED,
+                confirmation_actor,
+            ),
+            (S.ORGANIZATION_CONFIRMED, S.SUBMITTED, 'author@acme.example'),
+        ]
 
     def test_starting_a_review_is_recorded_as_the_reviewers(self, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
 
         services.start_review(world['reviewer'], world['idea'].pk)
 
@@ -131,17 +215,19 @@ class TestRecording:
 
     @pytest.mark.parametrize('decision', [S.CHANGES_REQUESTED, S.APPROVED, S.REJECTED])
     def test_each_decision_is_recorded_as_the_deciding_reviewers(self, world, decision):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
         review = services.start_review(world['reviewer'], world['idea'].pk)
 
         services.complete_review(world['reviewer'], decide(review, decision))
 
         assert trail(world['idea'])[-1] == (S.UNDER_REVIEW, decision, 'reviewer@acme.example')
-        assert IdeaTransition.objects.filter(idea=world['idea']).count() == 3
+        # Five moves: the two the author makes, the organization's confirmation,
+        # the reviewer claiming it and the verdict.
+        assert IdeaTransition.objects.filter(idea=world['idea']).count() == 5
 
     def test_the_whole_round_trip_in_order(self, world):
         idea = world['idea']
-        idea_services.submit_idea(world['author'], idea.pk)
+        send_to_platform(world['author'], idea)
         first = services.start_review(world['reviewer'], idea.pk)
         services.complete_review(world['reviewer'], decide(first, 'changes_requested'))
         idea_services.update_idea(
@@ -153,19 +239,32 @@ class TestRecording:
                 category_id=idea.category_id,
             ),
         )
+        # A resubmission after a changes request goes straight back to the
+        # platform - there is no second organization stage - because the
+        # organization already confirmed the idea once and nothing about this
+        # edit asks it a new question.
         idea_services.submit_idea(world['author'], idea.pk)
         second = services.start_review(world['second'], idea.pk)
         services.complete_review(world['second'], decide(second, 'approved', feedback=''))
-        lifecycle.transition_idea(world['second'], idea.pk, S.AUTOMATION_PROPOSAL)
+
+        from ideas import go_ahead
+
+        go_ahead.confirm_go_ahead(world['author'], idea.pk)
 
         assert trail(idea) == [
-            (S.DRAFT, S.SUBMITTED, 'author@acme.example'),
+            (S.DRAFT, S.SUBMITTED_TO_ORGANIZATION, 'author@acme.example'),
+            (
+                S.SUBMITTED_TO_ORGANIZATION,
+                S.ORGANIZATION_CONFIRMED,
+                organization_actor(world['acme']),
+            ),
+            (S.ORGANIZATION_CONFIRMED, S.SUBMITTED, 'author@acme.example'),
             (S.SUBMITTED, S.UNDER_REVIEW, 'reviewer@acme.example'),
             (S.UNDER_REVIEW, S.CHANGES_REQUESTED, 'reviewer@acme.example'),
             (S.CHANGES_REQUESTED, S.SUBMITTED, 'author@acme.example'),
             (S.SUBMITTED, S.UNDER_REVIEW, 'second@acme.example'),
             (S.UNDER_REVIEW, S.APPROVED, 'second@acme.example'),
-            (S.APPROVED, S.AUTOMATION_PROPOSAL, 'second@acme.example'),
+            (S.APPROVED, S.READY_FOR_IMPLEMENTATION, 'author@acme.example'),
         ]
 
     def test_editing_is_not_a_transition(self, world):
@@ -197,31 +296,32 @@ class TestNothingIsRecordedForAFailure:
         assert trail(world['idea']) == []
 
     def test_an_invalid_resubmission(self, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
         review = services.start_review(world['reviewer'], world['idea'].pk)
         services.complete_review(world['reviewer'], decide(review, 'changes_requested'))
         Idea.objects.filter(pk=world['idea'].pk).update(description='Too short.')
         before = trail(world['idea'])
 
         with pytest.raises(IdeaError):
-            idea_services.submit_idea(world['author'], world['idea'].pk)
+            send_to_platform(world['author'], world['idea'])
 
         assert trail(world['idea']) == before
 
     def test_a_refused_start(self, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
 
         with pytest.raises(services.ReviewError):
             services.start_review(world['member'], world['idea'].pk)
 
-        assert len(trail(world['idea'])) == 1
+        # The three moves that got the idea to the platform, and nothing more.
+        assert len(trail(world['idea'])) == 3
 
     def test_a_completion_that_rolls_back(self, world, monkeypatch):
         """
         The review is written, then the last step fails: the transition row
         written alongside it must go too.
         """
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
         review = services.start_review(world['reviewer'], world['idea'].pk)
 
         original = lifecycle.apply_review_transition
@@ -235,7 +335,9 @@ class TestNothingIsRecordedForAFailure:
         with pytest.raises(services.ReviewError):
             services.complete_review(world['reviewer'], decide(review, 'approved'))
 
-        assert len(trail(world['idea'])) == 2
+        # The three moves to the platform plus the reviewer's claim; the
+        # completion's own row went back with the completion.
+        assert len(trail(world['idea'])) == 4
         assert Idea.objects.get(pk=world['idea'].pk).status == S.UNDER_REVIEW
 
     def test_refusals_are_logged_with_ids_only(self, world, caplog):
@@ -251,7 +353,7 @@ class TestNothingIsRecordedForAFailure:
 
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_completions_leave_exactly_one_decision_row(world):
-    idea_services.submit_idea(world['author'], world['idea'].pk)
+    send_to_platform(world['author'], world['idea'])
     review = services.start_review(world['reviewer'], world['idea'].pk)
     barrier = threading.Barrier(2)
     errors = []
@@ -283,15 +385,24 @@ def test_concurrent_completions_leave_exactly_one_decision_row(world):
 class TestAppendOnly:
     @pytest.fixture
     def row(self, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
-        return IdeaTransition.objects.get(idea=world['idea'])
+        """
+        One recorded row to try to change.
+
+        Pinned to the **first** row - the author's submit - by ordering, because
+        there are now several rows per idea (the author's submit, the
+        organization's confirmation, the author's submit-on) and
+        `IdeaTransition.objects.get(idea=...)` would be an error rather than a
+        choice.
+        """
+        send_to_platform(world['author'], world['idea'])
+        return IdeaTransition.objects.filter(idea=world['idea']).order_by('created_at', 'pk')[0]
 
     def test_a_row_cannot_be_rewritten(self, row):
         row.to_status = S.APPROVED
         with pytest.raises(ValidationError):
             row.save()
 
-        assert IdeaTransition.objects.get(pk=row.pk).to_status == S.SUBMITTED
+        assert IdeaTransition.objects.get(pk=row.pk).to_status == S.SUBMITTED_TO_ORGANIZATION
 
     def test_a_row_cannot_be_deleted(self, row):
         with pytest.raises(ValidationError):
@@ -328,12 +439,21 @@ class TestAppendOnly:
 class TestReading:
     @pytest.fixture(autouse=True)
     def history(self, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
         services.start_review(world['reviewer'], world['idea'].pk)
 
     @pytest.mark.parametrize('who', ['author', 'reviewer', 'second', 'owner'])
     def test_the_author_and_the_organizations_reviewers(self, world, who):
-        assert len(list_idea_transitions(world[who], world['idea'].pk)) == 2
+        """
+        Four rows: the two the author makes, the organization's confirmation, and
+        the platform reviewer's claim.
+
+        Readable by the author, by **organization** reviewers (they are the people
+        who act on the idea inside the tenant) and by **platform** reviewers (the
+        platform track makes one of these moves and needs to see that it
+        happened). Two different permissions, one history.
+        """
+        assert len(list_idea_transitions(world[who], world['idea'].pk)) == 4
 
     @pytest.mark.parametrize('who', ['member', 'globex_owner'])
     def test_nobody_else(self, world, who):
@@ -344,8 +464,20 @@ class TestReading:
     def test_anonymous_inactive_and_unknown(self, world):
         assert list_idea_transitions(None, world['idea'].pk) == []
         assert list_idea_transitions(world['reviewer'], 999_999) == []
-        Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
-        assert list_idea_transitions(world['reviewer'], world['idea'].pk) == []
+
+    def test_losing_the_platform_permission_takes_the_history_with_it(self, world):
+        """
+        Losing platform review means losing the platform's own history.
+
+        Organization membership and role are not enough: the lifecycle is
+        readable by the author's own organization reviewers *and* by platform
+        reviewers, and revoking the platform one is what removes a former
+        reviewer's claim on it.
+        """
+        assert list_idea_transitions(world['reviewer'], world['idea'].pk)
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
+
+        assert list_idea_transitions(User.objects.get(pk=world['reviewer'].pk), world['idea'].pk)
 
 
 HISTORY = """
@@ -374,23 +506,32 @@ def gql(client):
 
 class TestGraphQL:
     def test_the_author_reads_the_history(self, gql, world):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
 
         body = gql(HISTORY, {'ideaId': world['idea'].pk}, world['author'])
 
-        assert body['data']['ideaTransitions'] == [
-            {
-                'ideaId': str(world['idea'].pk),
-                'fromStatus': 'DRAFT',
-                'toStatus': 'SUBMITTED',
-                'actorId': str(world['author'].pk),
-                'createdAt': IdeaTransition.objects.get().created_at.isoformat(),
-            }
+        rows = body['data']['ideaTransitions']
+        assert [(row['fromStatus'], row['toStatus']) for row in rows] == [
+            ('DRAFT', 'SUBMITTED_TO_ORGANIZATION'),
+            ('SUBMITTED_TO_ORGANIZATION', 'ORGANIZATION_CONFIRMED'),
+            ('ORGANIZATION_CONFIRMED', 'SUBMITTED'),
         ]
+        assert [row['actorId'] for row in rows] == [
+            str(world['author'].pk),
+            organization_actor(world['acme'])
+            and str(User.objects.get(email=organization_actor(world['acme'])).pk),
+            str(world['author'].pk),
+        ]
+        assert rows[0]['createdAt'] == (
+            IdeaTransition.objects.filter(idea=world['idea'])
+            .order_by('created_at', 'pk')
+            .first()
+            .created_at.isoformat()
+        )
 
     @pytest.mark.parametrize('who', [None, 'member', 'globex_owner'])
     def test_anybody_else_gets_an_empty_list(self, gql, world, who):
-        idea_services.submit_idea(world['author'], world['idea'].pk)
+        send_to_platform(world['author'], world['idea'])
         Idea.objects.filter(pk=world['idea'].pk).update(visibility=Idea.Visibility.PUBLIC)
 
         body = gql(HISTORY, {'ideaId': world['idea'].pk}, world[who] if who else None)
@@ -408,13 +549,18 @@ class TestGraphQL:
 
 def test_submitted_at_is_not_the_trail(world):
     """The trail complements `submitted_at`, which stays the first submission."""
-    idea_services.submit_idea(world['author'], world['idea'].pk)
+    send_to_platform(world['author'], world['idea'])
     first = Idea.objects.get(pk=world['idea'].pk).submitted_at
     review = services.start_review(world['reviewer'], world['idea'].pk)
     services.complete_review(world['reviewer'], decide(review, 'changes_requested'))
+    # A resubmission after a *platform* changes request goes straight back to the
+    # platform; only a changes request from the organization would go through the
+    # organization again.
     idea_services.submit_idea(world['author'], world['idea'].pk)
 
     assert Idea.objects.get(pk=world['idea'].pk).submitted_at == first
-    resubmission = IdeaTransition.objects.filter(from_status=S.CHANGES_REQUESTED).get()
+    resubmission = IdeaTransition.objects.filter(
+        idea=world['idea'], from_status=S.CHANGES_REQUESTED
+    ).get()
     assert resubmission.created_at >= first
     assert resubmission.created_at <= timezone.now()

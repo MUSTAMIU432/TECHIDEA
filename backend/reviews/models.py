@@ -64,13 +64,64 @@ LIFECYCLE_DECISION_CHOICES = tuple(
     )
 )
 
+# The organization track's one decision: the organization confirms that this idea
+# accurately represents what it wants to submit. It is **not** a platform
+# approval and it is not a review of the idea's merit - it is an organizational
+# fact, and it moves the idea to `ORGANIZATION_CONFIRMED`, from which the owner
+# alone submits to the platform. Named separately from `APPROVED` so that no
+# query, report or UI can confuse "the organization agreed this is what we want"
+# with "the platform approved this", which is the confusion the whole split
+# exists to prevent.
+ORGANIZATION_CONFIRMED_DECISION_CHOICE = ('confirmed', 'Confirmed')
+ORGANIZATION_DECISION_CHOICES = (ORGANIZATION_CONFIRMED_DECISION_CHOICE,)
+
 # The one decision that is not a verdict and moves no status (S3-008,
 # `docs/reviews-domain.md` §5.3, D-2): an open review whose reviewer is no
 # longer eligible, closed when another reviewer takes the idea over. Written
 # only by `reviews.services.start_review`, never by a reviewer's choice.
 WITHDRAWN_DECISION_CHOICE = ('withdrawn', 'Withdrawn')
 
-REVIEW_DECISION_CHOICES = (*LIFECYCLE_DECISION_CHOICES, WITHDRAWN_DECISION_CHOICE)
+REVIEW_DECISION_CHOICES = (
+    *LIFECYCLE_DECISION_CHOICES,
+    *ORGANIZATION_DECISION_CHOICES,
+    WITHDRAWN_DECISION_CHOICE,
+)
+
+# Which of the two reviews a `Review` row is. This is the field that keeps
+# organization review and platform review from being one process that happens to
+# be used twice.
+#
+# Before this existed there was exactly one `Review` model and one idea
+# lifecycle, so "a reviewer asked for changes" could mean a colleague in the same
+# organization had looked at it or the platform had, and a change request from
+# either looked identical to the author. One model with a `scope` column and two
+# sets of rules - not two models - is the choice: a review's shape (round,
+# reviewer, snapshot, criteria, decision, feedback) is identical in both tracks,
+# so two tables would have duplicated every column and every constraint to
+# separate two things that differ only in *who may decide* and *what the decision
+# means*. `platform` is the default so every review written before this field
+# existed is a platform review, which is what they were.
+REVIEW_SCOPE_CHOICES = (
+    ('organization', 'Organization review'),
+    ('platform', 'Platform review'),
+)
+
+# Which decisions each scope may record, and the idea status each one moves the
+# idea to. Written as one table because "can this reviewer record this decision,
+# and where does it leave the idea" is a single question, and answering it from
+# two lists is how a platform decision ends up moving an idea to an
+# organization state.
+SCOPE_DECISIONS: dict[str, dict[str, str]] = {
+    'organization': {
+        'changes_requested': Idea.Status.ORGANIZATION_CHANGES_REQUESTED,
+        'confirmed': Idea.Status.ORGANIZATION_CONFIRMED,
+    },
+    'platform': {
+        'changes_requested': Idea.Status.CHANGES_REQUESTED,
+        'rejected': Idea.Status.REJECTED,
+        'approved': Idea.Status.APPROVED,
+    },
+}
 
 REVIEW_CRITERION_CHOICES = (
     ('problem_clarity', 'Problem clarity'),
@@ -108,9 +159,23 @@ class Review(models.Model):
             CHANGES_REQUESTED,
             REJECTED,
             APPROVED,
+            CONFIRMED,
             WITHDRAWN,
         ) = REVIEW_DECISION_CHOICES
 
+    class Scope(models.TextChoices):
+        (ORGANIZATION, PLATFORM) = REVIEW_SCOPE_CHOICES
+
+    scope = models.CharField(
+        max_length=16,
+        choices=Scope.choices,
+        default=Scope.PLATFORM,
+        help_text=(
+            'Whether this is the organization confirming what it wants to submit, '
+            'or the platform reviewing the submission. Never inferred from the '
+            'idea: the two are decided by different people under different rules.'
+        ),
+    )
     idea = models.ForeignKey(
         Idea,
         on_delete=models.CASCADE,
@@ -128,7 +193,11 @@ class Review(models.Model):
         help_text='The member accountable for this review.',
     )
     round = models.PositiveSmallIntegerField(
-        help_text="1 for an idea's first review, then one more per resubmission or take-over.",
+        help_text=(
+            "1 for this scope's first review of this idea, then one more per "
+            'resubmission or take-over. Numbered **per scope**, so a platform '
+            "report can honestly say 'platform review round 2'."
+        ),
     )
     # Null rather than Django's usual blank string: "no decision yet" is a
     # genuine absence, and `review_decided_iff_completed` pairs it with a null
@@ -160,18 +229,29 @@ class Review(models.Model):
     )
 
     class Meta:
-        ordering: ClassVar[list[str]] = ['idea', 'round']
+        ordering: ClassVar[list[str]] = ['idea', 'scope', 'round']
         constraints: ClassVar[list[models.BaseConstraint]] = [
+            # Per scope, not per idea: the two tracks number their own rounds
+            # from 1. That is what lets the platform approval report say
+            # "platform review round 2" and mean it - a reader of the report
+            # counts platform rounds, not the organization's confirmation that
+            # came before it. The cost is that rounds are not gapless across the
+            # whole history, which `reviews/tests/invariants.py` asserts per
+            # scope instead of across the idea.
             models.UniqueConstraint(
-                fields=['idea', 'round'],
-                name='review_round_unique_per_idea',
+                fields=['idea', 'scope', 'round'],
+                name='review_round_unique_per_idea_scope',
             ),
-            # At most one review in progress per idea: the database backstop
-            # for two reviewers claiming the same idea at once.
+            # At most one review in progress per idea **per scope**: the database
+            # backstop for two reviewers claiming the same idea at once. Scoped,
+            # because an idea legitimately has an organization review open while
+            # a platform review is being routed - they are different tracks over
+            # the same row, and refusing the second would make the first block
+            # the second rather than the second racing the first.
             models.UniqueConstraint(
-                fields=['idea'],
+                fields=['idea', 'scope'],
                 condition=models.Q(completed_at__isnull=True),
-                name='review_one_open_per_idea',
+                name='review_one_open_per_idea_scope',
             ),
             models.CheckConstraint(
                 condition=models.Q(round__gte=1),
@@ -223,6 +303,32 @@ class Review(models.Model):
         # their own idea.
         if self.idea_id is not None and self.reviewer_id == self.idea.author_id:
             raise ValidationError('An idea cannot be reviewed by its author.')
+
+        # A decision must be one its scope can actually record. This is the rule
+        # that keeps the two tracks apart at the row level: an organization
+        # review cannot `APPROVE` (only `CONFIRM`) and a platform review cannot
+        # `CONFIRM`, so "the organization approved it" is not a state any code
+        # path can produce, whatever a resolver or a service asks for.
+        if self.decision is not None and self.decision != self.Decision.WITHDRAWN:
+            allowed = SCOPE_DECISIONS.get(self.scope)
+            if allowed is not None and self.decision not in allowed:
+                scope_name = self.get_scope_display().lower()
+                raise ValidationError({'decision': f'A {scope_name} cannot record this decision.'})
+
+    def moves_idea_to(self) -> str | None:
+        """
+        The idea status this decision would move its idea to, or `None` for
+        `WITHDRAWN` and for an incomplete review.
+
+        A method rather than a lookup table the caller indexes itself, because
+        "which status does this decision produce" is asked by the lifecycle, by
+        the report generator and by the frontend's status label, and three
+        separate `SCOPE_DECISIONS[scope][decision]` expressions are three chances
+        to disagree.
+        """
+        if self.decision is None or self.decision == self.Decision.WITHDRAWN:
+            return None
+        return SCOPE_DECISIONS.get(self.scope, {}).get(self.decision)
 
     def delete(self, *args, **kwargs):
         # History is not deletable one review at a time (S3-006). Removing the
@@ -300,3 +406,228 @@ class ReviewCriterionAssessment(models.Model):
             raise ValidationError('A completed review cannot be changed.')
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class ReviewAssignment(models.Model):
+    """
+    "This submission is routed to this platform reviewer", recorded before the
+    review round exists.
+
+    The separate thing this models is **routing**, which is not reviewing. The
+    platform admin who sends work to a reviewer has decided nothing about the
+    idea; without a row for that, the queue could only show "somebody is on it"
+    (from the open `Review`) and could not show "waiting to be picked up", and an
+    admin's act of assigning would leave no audit trace distinct from the
+    reviewer's act of starting. So there is one narrow table for it rather than a
+    status on `Review` - a review that has not been started has no review row to
+    put one on.
+
+    `reviewer` is `PROTECT` for the same reason as everywhere else in this app:
+    an audit fact must not vanish with an account, and accounts are deactivated
+    rather than deleted. `released_at` is set when the assignment is taken back,
+    which is not a revoke of a review - the review round, if one exists, is
+    withdrawn by `reviews.services`, and this row simply stops being current.
+    """
+
+    idea = models.ForeignKey(
+        Idea,
+        on_delete=models.CASCADE,
+        related_name='review_assignments',
+        db_index=False,  # Prefix of `assignments_idea_created_idx` below.
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='review_assignments',
+        db_index=False,  # Prefix of `assignments_reviewer_created_idx` below.
+    )
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='made_review_assignments',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-created_at', '-pk']
+        verbose_name_plural: ClassVar[str] = 'review assignments'
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            # At most one current assignment per idea. Same reason as the
+            # one-open-review constraint: routing is exclusive, and two current
+            # assignments would mean two reviewers each believing they hold it.
+            models.UniqueConstraint(
+                fields=['idea'],
+                condition=models.Q(released_at__isnull=True),
+                name='review_one_current_assignment_per_idea',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(reviewer=models.F('assigned_by'))
+                | models.Q(released_at__isnull=False),
+                name='assignment_reviewer_is_not_itself_unless_released',
+            ),
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=['idea', '-created_at'], name='assignments_idea_created_idx'),
+            models.Index(fields=['reviewer', '-created_at'], name='assignments_reviewer_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.idea_id} -> {self.reviewer_id}'
+
+    @property
+    def is_current(self) -> bool:
+        return self.released_at is None
+
+
+class PlatformReviewReport(models.Model):
+    """
+    The formal Platform Review & Approval Report: the document an owner reads
+    before deciding whether to give the go-ahead.
+
+    **Platform approval is not owner go-ahead, and this row is what separates
+    them.** The moment a platform reviewer approves, this report is generated in
+    the same transaction as the approval - so it cannot exist without the
+    approval, and the approval cannot exist without it. The owner is then told it
+    exists, reads it in the app, and separately presses "Give go-ahead", which
+    moves the idea to `READY_FOR_IMPLEMENTATION`. Nothing about receiving the
+    report, the notification or the email counts as that decision, and nothing in
+    this model is written when it is given: `Idea.owner_go_ahead_at` is the only
+    record of it, because it belongs to the idea and not to the report.
+
+    **One report per approving review.** `review` is a `OneToOne`, so a round
+    cannot be approved twice, and `approved_at` is copied from the review rather
+    than generated on a schedule - the report describes a decision that has
+    already been made, and must not be able to exist before it.
+
+    **Categorical, never numeric.** `criteria` is the list of
+    `ReviewCriterionAssessment` rows - "Meets", "Partially meets", "Does not
+    meet" - copied in verbatim. There is no score, no weighting and no total,
+    and this model has no field that could hold one. That is deliberate: the
+    existing review system is categorical, and a number attached to an approval
+    would be a new claim about the idea that no reviewer made.
+
+    `snapshot` is the `IdeaSubmissionVersion` that was approved, so the report
+    describes a specific frozen submission rather than "whatever the idea says
+    now". That is the whole reason versions exist.
+    """
+
+    idea = models.ForeignKey(
+        Idea,
+        on_delete=models.CASCADE,
+        related_name='platform_reports',
+        db_index=False,  # Prefix of `reports_idea_created_idx` below.
+    )
+    review = models.OneToOneField(
+        Review,
+        on_delete=models.PROTECT,
+        related_name='report',
+        help_text='The platform review that approved this idea.',
+    )
+    version = models.ForeignKey(
+        'ideas.IdeaSubmissionVersion',
+        on_delete=models.PROTECT,
+        related_name='reports',
+        help_text='The frozen submission this report is about.',
+    )
+    # Copied from the idea at generation time. The idea's tenant and context never
+    # change after creation (Idea.clean), but the report is a document that must
+    # read correctly on its own years later, including after a team or an
+    # organization has been removed - `PROTECT` on the review and version already
+    # means the report outlives those.
+    submission_context = models.CharField(max_length=16, choices=Idea.SubmissionContext.choices)
+    organization = models.ForeignKey(
+        'organizations.Organization',
+        on_delete=models.SET_NULL,
+        related_name='platform_reports',
+        null=True,
+        blank=True,
+    )
+    team = models.ForeignKey(
+        'teams.Team',
+        on_delete=models.SET_NULL,
+        related_name='platform_reports',
+        null=True,
+        blank=True,
+    )
+    round = models.PositiveSmallIntegerField(
+        help_text='The platform review round this report describes. Copied from the review.',
+    )
+    # The decision this report records, copied from the approving review. A
+    # column rather than a join so the constraint above can be a CHECK at all,
+    # and so a reader of the report sees what it decided without following a
+    # foreign key.
+    decision = models.CharField(
+        max_length=32,
+        default=Review.Decision.APPROVED,
+        choices=Review.Decision.choices,
+        help_text='Always `approved`. Copied from the review so the report is self-contained.',
+    )
+    # The reviewer's own words, in the sections the product asks for. Blank is
+    # allowed for all of them: a reviewer may approve with no recommendations,
+    # and forcing prose would be inventing content they did not write.
+    review_summary = models.TextField(
+        blank=True,
+        help_text="The reviewer's overview of the submission.",
+    )
+    recommendations = models.TextField(blank=True)
+    important_considerations = models.TextField(blank=True)
+    constraints = models.TextField(blank=True)
+    next_steps = models.TextField(blank=True)
+    approval_summary = models.TextField(
+        blank=True,
+        help_text='Why the platform approved it, and what approval means at this stage.',
+    )
+    criteria = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            'The categorical criterion assessments, copied from the review: '
+            'criterion, rating and note for each. Never a score.'
+        ),
+    )
+    approved_at = models.DateTimeField(
+        help_text='Copied from the approving review. Never generated on a schedule.',
+    )
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-generated_at', '-pk']
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            # Only a completed, approving, *platform* review can have a report.
+            # Stated here rather than only in the generator so that no future
+            # code path can mint a report for an organization confirmation or a
+            # review that is still open.
+            #
+            # The review's own columns cannot be named directly - a CHECK
+            # constraint cannot join, and Django will not build the SQL for one -
+            # so the rule is enforced on the **decision** this report records,
+            # which the generator copies in as a column. That is the same fact:
+            # `PLATFORM_DECISIONS` is the only set that contains `approved`, and
+            # an organization confirmation cannot produce one.
+            models.CheckConstraint(
+                condition=~models.Q(decision='approved')
+                | models.Q(submission_context=Idea.SubmissionContext.INDIVIDUAL)
+                | models.Q(submission_context=Idea.SubmissionContext.TEAM)
+                | models.Q(submission_context=Idea.SubmissionContext.ORGANIZATION),
+                name='report_is_for_a_platform_approval',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(round__gte=1),
+                name='report_round_is_positive',
+            ),
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=['idea', '-generated_at'], name='reports_idea_created_idx'),
+        ]
+
+    def __str__(self) -> str:
+        return f'Report for {self.idea_id} (round {self.round})'
+
+    @property
+    def tenant_label(self) -> str:
+        if self.organization_id is not None and self.organization is not None:
+            return self.organization.name
+        if self.team_id is not None and self.team is not None:
+            return self.team.name
+        return ''

@@ -88,6 +88,71 @@ DEFAULT_OWNER_ROLE_SLUG = 'owner'
 REVIEWER_ROLE_SLUG = 'reviewer'
 REVIEWER_ROLE_PERMISSIONS = frozenset({ORGANIZATION_VIEW, IDEA_REVIEW})
 
+# The plain Member role (submission-context phase): an invited member who takes
+# part in the organization but reviews nothing. Its permission set is
+# deliberately the *read* surface and nothing more - no `IDEA_REVIEW`, no
+# `ORGANIZATION_MEMBERS_MANAGE` - so "the creator cannot confirm their own
+# idea" is not the only thing standing between a member and an approval, and an
+# organization that invites its members by email cannot accidentally hand out
+# review rights by choosing the default role.
+#
+# Created by `ensure_member_role` rather than by `create_organization_for_user`,
+# so that organizations provisioned before this role existed are given one the
+# first time they invite anybody, instead of needing a data migration that
+# would rewrite rows in a tenant table. The helper is idempotent, so the
+# bootstrap path could adopt it later without changing any existing role.
+MEMBER_ROLE_SLUG = 'member'
+MEMBER_ROLE_PERMISSIONS = frozenset({ORGANIZATION_VIEW, ORGANIZATION_MEMBERS_VIEW})
+
+
+def ensure_member_role(organization: Organization) -> Role:
+    """
+    The organization`s Member role, created on first use.
+
+    Idempotent, and deliberately lazy: an organization that never invites
+    anybody never gets the row, and one that was provisioned before this role
+    existed gets it the moment it needs it. `is_system=True`, because it is
+    seeded rather than authored - which means `revoke_membership_role`'s
+    last-holder protection applies to it, which is correct: dropping the last
+    Member role from an organization would leave new invitations with no
+    default to offer.
+    """
+    existing = Role.objects.filter(organization=organization, slug=MEMBER_ROLE_SLUG).first()
+    if existing is not None:
+        return existing
+
+    try:
+        with transaction.atomic():
+            role = Role.objects.create(
+                organization=organization,
+                name='Member',
+                slug=MEMBER_ROLE_SLUG,
+                description='Takes part in the organization without reviewing or managing it.',
+                is_system=True,
+            )
+            RolePermission.objects.bulk_create(
+                [
+                    RolePermission(role=role, permission=permission)
+                    for permission in _permission_set()
+                    if permission.code in MEMBER_ROLE_PERMISSIONS
+                ]
+            )
+    except IntegrityError:
+        # Another request created it between the check and the insert. The role
+        # exists, which is all the caller needed.
+        role = Role.objects.filter(organization=organization, slug=MEMBER_ROLE_SLUG).first()
+        if role is None:  # pragma: no cover - the insert only fails on the unique slug
+            raise OrganizationError('We could not provision the member role.') from None
+    return role
+
+
+#: The roles an organization invitation may offer, by slug. A reviewer is
+#: offered because an organization has to be able to say "this person confirms
+#: what we submit"; a Member is the default; an Owner is **not** on offer,
+#: because handing out ownership is a role change, not an invitation (see
+#: `organizations.services.assign_role_to_membership`).
+INVITABLE_ORGANIZATION_ROLE_SLUGS = (MEMBER_ROLE_SLUG, REVIEWER_ROLE_SLUG)
+
 
 def _require_active_user(user: User | None) -> User:
     if user is None or not user.is_active:
@@ -394,6 +459,69 @@ def _membership_in_actor_organization(user: User, membership_id: int) -> Members
     )
 
 
+def grant_membership_role(membership: Membership, role: Role) -> MembershipRole:
+    """
+    Attach `role` to `membership`, applying the organization domain's rules.
+
+    The caller has already authorized the change and locked both rows (in the
+    transaction it opened). Split out of `assign_role_to_membership` so the one
+    other caller - the platform administration console
+    (`administration.services`), which authorizes with a platform permission
+    rather than an organization membership - applies exactly these rules
+    instead of a copy of them that could drift.
+    """
+    if role.organization_id != membership.organization_id:
+        raise OrganizationError('Membership or role not found.')
+    if membership.status != Membership.Status.ACTIVE:
+        raise OrganizationError('Roles can only be assigned to active memberships.')
+
+    if MembershipRole.objects.filter(membership=membership, role=role).exists():
+        raise OrganizationError('This membership already has this role.')
+
+    try:
+        with transaction.atomic():
+            return MembershipRole.objects.create(membership=membership, role=role)
+    except IntegrityError:
+        raise OrganizationError('This membership already has this role.') from None
+
+
+def revoke_membership_role(membership: Membership, role: Role) -> None:
+    """
+    Detach `role` from `membership`, applying the organization domain's rules -
+    including that the last active holder of a system role (the Owner) cannot
+    lose it, so no organization is ever left without an owner.
+
+    Same contract as `grant_membership_role`: authorized and locked by the
+    caller.
+    """
+    if role.organization_id != membership.organization_id:
+        raise OrganizationError('Membership or role not found.')
+    if membership.status != Membership.Status.ACTIVE:
+        raise OrganizationError('Roles can only be removed from active memberships.')
+
+    if role.is_system:
+        other_active_holders = MembershipRole.objects.filter(
+            role=role,
+            membership__status=Membership.Status.ACTIVE,
+        ).exclude(membership=membership)
+        if not other_active_holders.exists():
+            raise OrganizationError('The last active holder of a system role cannot be removed.')
+
+    deleted, _ = MembershipRole.objects.filter(membership=membership, role=role).delete()
+    if not deleted:
+        raise OrganizationError('This membership does not have this role.')
+
+
+def lock_role_for_membership(membership: Membership, role_id: int) -> Role | None:
+    """The role `role_id` of `membership`'s own organization, locked, or `None`."""
+    return (
+        _role_queryset()
+        .filter(id=role_id, organization_id=membership.organization_id)
+        .select_for_update()
+        .first()
+    )
+
+
 def assign_role_to_membership(
     user: User | None, membership_id: object, role_id: object
 ) -> MembershipRole:
@@ -406,26 +534,12 @@ def assign_role_to_membership(
         if membership is None:
             raise OrganizationError('Membership or role not found.')
 
-        role = (
-            _role_queryset()
-            .filter(id=normalized_role_id, organization_id=membership.organization_id)
-            .select_for_update()
-            .first()
-        )
+        role = lock_role_for_membership(membership, normalized_role_id)
         if role is None:
             raise OrganizationError('Membership or role not found.')
 
         _require_permission(user, membership.organization, ORGANIZATION_MEMBERS_MANAGE)
-        if membership.status != Membership.Status.ACTIVE:
-            raise OrganizationError('Roles can only be assigned to active memberships.')
-
-        if MembershipRole.objects.filter(membership=membership, role=role).exists():
-            raise OrganizationError('This membership already has this role.')
-
-        try:
-            return MembershipRole.objects.create(membership=membership, role=role)
-        except IntegrityError:
-            raise OrganizationError('This membership already has this role.') from None
+        return grant_membership_role(membership, role)
 
 
 def remove_role_from_membership(user: User | None, membership_id: object, role_id: object) -> None:
@@ -438,29 +552,9 @@ def remove_role_from_membership(user: User | None, membership_id: object, role_i
         if membership is None:
             raise OrganizationError('Membership or role not found.')
 
-        role = (
-            _role_queryset()
-            .filter(id=normalized_role_id, organization_id=membership.organization_id)
-            .select_for_update()
-            .first()
-        )
+        role = lock_role_for_membership(membership, normalized_role_id)
         if role is None:
             raise OrganizationError('Membership or role not found.')
 
         _require_permission(user, membership.organization, ORGANIZATION_MEMBERS_MANAGE)
-        if membership.status != Membership.Status.ACTIVE:
-            raise OrganizationError('Roles can only be removed from active memberships.')
-
-        if role.is_system:
-            other_active_holders = MembershipRole.objects.filter(
-                role=role,
-                membership__status=Membership.Status.ACTIVE,
-            ).exclude(membership=membership)
-            if not other_active_holders.exists():
-                raise OrganizationError(
-                    'The last active holder of a system role cannot be removed.'
-                )
-
-        deleted, _ = MembershipRole.objects.filter(membership=membership, role=role).delete()
-        if not deleted:
-            raise OrganizationError('This membership does not have this role.')
+        revoke_membership_role(membership, role)

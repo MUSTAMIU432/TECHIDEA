@@ -1,19 +1,34 @@
 """
-Review operations (S3-004): starting a review and completing it.
+Platform review operations (S3-004, extended): starting a review and completing it.
 
-Each is one transaction that writes the review record *and* makes the idea's
-status move, so the two commit together or not at all. The status move is
-made by `ideas.lifecycle.apply_review_transition` - the lifecycle remains the
-only code that changes `Idea.status` - and that function refuses to run outside
-the transaction this module opens.
+**This module is the platform track.** Organization review is a separate module
+(`reviews.organization_review`) with its own eligibility, its own decisions and
+its own notification, because the two share only the shape of a round. What lives
+here decides whether an idea the *platform* was sent should proceed, and every
+authorization in it is a platform-scoped permission - no organization role and no
+team role can reach any of it. See `reviews.eligibility`.
+
+Each operation is one transaction that writes the review record *and* makes the
+idea's status move, so the two commit together or not at all. The status move is
+made by `ideas.lifecycle.apply_review_transition` - the lifecycle remains the only
+code that changes `Idea.status` - and that function refuses to run outside the
+transaction this module opens, and refuses the wrong reviewer kind for a pair.
+
+**Approval generates the report in the same transaction.** A `complete_review`
+that approves calls `reviews.platform_review.generate_report` before the
+transaction closes, so an approval without a report is not a reachable state and
+a report can never describe a decision that rolled back. Delivery - the in-app
+notification and the email - is registered with `transaction.on_commit` and never
+raises, which is what makes "if email fails, the approval remains valid" a
+structural property rather than an intention.
 
 Locking
 -------
 Both operations lock the idea row first (`ideas.selectors.get_idea_for_update`,
 the same visibility-filtered locked read `transition_idea` uses) and then, for
-completion, the review row. One order everywhere, so the two cannot deadlock
-each other. Every authorization and state check runs *after* the lock, on the
-row as it now is:
+completion, the review row. One order everywhere, so the two cannot deadlock each
+other. Every authorization and state check runs *after* the lock, on the row as it
+now is:
 
 - two reviewers starting the same idea at once: the second waits for the
   first to commit, re-reads `UNDER_REVIEW`, and is refused. The one-open-review
@@ -27,26 +42,25 @@ row as it now is:
 Take-over (S3-008)
 ------------------
 `docs/reviews-domain.md` §5.3 / D-2: if the reviewer holding an open review
-stops being eligible - left the organization, lost `idea.review`, was
-deactivated, can no longer read the idea - the idea would sit in
-`UNDER_REVIEW` with nobody able to decide it. Another eligible reviewer then
-takes it over with the same `startReview`: claiming a stalled idea is still
-claiming it, so there is no assignment operation. The open round is completed
-as `WITHDRAWN` and round n+1 opens for the new reviewer, in one transaction.
-The idea stays `UNDER_REVIEW`, so no lifecycle move is made and no
-`IdeaTransition` is written; the two review rows are the record. An eligible
-reviewer's open review is never taken: the gate is the holder's *current*
-ineligibility, asked after the lock.
+stops being eligible - lost `review_platform_submissions`, was deactivated, can
+no longer read the idea - the idea would sit in `UNDER_REVIEW` with nobody able to
+decide it. Another eligible reviewer then takes it over with the same
+`startReview`: claiming a stalled idea is still claiming it, so there is no
+assignment operation on this path (`reviews.platform_review.assign_reviewer` is
+the platform admin's separate routing act, which exists for intake rather than
+for recovery). The open round is completed as `WITHDRAWN` and round n+1 opens for
+the new reviewer, in one transaction. The idea stays `UNDER_REVIEW`, so no
+lifecycle move is made and no `IdeaTransition` is written; the two review rows are
+the record.
 
 Refusals
 --------
 `ReviewError` carries the project's `(message, field, reason)` triple, like
 `IdeaError`. The order of the checks keeps the operations from being oracles:
 an idea the caller cannot read is "unavailable", exactly as a nonexistent one;
-a caller who can read it but is not its reviewer is told they may not review
-it, and learns nothing about any review; only the idea's own reviewers are
-told about the state of a review. The client-side capability flags are never
-consulted - every rule is asked again here.
+a caller who can read it but is not a platform reviewer is told they may not
+review it, and learns nothing about any review. The client-side capability flags
+are never consulted - every rule is asked again here.
 """
 
 import logging
@@ -59,12 +73,17 @@ from django.utils import timezone
 
 from ideas import lifecycle
 from ideas import selectors as idea_selectors
-from ideas.models import Idea
+from ideas.models import IDEA_STORY_FIELDS, Idea
 from ideas.services import IdeaError
 from identity.models import User
 from organizations.authorization import AuthorizationError
-from reviews import eligibility, notifications
-from reviews.models import LIFECYCLE_DECISION_CHOICES, Review, ReviewCriterionAssessment
+from reviews import eligibility, platform_review
+from reviews.models import (
+    LIFECYCLE_DECISION_CHOICES,
+    PlatformReviewReport,
+    Review,
+    ReviewCriterionAssessment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +158,9 @@ def _submission_snapshot(idea: Idea) -> dict:
         ),
         'visibility': idea.visibility,
         'submitted_at': idea.submitted_at.isoformat() if idea.submitted_at else None,
+        # The problem story, so the reviewer's record of what they assessed
+        # includes the answers the author gave, not only the description.
+        'story': {name: getattr(idea, name) for name in IDEA_STORY_FIELDS},
     }
 
 
@@ -183,7 +205,14 @@ def start_review(user: User | None, idea_id: object) -> Review:
 
 def _open_next_round(reviewer: User, idea: Idea) -> Review:
     """Round n+1 for `reviewer`, on an idea the caller has locked."""
-    last_round = Review.objects.filter(idea=idea).aggregate(last=Max('round'))['last'] or 0
+    # Platform rounds only: the organization's confirmation is numbered in its own
+    # track, so a platform report's "round 2" means the platform's second look.
+    last_round = (
+        Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM).aggregate(last=Max('round'))[
+            'last'
+        ]
+        or 0
+    )
     try:
         # A savepoint, so a constraint violation leaves the outer transaction
         # usable for the refusal rather than poisoned.
@@ -191,6 +220,7 @@ def _open_next_round(reviewer: User, idea: Idea) -> Review:
             return Review.objects.create(
                 idea=idea,
                 reviewer=reviewer,
+                scope=Review.Scope.PLATFORM,
                 round=last_round + 1,
                 submission_snapshot=_submission_snapshot(idea),
             )
@@ -216,7 +246,10 @@ def _take_over(user: User, idea: Idea) -> Review:
         # join also reads.
         Review.objects.select_for_update(of=('self',))
         .select_related('reviewer')
-        .filter(idea=idea, completed_at__isnull=True)
+        # Platform rounds only: an organization review is never taken over, and
+        # picking up the *wrong* open review would withdraw the organization's
+        # confirmation of an idea that is already with the platform.
+        .filter(idea=idea, scope=Review.Scope.PLATFORM, completed_at__isnull=True)
         .first()
     )
     if open_review is None or eligibility.can_review(open_review.reviewer, idea):
@@ -301,7 +334,11 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
         idea = _lock_readable_idea(active_user, data.idea_id)
         _require_reviewer(active_user, idea)
 
-        review = Review.objects.select_for_update().filter(pk=review_pk, idea=idea).first()
+        review = (
+            Review.objects.select_for_update()
+            .filter(pk=review_pk, idea=idea, scope=Review.Scope.PLATFORM)
+            .first()
+        )
         if review is None or review.reviewer_id != active_user.pk:
             # Not a review of this idea, or somebody else's: the same answer, so
             # a guessed id reveals nothing and nobody completes another
@@ -326,10 +363,72 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
 
         _lifecycle(lambda: lifecycle.apply_review_transition(active_user, idea, decision))
 
+        # Inside the transaction, on purpose. Approval is not owner go-ahead, and
+        # the report is what stands between them - so the report has to exist for
+        # exactly as long as the approval does, and cannot exist for one that
+        # rolled back.
+        report = None
+        if decision == Review.Decision.APPROVED:
+            report = platform_review.generate_report(review, _report_content(review, feedback))
+
         # After the commit, never before: a completion that rolls back must not
-        # tell the author about a decision that was never recorded. The email
-        # never raises (see `reviews.notifications`).
+        # tell the author about a decision that was never recorded, and neither
+        # channel can invalidate one that was.
+        # Both ids captured by value: the lambda runs after this frame's objects
+        # are out of scope, so it must close over plain integers and not over the
+        # `review` and `report` instances.
         review_pk = review.pk
-        transaction.on_commit(lambda: notifications.send_review_decision_email(review_pk))
+        approved_report_pk = report.pk if report is not None else None
+        transaction.on_commit(lambda: _deliver(review_pk, approved_report_pk))
 
     return Review.objects.prefetch_related('assessments').get(pk=review.pk)
+
+
+def _report_content(review: Review, feedback: str) -> platform_review.ReportContent:
+    """
+    The reviewer's own words, split into the report's sections.
+
+    The feedback they typed is the summary of the review; the rest of the sections
+    default to the platform's own wording (`platform_review.APPROVAL_SUMMARY`,
+    `DEFAULT_NEXT_STEPS`) rather than being invented here. **No criterion is
+    turned into a score**: `generate_report` copies the categorical assessments
+    as they are, and there is no numeric field anywhere in the report.
+    """
+    return platform_review.ReportContent(
+        review_summary=feedback,
+        feedback=feedback,
+    )
+
+
+def _deliver(review_pk: int, approved_report_pk: int | None) -> None:
+    """
+    Tell the author what the platform decided - after the commit, through every
+    channel, none of which can affect the decision.
+
+    **One business event, one notification, two channels.** An approval produces
+    the in-app notification *and* its email through
+    `notifications.services.deliver`, which is the only delivery code in the
+    platform; a changes request or a rejection produces the same two. The
+    separate "review decision" email that shipped in Sprint 3 is gone rather than
+    kept alongside: two emails for one decision is exactly the duplication the
+    notification model exists to prevent, and the reviewer's feedback was never
+    in either of them.
+
+    Registered on commit, so a completion that rolls back notifies nobody; and it
+    cannot raise into the transaction, so a mail outage leaves the decision
+    standing.
+    """
+    review = Review.objects.select_related('idea').filter(pk=review_pk).first()
+    if review is None or review.completed_at is None:
+        return
+    if review.decision == Review.Decision.WITHDRAWN:
+        # A take-over, not a verdict: the idea is still under review.
+        return
+
+    if approved_report_pk is not None:
+        report = PlatformReviewReport.objects.filter(pk=approved_report_pk).first()
+        if report is not None:
+            platform_review.notify_approval(report)
+            return
+
+    platform_review.notify_decision(review.idea, review.decision, review)

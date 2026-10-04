@@ -17,21 +17,26 @@ from django.apps import apps
 from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import connections
-from django.utils import timezone
 
-from ideas import lifecycle
-from ideas.models import Category, Idea
+from ideas import go_ahead, lifecycle
+from ideas.models import Idea
 from ideas.services import IdeaError
 from identity.models import User
 from identity.tokens import issue_access_token
+from notifications.models import Notification
 from organizations.models import Membership, MembershipRole, Role
 from organizations.services import (
     REVIEWER_ROLE_SLUG,
     CreateOrganizationInput,
     create_organization_for_user,
 )
-from reviews import notifications, services
+from reviews import services
 from reviews.models import Review, ReviewCriterionAssessment
+from reviews.tests.platform import (
+    grant_platform_reviewer,
+    make_submitted,
+    revoke_platform_reviewer,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 CRITERIA = ReviewCriterionAssessment.Criterion.values
@@ -54,6 +59,11 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        # The organization Reviewer role above still governs the organization
+        # review queue, which is a separate track with separate rules.
+        grant_platform_reviewer(user)
     return membership
 
 
@@ -86,15 +96,11 @@ def world(db):
     add_member(acme, member)
     globex_owner = make_user('owner@globex.example')
     create_organization_for_user(globex_owner, CreateOrganizationInput(name='Globex'))
-    idea = Idea.objects.create(
-        organization=acme,
-        author=author,
+    idea = make_submitted(
+        acme,
+        author,
         title='Automate the invoice run',
         description='We key every invoice in by hand, every month.',
-        category=Category.objects.create(name='Finance'),
-        visibility=Idea.Visibility.ORGANIZATION,
-        status=Idea.Status.SUBMITTED,
-        submitted_at=timezone.now(),
     )
     return {
         'acme': acme,
@@ -198,36 +204,73 @@ class TestWhoMayApprove:
         assert_still_open(world, open_review)
 
     def test_another_organization_cannot_approve(self, world, open_review):
-        with pytest.raises(services.ReviewError, match='Idea is unavailable'):
+        # Still refused, but no longer as "unavailable": a platform reviewer may
+        # read a submission they were sent, and `globex_owner` is the owner of a
+        # *different* organization without the platform review permission. The
+        # refusal is therefore about what they may do, not about whether they
+        # can see the idea - which is the honest answer now that platform review
+        # is independent of any organization.
+        with pytest.raises(services.ReviewError, match='not allowed to review'):
             services.complete_review(world['globex_owner'], approve(open_review))
         assert_still_open(world, open_review)
 
     def test_a_reviewer_whose_role_was_removed(self, world, open_review):
-        MembershipRole.objects.filter(
-            membership__user=world['reviewer'], role__slug=REVIEWER_ROLE_SLUG
-        ).delete()
+        # Losing the platform permission - which is what platform review is
+        # authorized by - takes the ability to review with you. The organization
+        # Reviewer role is deliberately *not* what this test removes: platform
+        # review does not consult it, so removing it would change nothing and the
+        # test would pass for the wrong reason.
+        revoke_platform_reviewer(world['reviewer'])
 
         with pytest.raises(services.ReviewError, match='not allowed to review'):
             services.complete_review(world['reviewer'], approve(open_review))
         assert_still_open(world, open_review)
 
-    def test_a_reviewer_who_left_the_organization(self, world, open_review):
+    def test_losing_the_organization_role_does_not_take_platform_review_away(
+        self, world, open_review
+    ):
+        # The converse, and the reason the two tracks are separate: the
+        # organization Reviewer role governs the *organization* review only.
+        # Removing it leaves platform review intact, which is what lets an
+        # organization reviewer and a platform reviewer be different people.
+        MembershipRole.objects.filter(
+            membership__user=world['reviewer'], role__slug=REVIEWER_ROLE_SLUG
+        ).delete()
+
+        services.complete_review(world['reviewer'], approve(open_review))
+        assert Review.objects.get(pk=open_review.pk).decision == Review.Decision.APPROVED
+
+    def test_a_reviewer_who_left_the_organization_can_still_decide(self, world, open_review):
+        """
+        Leaving the organization does **not** take a platform review away.
+
+        Platform review is authorized by a platform permission, and membership of
+        the idea's organization is not consulted at any point. This is the same
+        independence as `test_approval_is_not_the_hand_off`, seen from the
+        authorization side: the platform's work cannot be reorganised away from
+        underneath it.
+        """
         Membership.objects.filter(user=world['reviewer']).update(status=Membership.Status.INACTIVE)
 
+        services.complete_review(world['reviewer'], approve(open_review))
+        assert Review.objects.get(pk=open_review.pk).decision == Review.Decision.APPROVED
+
+    def test_a_reviewer_who_lost_the_platform_permission_cannot(self, world, open_review):
+        """The permission is what is lost, and what stops them."""
+        revoke_platform_reviewer(User.objects.get(pk=world['reviewer'].pk))
+
         with pytest.raises(services.ReviewError):
-            services.complete_review(world['reviewer'], approve(open_review))
+            services.complete_review(
+                User.objects.get(pk=world['reviewer'].pk), approve(open_review)
+            )
         assert_still_open(world, open_review)
 
     def test_an_author_can_never_approve_their_own_idea(self, world):
-        own = Idea.objects.create(
-            organization=world['acme'],
-            author=world['reviewer'],
+        own = make_submitted(
+            world['acme'],
+            world['reviewer'],
             title='Mine',
             description='A description long enough to be usable.',
-            category=Category.objects.create(name='Ops'),
-            visibility=Idea.Visibility.ORGANIZATION,
-            status=Idea.Status.SUBMITTED,
-            submitted_at=timezone.now(),
         )
 
         with pytest.raises(services.ReviewError, match='not allowed to review'):
@@ -274,16 +317,50 @@ class TestState:
         assert exc_info.value.message == lifecycle.REVIEW_OWNED_MESSAGE
         assert_still_open(world, open_review)
 
-    def test_the_hand_off_from_approved_is_still_available(self, world, open_review):
+    def test_approval_is_not_the_hand_off(self, world, open_review):
+        """
+        Platform approval does not put an idea in front of developers.
+
+        The one move out of `APPROVED` is the **owner's** go-ahead, and it belongs
+        to the author alone - not the reviewer who approved it, not an
+        organization Owner. That is the whole of "platform approval is not owner
+        go-ahead", and it is asserted here as a refusal rather than as a missing
+        feature, because a reviewer who could hand their own approval straight on
+        would be approving twice.
+        """
         services.complete_review(world['reviewer'], approve(open_review))
 
-        assert lifecycle.available_transitions(
-            world['reviewer'], Idea.objects.get(pk=world['idea'].pk)
-        ) == [Idea.Status.AUTOMATION_PROPOSAL]
-        moved = lifecycle.transition_idea(
-            world['reviewer'], world['idea'].pk, Idea.Status.AUTOMATION_PROPOSAL
+        approved = Idea.objects.get(pk=world['idea'].pk)
+        assert approved.status == Idea.Status.APPROVED
+
+        # The reviewer is offered nothing at all.
+        assert lifecycle.available_transitions(world['reviewer'], approved) == []
+        with pytest.raises(IdeaError, match='not allowed'):
+            lifecycle.transition_idea(
+                world['reviewer'], approved.pk, Idea.Status.READY_FOR_IMPLEMENTATION
+            )
+
+        # The author is offered exactly the go-ahead.
+        assert lifecycle.available_transitions(world['author'], approved) == [
+            Idea.Status.READY_FOR_IMPLEMENTATION
+        ]
+
+    def test_the_hand_off_reaches_automation_only_after_the_go_ahead(self, world, open_review):
+        """The Sprint 4 boundary: go-ahead, then the automation-opportunity move."""
+        services.complete_review(world['reviewer'], approve(open_review))
+        ready = go_ahead.confirm_go_ahead(world['author'], world['idea'].pk)
+
+        assert ready.status == Idea.Status.READY_FOR_IMPLEMENTATION
+        assert ready.owner_go_ahead_at is not None
+
+        # Only after `READY_FOR_IMPLEMENTATION` does the automation-opportunity
+        # move exist at all. Nothing in this repository takes it - Sprint 4 will.
+        assert (
+            lifecycle.TRANSITIONS[
+                (Idea.Status.READY_FOR_IMPLEMENTATION, Idea.Status.AUTOMATION_PROPOSAL)
+            ]
+            == lifecycle.PLATFORM_REVIEWER
         )
-        assert moved.status == Idea.Status.AUTOMATION_PROPOSAL
 
 
 # --- immutability -----------------------------------------------------------------------
@@ -321,10 +398,22 @@ class TestImmutabilityAfterApproval:
         assert not Review.objects.filter(pk=open_review.pk).exists()
 
     def test_history_stays_readable_as_before(self, world, approved):
+        """
+        Who may read a review history, and what is in it.
+
+        Two things are new since this test was written, and both are the point of
+        splitting the tracks: the history now holds an **organization** review as
+        well as the platform one (the fixture confirms the idea before submitting
+        it), and a platform reviewer sees the history as well as the organization
+        reviewer does.
+        """
         from reviews.selectors import list_idea_reviews
 
-        assert list_idea_reviews(world['author'], world['idea'].pk).reviews == [approved]
-        assert list_idea_reviews(world['second'], world['idea'].pk).reviews == [approved]
+        history = list_idea_reviews(world['author'], world['idea'].pk).reviews
+        assert history[-1] == approved
+        assert [review.scope for review in history] == ['organization', 'platform']
+
+        assert list_idea_reviews(world['second'], world['idea'].pk).reviews == history
         assert list_idea_reviews(world['member'], world['idea'].pk).reviews == []
         assert list_idea_reviews(world['globex_owner'], world['idea'].pk).reviews == []
 
@@ -387,16 +476,24 @@ class TestDecisionEmail:
         with django_capture_on_commit_callbacks(execute=True):
             services.complete_review(world['reviewer'], approve(open_review))
 
+        # One decision, one notification, two channels: the in-app notification
+        # and the email that goes with it.
+        notification = Notification.objects.get(user=world['author'])
+        assert notification.kind == 'idea.platform_approved'
+        assert notification.report_id is not None
+        assert notification.is_read is False
+
         assert len(mail.outbox) == 1
         message = mail.outbox[0]
         assert message.to == ['author@acme.example']
-        assert message.subject == notifications.REVIEW_DECISION_SUBJECT
-        assert 'Decision: Approved' in message.body
-        assert 'Automate the invoice run' in message.body
-        assert 'https://app.example/app/ideas' in message.body
-        # The feedback and the criteria stay behind authentication.
+        assert message.subject == notification.title
+        assert 'Automate the invoice run' in message.subject
+        assert 'https://app.example/app/notifications' in message.body
+        # The report's own contents stay behind authentication: the email says a
+        # review is complete and where to read it, and nothing more.
         assert 'Worth automating.' not in message.body
         assert 'on evidence' not in message.body
+        assert 'Meets' not in message.body
 
     def test_a_changes_requested_decision_says_what_to_do_next(
         self, world, open_review, django_capture_on_commit_callbacks
@@ -412,7 +509,12 @@ class TestDecisionEmail:
         with django_capture_on_commit_callbacks(execute=True):
             services.complete_review(world['reviewer'], data)
 
-        assert 'Decision: Changes requested' in mail.outbox[0].body
+        # A changes request is the same event with a different wording, and it
+        # produces the same two channels.
+        notification = Notification.objects.get(user=world['author'])
+        assert notification.kind == 'idea.platform_changes_requested'
+        assert 'asked for changes' in notification.body
+        assert 'Add numbers.' not in mail.outbox[0].body
         assert 'submit it again' in mail.outbox[0].body
 
     def test_nothing_is_sent_when_the_completion_is_refused(
@@ -452,13 +554,24 @@ class TestDecisionEmail:
             services.complete_review(world['reviewer'], approve(open_review))
 
         assert Idea.objects.get(pk=world['idea'].pk).status == Idea.Status.APPROVED
-        assert 'Could not send the review decision email' in caplog.text
+        # A delivery failure is logged and the decision stands - which is the
+        # whole of "if email fails, platform approval remains valid".
+        assert 'Could not send the notification email' in caplog.text
 
-    def test_no_email_for_an_unknown_or_open_review(self, world, open_review):
-        notifications.send_review_decision_email(open_review.pk)
-        notifications.send_review_decision_email(999_999)
+    def test_nothing_is_written_or_sent_for_a_review_with_no_decision(self, world, open_review):
+        """
+        No decision, no notification.
+
+        Worth pinning because the notification service is the only delivery code
+        now: "the platform was notified" and "a review exists" are different
+        facts, and only the first should ever produce a message. An open review -
+        including one a take-over has just closed as `WITHDRAWN` - is not a
+        verdict and says nothing to the author.
+        """
+        services._deliver(open_review.pk, None)
 
         assert mail.outbox == []
+        assert not Notification.objects.filter(user=world['author']).exists()
 
     def test_starting_a_review_sends_nothing(self, world, django_capture_on_commit_callbacks):
         with django_capture_on_commit_callbacks(execute=True):
@@ -522,9 +635,13 @@ class TestGraphQL:
         assert payload['success'] is True
         assert payload['message'] == 'Review completed: Approved.'
         assert payload['review']['decision'] == 'APPROVED'
+        # Approval leaves the reviewer with nothing to do and the author with the
+        # go-ahead. The old assertion expected the reviewer to be offered the
+        # automation hand-off, which would have meant an approval being able to
+        # carry straight on to implementation without the owner ever deciding.
         assert payload['idea'] == {
             'status': 'APPROVED',
-            'availableTransitions': ['AUTOMATION_PROPOSAL'],
+            'availableTransitions': [],
             'viewerActiveReviewId': None,
         }
 

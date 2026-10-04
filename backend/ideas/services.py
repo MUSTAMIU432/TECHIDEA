@@ -52,6 +52,13 @@ Commenting (S2-005)
 - Retraction stays available in a closed discussion. Being able to take back
   what you wrote is not participating in the discussion, and a state change
   must not be able to strand a comment nobody may ever remove.
+- **add_comment** also takes an optional `parent_id`, which makes the comment a
+  *reply* to another comment on the same idea. It is resolved through the same
+  readable-comment selector as everything else, so a reply can only ever hang
+  off a comment the caller was shown; the model refuses a reply to a reply, so
+  a thread is one level deep and needs no depth field to render. Deleting a
+  comment takes its replies with it (`CASCADE` on the model) rather than
+  promoting them, because a reply whose question is gone has nothing to answer.
 
 Every refusal below is one message per kind, because each is one answer. An
 unknown comment id, another author's comment, and a comment on an idea the
@@ -84,9 +91,9 @@ three operations into a probe for which idea ids are real.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, models, transaction
 
 from ideas import attachments as attachment_rules
 from ideas import selectors, storage
@@ -122,18 +129,37 @@ class IdeaInput:
     """
     The writable content of an idea.
 
-    Exactly the four fields S2-002's form collects, and nothing else - see the
-    module docstring for why ownership, tenant and status are absent. The
-    model's optional `problem_statement`, `proposed_solution` and
-    `expected_benefit` are also absent: they are content for a later slice,
-    and adding them to a public input type before anything writes them would
-    be an API nobody can yet fill in.
+    The title, the problem description, its classification and visibility,
+    and the problem story the guided intake form collects - and nothing else.
+    See the module docstring for why ownership, tenant and status are absent.
+    The model's `problem_statement` and `proposed_solution` are absent too:
+    the first would duplicate `description`, and the second is deliberately
+    never asked of the author (see `Idea`).
+
+    Every story field defaults to "not answered", and an update writes the
+    whole input: a field left out is cleared, exactly as an omitted
+    `category_id` already was. The form always sends every field back.
     """
 
     title: str
     description: str = ''
     category_id: object | None = None
     visibility: str | None = None
+    current_process: str = ''
+    current_tools: list[str] = field(default_factory=list)
+    current_tools_other: str = ''
+    performed_by: str = ''
+    affected_people: str = ''
+    frequency: str | None = None
+    time_required: str = ''
+    people_involved: int | None = None
+    impacts: list[str] = field(default_factory=list)
+    impact_details: str = ''
+    improvement_goal: str = ''
+    desired_outcome: str = ''
+    easier_for_people: str = ''
+    expected_benefit: str = ''
+    important_considerations: str = ''
 
 
 # The rules below are the "what must be filled in to submit" that
@@ -224,6 +250,110 @@ def _validate_description(description: str | None) -> str:
     return (description or '').strip()
 
 
+# --- the problem story ---------------------------------------------------------------
+#
+# Every story answer is optional, so the only rules are about shape: a known
+# value for the closed vocabularies, a sensible bound for everything else.
+# Refused rather than truncated, for the reason `MAX_COMMENT_LENGTH` gives -
+# silently shortening somebody's answer would store text they did not write.
+
+# A long answer is a few paragraphs; the cap keeps a text column every reader
+# of the idea is served from being a storage and rendering hazard.
+MAX_STORY_ANSWER_LENGTH = 5000
+# "About how many people" is a rough headcount, and a number beyond this is a
+# typo rather than a process.
+MAX_PEOPLE_INVOLVED = 1_000_000
+
+# (field, max length) for the free-text answers. The short ones take their
+# bound from the column so the two cannot disagree.
+_STORY_TEXT_FIELDS: tuple[tuple[str, int], ...] = (
+    ('current_process', MAX_STORY_ANSWER_LENGTH),
+    ('current_tools_other', Idea._meta.get_field('current_tools_other').max_length),
+    ('performed_by', Idea._meta.get_field('performed_by').max_length),
+    ('affected_people', Idea._meta.get_field('affected_people').max_length),
+    ('time_required', Idea._meta.get_field('time_required').max_length),
+    ('impact_details', MAX_STORY_ANSWER_LENGTH),
+    ('improvement_goal', MAX_STORY_ANSWER_LENGTH),
+    ('desired_outcome', MAX_STORY_ANSWER_LENGTH),
+    ('easier_for_people', MAX_STORY_ANSWER_LENGTH),
+    ('expected_benefit', MAX_STORY_ANSWER_LENGTH),
+    ('important_considerations', MAX_STORY_ANSWER_LENGTH),
+)
+
+
+def _normalize_text(value: str | None) -> str:
+    """Strip the ends and fold CRLF to LF - see `_validate_comment_content`."""
+    return (value or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
+
+def _validate_story_text(field_name: str, value: str | None, max_length: int) -> str:
+    normalized = _normalize_text(value)
+    if len(normalized) > max_length:
+        raise IdeaError(
+            f'This answer must be {max_length} characters or fewer.',
+            field=field_name,
+        )
+    return normalized
+
+
+def _validate_choice_list(field_name: str, values: list[str] | None, choices) -> list[str]:
+    """
+    A list of known values, de-duplicated, in the vocabulary's own order.
+
+    Case-normalized for the same reason `_resolve_visibility` is. Stored in a
+    canonical order so the same answer is always the same value - "email,
+    paper" and "paper, email" are one answer, and comparing or querying them
+    should not have to know that.
+    """
+    allowed = list(choices.values)
+    chosen = set()
+    for value in values or []:
+        normalized = str(value).strip().lower()
+        if normalized not in allowed:
+            raise IdeaError('Choose from the options offered.', field=field_name)
+        chosen.add(normalized)
+    return [value for value in allowed if value in chosen]
+
+
+def _validate_frequency(frequency: str | None) -> str:
+    if frequency is None or not str(frequency).strip():
+        return ''
+    normalized = str(frequency).strip().lower()
+    if normalized not in Idea.Frequency.values:
+        raise IdeaError('Choose how often this happens.', field='frequency')
+    return normalized
+
+
+def _validate_people_involved(people_involved: object | None) -> int | None:
+    if people_involved is None or (isinstance(people_involved, str) and not people_involved):
+        return None
+    try:
+        normalized = int(str(people_involved))
+    except (TypeError, ValueError):
+        raise IdeaError('Enter a number of people.', field='people_involved') from None
+    if normalized < 0 or normalized > MAX_PEOPLE_INVOLVED:
+        raise IdeaError(
+            f'Enter a number of people between 0 and {MAX_PEOPLE_INVOLVED:,}.',
+            field='people_involved',
+        )
+    return normalized
+
+
+def _validate_story(data: IdeaInput) -> dict[str, object]:
+    """The problem-story columns to write, validated and normalized."""
+    story: dict[str, object] = {
+        name: _validate_story_text(name, getattr(data, name), max_length)
+        for name, max_length in _STORY_TEXT_FIELDS
+    }
+    story['current_tools'] = _validate_choice_list(
+        'current_tools', data.current_tools, Idea.CurrentTool
+    )
+    story['impacts'] = _validate_choice_list('impacts', data.impacts, Idea.Impact)
+    story['frequency'] = _validate_frequency(data.frequency)
+    story['people_involved'] = _validate_people_involved(data.people_involved)
+    return story
+
+
 def _resolve_category(category_id: object | None) -> Category | None:
     """
     The category to file under, or `None` for an unclassified idea.
@@ -271,7 +401,25 @@ def _resolve_visibility(visibility: str | None) -> str | None:
 # is being written, and while a reviewer has sent it back for changes. Every
 # other state is somebody else's to act on - a submitted or under-review idea
 # is what the reviewer is looking at, and a decided one is history.
-EDITABLE_STATUSES = frozenset({Idea.Status.DRAFT, Idea.Status.CHANGES_REQUESTED})
+#
+# Both changes-requested states are in it, because both mean the same thing to an
+# author: somebody has read it and written down what to change. Which track asked
+# is a question the status label answers, not a question about whether the author
+# may fix it.
+#
+# **This is the working copy, and editing it does not touch the submission.** An
+# idea in `CHANGES_REQUESTED` has already been submitted to the platform and its
+# content frozen into an `IdeaSubmissionVersion`; editing here changes the row the
+# author will resubmit from, and the frozen version the platform holds is a
+# different row that no edit path can reach. That is what makes "answer the
+# feedback without unlocking the official submission" true rather than aspirational.
+EDITABLE_STATUSES = frozenset(
+    {
+        Idea.Status.DRAFT,
+        Idea.Status.CHANGES_REQUESTED,
+        Idea.Status.ORGANIZATION_CHANGES_REQUESTED,
+    }
+)
 
 
 def _load_editable_idea(user: User, idea_id: object) -> Idea:
@@ -307,6 +455,18 @@ def _load_editable_idea(user: User, idea_id: object) -> Idea:
         # too (S3-005) - the author's answer to the review.
         raise IdeaError('Only a draft can be edited.', reason='forbidden')
 
+    if idea.is_locked and idea.status != Idea.Status.CHANGES_REQUESTED:
+        # A locked idea is never editable, whatever its status. Unreachable while
+        # `EDITABLE_STATUSES` and the lifecycle agree - a locked idea is at least
+        # `SUBMITTED` - and kept as a named refusal rather than an implicit
+        # consequence of the set above, because "the official submission is locked"
+        # is a security property of the platform and a security property should
+        # not be an emergent behaviour of an unrelated constant.
+        raise IdeaError(
+            'This idea has been submitted to the platform and can no longer be edited.',
+            reason='forbidden',
+        )
+
     return idea
 
 
@@ -324,6 +484,28 @@ SUBMISSION_VISIBILITY_MESSAGE = (
     'A private idea cannot be reviewed. Share it with your organization or make '
     'it public before submitting.'
 )
+
+# The same rule for an idea that belongs to no organization. An individual or team
+# idea has no organization to widen to, so `ORGANIZATION` visibility means "visible
+# to my team" - which the *organization* reviewer still cannot read, because they
+# review only their own organization's ideas. So for those two contexts only a
+# `PUBLIC` submission can reach a reviewer, and the message says so in the
+# author's terms rather than naming a visibility value.
+DIRECT_CONTEXT_VISIBILITY_MESSAGE = (
+    'An idea you submit on your own, or for a team, is reviewed by the platform. '
+    'Make it public so platform reviewers can read it before submitting.'
+)
+
+
+def _validate_submission_visibility(idea: Idea) -> None:
+    """The visibility a submission needs, which depends on who will review it."""
+    if idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
+        if idea.visibility not in REVIEWABLE_VISIBILITIES:
+            raise IdeaError(SUBMISSION_VISIBILITY_MESSAGE)
+        return
+
+    if idea.visibility != Idea.Visibility.PUBLIC:
+        raise IdeaError(DIRECT_CONTEXT_VISIBILITY_MESSAGE)
 
 
 def _validate_for_submission(idea: Idea) -> None:
@@ -348,36 +530,155 @@ def _validate_for_submission(idea: Idea) -> None:
         )
     if idea.category_id is None:
         raise IdeaError('Choose a category before submitting this idea.')
-    if idea.visibility not in REVIEWABLE_VISIBILITIES:
-        raise IdeaError(SUBMISSION_VISIBILITY_MESSAGE)
+    _validate_submission_visibility(idea)
 
 
-def create_idea(user: User | None, organization_id: object, data: IdeaInput) -> Idea:
+def _resolve_context(
+    user: User,
+    submission_context: str | None,
+    organization_id: object | None,
+    team_id: object | None,
+):
     """
-    File a new idea as a DRAFT.
+    The tenant an idea is being filed for, given the caller's chosen context.
 
-    The author is `user` - resolved from the access token by
-    `identity.authentication` and passed in by the resolver, never read from
-    `data`. The status is the model default (`DRAFT`) and the visibility is
-    the model default (`PRIVATE`, fail closed) unless the caller chose one, so
+    Returns `(context, organization, team)` with exactly the tenants that context
+    requires, having proved the caller belongs to each one. This is the write-side
+    counterpart of `Idea._clean_submission_context`, and the two must agree - the
+    model refuses a row they disagree about, and this function makes the refusal a
+    clear message *before* there is a row.
+
+    The three branches, and why each proves something different:
+
+    - `INDIVIDUAL` needs **nothing**. This is the branch that makes "an
+      organization is optional" true: a user with no organization and no team
+      files an idea, and the only authorization is that they are an authenticated
+      user filing their own idea. The two tenant ids must both be absent, so a
+      caller cannot smuggle an organization in and be quietly given an
+      organization-context idea.
+    - `TEAM` needs an **active team membership**. Not `team.ideas.submit` -
+      filing is not submitting, and a plain member can file; the membership is
+      what proves they belong to the team they are filing for.
+    - `ORGANIZATION` needs an **active organization membership**, through
+      `_require_membership`, which is the same predicate every other write in the
+      platform authorizes with.
+    """
+    normalized = str(submission_context or Idea.SubmissionContext.ORGANIZATION).strip().lower()
+
+    if normalized == Idea.SubmissionContext.INDIVIDUAL:
+        if organization_id not in (None, '') or team_id not in (None, ''):
+            raise IdeaError(
+                'A submission of your own does not belong to an organization or a team.',
+                field='submissionContext',
+            )
+        return normalized, None, None
+
+    if normalized == Idea.SubmissionContext.TEAM:
+        if organization_id not in (None, ''):
+            raise IdeaError(
+                'A team submission does not belong to an organization.', field='submissionContext'
+            )
+        team = _resolve_team(user, team_id)
+        return normalized, None, team
+
+    if normalized == Idea.SubmissionContext.ORGANIZATION:
+        if team_id not in (None, ''):
+            raise IdeaError(
+                'An organization submission does not belong to a team.',
+                field='submissionContext',
+            )
+        membership = _require_membership(user, organization_id)
+        return normalized, membership.organization, None
+
+    raise IdeaError('Choose how you are submitting this idea.', field='submissionContext')
+
+
+def _resolve_team(user: User, team_id: object):
+    """The team `user` is an active member of, or a refusal."""
+    from teams import authorization as team_authorization
+    from teams.models import Team
+
+    try:
+        normalized_id = int(str(team_id))
+    except (TypeError, ValueError):
+        raise IdeaError('Team is unavailable.', reason='forbidden') from None
+
+    if not team_authorization.is_member_of(user, normalized_id):
+        raise IdeaError(
+            'You must be an active member of this team to file an idea for it.',
+            reason='membership_required',
+        )
+
+    team = Team.objects.filter(pk=normalized_id).first()
+    if team is None:  # pragma: no cover - is_member_of already proved it exists
+        raise IdeaError('Team is unavailable.', reason='forbidden')
+    return team
+
+
+def create_idea_in_context(
+    user: User | None,
+    data: IdeaInput,
+    *,
+    submission_context: str | None = None,
+    organization_id: object | None = None,
+    team_id: object | None = None,
+) -> Idea:
+    """
+    File a new idea as a DRAFT, in whichever of the three contexts was chosen.
+
+    The one way an idea comes into existence. The author is `user` - resolved from
+    the access token by `identity.authentication` and passed in by the resolver,
+    never read from `data` - and the tenant is whatever `_resolve_context` proved
+    they belong to. The status is the model default (`DRAFT`) and the visibility
+    is the model default (`PRIVATE`, fail closed) unless the caller chose one, so
     a new idea is visible to nobody but its author until somebody deliberately
     widens it.
+
+    `create_idea` below is this function with the organization spelled out, kept
+    because the `createIdea` mutation's original signature named an organization
+    and the S2 tests call it. Both go through the same validation, so the older
+    entry point gains the context rules rather than bypassing them.
     """
     active_user = _require_active_user(user)
-    membership = _require_membership(active_user, organization_id)
+    context, organization, team = _resolve_context(
+        active_user, submission_context, organization_id, team_id
+    )
 
     title = _validate_title(data.title)
     description = _validate_description(data.description)
+    story = _validate_story(data)
     category = _resolve_category(data.category_id)
     visibility = _resolve_visibility(data.visibility)
 
     return Idea.objects.create(
-        organization=membership.organization,
+        organization=organization,
+        team=team,
+        submission_context=context,
         author=active_user,
         title=title,
         description=description,
         category=category,
+        **story,
         **({'visibility': visibility} if visibility else {}),
+    )
+
+
+def create_idea(user: User | None, organization_id: object, data: IdeaInput) -> Idea:
+    """
+    File a new organization-context idea as a DRAFT.
+
+    Kept as the named organization entry point the `createIdea` mutation and the
+    S2 tests use. It is a delegation, not a second implementation: everything the
+    function used to do - the membership proof, the title, description, story,
+    category and visibility validation, and the fail-closed visibility default -
+    happens in `create_idea_in_context`, so there is one place where "what must a
+    new idea satisfy" is written down.
+    """
+    return create_idea_in_context(
+        user,
+        data,
+        submission_context=Idea.SubmissionContext.ORGANIZATION,
+        organization_id=organization_id,
     )
 
 
@@ -407,6 +708,8 @@ def update_idea(user: User | None, idea_id: object, data: IdeaInput) -> Idea:
 
     idea.title = _validate_title(data.title)
     idea.description = _validate_description(data.description)
+    for name, value in _validate_story(data).items():
+        setattr(idea, name, value)
     idea.category = _resolve_category(data.category_id)
 
     visibility = _resolve_visibility(data.visibility)
@@ -424,29 +727,201 @@ def update_idea(user: User | None, idea_id: object, data: IdeaInput) -> Idea:
     return idea
 
 
+def submission_target(user: User | None, idea: Idea) -> str:
+    """
+    The status "Submit" would move this idea to right now.
+
+    **Context-aware, and it is the author's context that decides.** An
+    organization-context idea is put in front of its organization first; an
+    individual or team idea has no organization to confirm it and goes straight to
+    the platform. Both are the same button - which is the point: the author does
+    not choose a workflow, they choose who they are submitting with, and the
+    platform decides what "submit" means.
+
+    A team submission is additionally checked for `team.ideas.submit`, so an
+    ordinary member can file an idea for their team but the *submission* is a
+    permission the team's roles decide (an owner or any member with it). A team
+    cannot be granted an approval permission, so this is the furthest a team can
+    go in the lifecycle.
+
+    Refuses when there is nothing to submit to, which is what keeps a client from
+    rendering a button whose only possible outcome is an error.
+    """
+    from ideas import lifecycle
+
+    if idea is None:
+        raise IdeaError('Idea is unavailable.', reason='forbidden')
+
+    if user is None or not user.is_active:
+        raise IdeaError('You must be signed in to work with ideas.', reason='unauthenticated')
+
+    target = lifecycle.resubmission_target(idea)
+    if target is None:
+        raise IdeaError('Only a draft can be edited.', reason='forbidden')
+
+    if idea.submission_context == Idea.SubmissionContext.TEAM and target == Idea.Status.SUBMITTED:
+        from teams import authorization as team_authorization
+
+        if not team_authorization.can_submit_for(user, idea.team_id):
+            raise IdeaError(
+                'You do not have permission to submit this idea for your team.',
+                reason='forbidden',
+            )
+
+    return target
+
+
 def submit_idea(user: User | None, idea_id: object) -> Idea:
     """
-    DRAFT -> SUBMITTED, by its author.
+    Put this idea forward, to whichever stage its context names.
 
     A thin delegation to `ideas.lifecycle.transition_idea` rather than a second
-    implementation of the same move. S2-002 owned this transition outright;
-    S2-003 made it one entry in a seven-pair matrix, and leaving the original
-    body in place would have given the domain two answers to "may this idea be
-    submitted?" - free to drift, and free to disagree about who may ask. The
-    name is kept because it is what the `submitIdea` mutation and the S2-002
-    tests call, and because "submit my idea" is the operation's name in the
-    product regardless of which module implements it.
+    implementation of the same move - which decides the target from the idea's own
+    context, so there is still exactly one answer to "may this idea be submitted,
+    and to what". For an organization idea that is
+    `SUBMITTED_TO_ORGANIZATION`; for an individual or team idea it is `SUBMITTED`.
 
-    `CHANGES_REQUESTED -> SUBMITTED` now goes through the same call, so a
-    re-submission after review feedback is the same validated move rather than a
-    second, slightly different one.
+    The same call serves a resubmission after either track's changes request,
+    because both resolve through the lifecycle's `RESUBMISSION_TARGET`. The name
+    is kept because it is what the `submitIdea` mutation and the S2-002 tests
+    call, and because "submit my idea" is the operation's name in the product
+    regardless of which stage it reaches.
     """
     # Imported here rather than at module scope: `ideas.lifecycle` imports the
     # validators above from this module, so a top-level import in both
     # directions would be a cycle. One direction at import time is enough.
     from ideas import lifecycle
 
-    return lifecycle.transition_idea(user, idea_id, Idea.Status.SUBMITTED)
+    active_user = _require_active_user(user)
+    idea = selectors.get_idea(active_user, idea_id)
+    if idea is None:
+        raise IdeaError('Idea is unavailable.', reason='forbidden')
+
+    moved = lifecycle.transition_idea(active_user, idea_id, submission_target(active_user, idea))
+    _notify_the_reviewers_waiting_on(moved)
+    return moved
+
+
+def _notify_the_reviewers_waiting_on(idea: Idea) -> None:
+    """
+    Tell the reviewers who now have something to do that they do.
+
+    A submission changes nothing about who is *allowed* to review - the queues are
+    permission-scoped queries either way - so the only thing missing without this
+    is that a reviewer has to go looking for work. And a queue nudge is the one
+    notification that is deliberately not emailed: there may be many platform
+    reviewers, "somebody has submitted something" is not addressed to anybody in
+    particular, and mailing every one of them for every submission is how a
+    notification stops being read.
+
+    Authoritative about *whose* queue: the organization's own reviewers for an
+    organization submission, and the platform's reviewers for anything that reached
+    the platform. Registered after the commit and never raising, like every other
+    notification in the platform.
+    """
+    from notifications import services as notification_services
+
+    if idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION:
+        recipients = organization_reviewers_for(idea)
+        kind = 'review.organization_queue'
+        title = f'"{idea.title}" is waiting for your organization'
+        body = 'A member has submitted an idea for your organization to review.'
+    elif idea.status == Idea.Status.SUBMITTED:
+        recipients = platform_reviewers()
+        kind = 'review.platform_queue'
+        title = f'"{idea.title}" is waiting for platform review'
+        body = 'An idea has been submitted to the platform and is waiting for a reviewer.'
+    else:
+        # A resubmission that went back to the organization, or any other
+        # destination: the queue it landed in has already been told, by the
+        # original submission. Saying it twice would make two submissions look
+        # like two different ideas arriving.
+        return
+
+    # Never the author. They know they submitted it; being told "somebody's idea
+    # is waiting" about your own is the kind of notification that teaches people
+    # to ignore the badge. (An organization's Owner can be both, which is exactly
+    # when this matters.)
+    recipients = [user for user in recipients if user.pk != idea.author_id]
+    if not recipients:
+        return
+
+    notification_services.deliver(
+        recipients=recipients,
+        kind=kind,
+        title=title,
+        body=body,
+        idea=idea,
+        send_email=False,
+    )
+
+
+def organization_reviewers_for(idea: Idea) -> list[User]:
+    """The active reviewers of the idea's organization, if it has one."""
+    if idea.organization_id is None:
+        return []
+
+    from organizations.models import Membership
+    from organizations.services import IDEA_REVIEW
+
+    memberships = Membership.objects.filter(
+        organization_id=idea.organization_id, status=Membership.Status.ACTIVE
+    ).select_related('user')
+
+    from organizations import authorization as organization_authorization
+
+    return [
+        membership.user
+        for membership in memberships
+        if membership.user.is_active
+        and organization_authorization.membership_has_permission(membership, IDEA_REVIEW)
+    ]
+
+
+def platform_reviewers() -> list[User]:
+    """
+    The active accounts holding the platform review permission.
+
+    Resolved by one query rather than by asking the permission framework per
+    account: this runs on every submission, and "who is on the platform side" is a
+    question the database can answer once.
+    """
+    from administration.authorization import REVIEW_PLATFORM_SUBMISSIONS
+
+    codename = REVIEW_PLATFORM_SUBMISSIONS.split('.', 1)[1]
+    return list(
+        User.objects.filter(is_active=True)
+        .filter(
+            models.Q(
+                user_permissions__content_type__app_label='administration',
+                user_permissions__codename=codename,
+            )
+            | models.Q(
+                groups__permissions__content_type__app_label='administration',
+                groups__permissions__codename=codename,
+            )
+        )
+        .distinct()
+    )
+
+
+def submit_to_platform(user: User | None, idea_id: object) -> Idea:
+    """
+    `ORGANIZATION_CONFIRMED -> SUBMITTED`: the owner puts a confirmed idea in
+    front of the platform.
+
+    Named separately from `submit_idea` because it is a genuinely different act,
+    not a variant of the same one: the organization has already said this is what
+    it wants to submit, and now the *owner* is the one choosing to submit it. The
+    distinction is what the product asks for - organization confirmation is not
+    platform submission - and a separate name is what stops a reader of this file
+    from assuming "submit" covers both.
+    """
+    from ideas import lifecycle
+
+    moved = lifecycle.transition_idea(user, idea_id, Idea.Status.SUBMITTED)
+    _notify_the_reviewers_waiting_on(moved)
+    return moved
 
 
 # --- comments (S2-005) -------------------------------------------------------------
@@ -552,20 +1027,68 @@ def _load_owned_comment(user: User, comment_id: object) -> Comment:
     return comment
 
 
-def add_comment(user: User | None, idea_id: object, content: str) -> Comment:
+def add_comment(
+    user: User | None, idea_id: object, content: str, parent_id: object | None = None
+) -> Comment:
     """
-    Post a comment on an idea the caller may read.
+    Post a comment on an idea the caller may read, optionally as a reply to
+    another comment on the same idea.
 
     The author is `user` and the idea is resolved, authorized and used by this
     module - neither is an input, so no caller can post as somebody else or
     attach a comment to an idea it was not allowed to name. The status is not
     touched: a comment does not move the idea it is on.
+
+    `parent_id` is the one thing the client names about the *shape* of its
+    comment, and it is resolved here rather than trusted:
+
+    - it goes through `selectors.get_comment`, so a parent the caller cannot
+      read is not a parent they may reply to. Without that, a reply could hang
+      off a comment on a private idea and be read by somebody who was never
+      shown either of them;
+    - the resolved parent is checked against the already-authorized idea, so a
+      reply cannot cross from one idea's thread into another's;
+    - the model refuses a reply to a reply (`Comment.clean`), which is one
+      level of nesting as a rule of the row rather than as a value.
+
+    A parent that does not exist, is unreadable, belongs to another idea, or is
+    itself a reply all raise `IdeaError` naming the input at fault. The client
+    is told *why* rather than being left to draw a reply that the server would
+    have to drop: this is a form mistake, not an existence oracle, because the
+    caller had to be able to read the idea first to get here.
     """
     active_user = _require_active_user(user)
     idea = _load_discussable_idea(active_user, idea_id)
     normalized = _validate_comment_content(content)
 
-    return Comment.objects.create(idea=idea, author=active_user, content=normalized)
+    parent: Comment | None = None
+    if parent_id is not None:
+        parent = selectors.get_comment(active_user, parent_id)
+        if parent is None:
+            raise IdeaError(
+                'The comment you are replying to is unavailable.',
+                field='parentId',
+            )
+        if parent.idea_id != idea.pk:
+            raise IdeaError(
+                'A reply must be on the same idea as the comment it answers.',
+                field='parentId',
+            )
+        if parent.parent_id is not None:
+            raise IdeaError(
+                'You can only reply to a top-level comment.',
+                field='parentId',
+            )
+
+    # `Comment.save` runs `full_clean`, so the model's own rules - content, no
+    # self-parenting, one level of nesting - hold on this write path as well as
+    # on any other.
+    return Comment.objects.create(
+        idea=idea,
+        author=active_user,
+        content=normalized,
+        parent=parent,
+    )
 
 
 def update_comment(user: User | None, comment_id: object, content: str) -> Comment:
@@ -595,6 +1118,14 @@ def delete_comment(user: User | None, comment_id: object) -> None:
     (S2-001 declined to model a policy that does not exist), and a `CASCADE`
     from the idea takes the discussion with it. If moderation arrives it will
     arrive as a state, not as a repair of this row.
+
+    Any replies to it go with it, and that is the model's `CASCADE` rather than
+    a decision taken here. A reply is *about* its parent, so once the parent is
+    retracted the reply has no subject left; promoting it to a top-level comment
+    would quietly republish somebody's words as though they had been their own.
+    The consequence worth knowing is that an author can remove a thread by
+    removing its first comment, and a reply to a reply is not a thing - so
+    replies to one's own comment cannot exist.
     """
     active_user = _require_active_user(user)
     comment = _load_owned_comment(active_user, comment_id)

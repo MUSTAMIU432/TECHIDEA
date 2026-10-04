@@ -97,6 +97,13 @@ class TestAppBoundary:
             'Vote',
             'Attachment',
             'IdeaTransition',
+            # The frozen submission itself. It is this domain's entity, not
+            # `reviews`'s, for the same reason `IdeaTransition` is: it is a
+            # property of *the idea* - which version the platform is looking at,
+            # what the author wrote when they submitted it - and the lifecycle
+            # and `ideas.versions` are its only writers. `reviews` reads it and
+            # writes its `Review` rows against it.
+            'IdeaSubmissionVersion',
         }
 
     def test_no_attachment_field_stores_file_bytes_in_postgresql(self):
@@ -183,14 +190,49 @@ class TestCategoryModel:
 @pytest.mark.django_db
 class TestIdeaLifecycleVocabulary:
     def test_status_vocabulary_is_exactly_the_product_lifecycle(self):
+        """
+        Eleven statuses, in journey order, and the order is part of the claim.
+
+        Read it as three tracks:
+
+            draft
+              -> submitted_to_organization      (organization ideas only)
+              -> organization_changes_requested / organization_confirmed
+              -> submitted                      (individual, team, or confirmed)
+              -> under_review -> changes_requested / rejected / approved
+              -> ready_for_implementation        (the author's go-ahead)
+              -> automation_proposal             (the hand-off to Sprint 4)
+
+        The organization stage is the three states the submission-context phase
+        added; the platform stage and its three decisions are Sprint 2/3's and
+        unchanged in meaning. `automation_proposal` is the last state and there is
+        nothing after it - Sprint 4 is a boundary, not a stage this repository
+        acts on.
+        """
         assert list(Idea.Status.values) == [
             'draft',
+            'submitted_to_organization',
+            'organization_changes_requested',
+            'organization_confirmed',
             'submitted',
             'under_review',
             'changes_requested',
             'rejected',
             'approved',
+            'ready_for_implementation',
             'automation_proposal',
+        ]
+
+    def test_submission_context_vocabulary_is_exactly_the_three(self):
+        """
+        Individual, team, organization - the field that replaces "an idea
+        belongs to an organization", so it is a closed set and an idea must
+        always be able to say which of the three it is.
+        """
+        assert list(Idea.SubmissionContext.values) == [
+            'individual',
+            'team',
+            'organization',
         ]
 
     def test_visibility_vocabulary_is_exactly_the_four_levels(self):
@@ -353,12 +395,24 @@ class TestIdeaIndexes:
         return {index.name: list(index.fields) for index in model._meta.indexes}
 
     def test_idea_carries_the_query_shaped_indexes_and_nothing_more(self):
+        """
+        The index list is the query shapes the domain actually runs, so it is
+        asserted as an exact set: an index nobody queries is a write cost on
+        every status change, and a missing one is a table scan.
+
+        The two the submission-context phase added are the ones its queries need:
+        `ideas_team_created_idx` for a team's idea list, and
+        `ideas_author_status_idx` for "my ideas, filtered by state" - the author
+        dashboard, which filters on both.
+        """
         assert self._index_columns(Idea) == {
             'ideas_org_created_idx': ['organization', '-created_at'],
             'ideas_org_status_idx': ['organization', 'status'],
             'ideas_category_created_idx': ['category', '-created_at'],
             'ideas_vis_created_idx': ['visibility', '-created_at'],
             'ideas_author_created_idx': ['author', '-created_at'],
+            'ideas_team_created_idx': ['team', '-created_at'],
+            'ideas_author_status_idx': ['author', 'status', '-created_at'],
         }
 
     def test_foreign_keys_that_lead_an_index_do_not_also_get_a_singleton(self):
@@ -375,7 +429,7 @@ class TestIdeaIndexes:
             if not field_name.startswith('-')
         }
 
-        for field_name in ('organization', 'author', 'category'):
+        for field_name in ('organization', 'author', 'category', 'team'):
             assert Idea._meta.get_field(field_name).db_index is False
             assert field_name in prefixed_by_a_composite
 

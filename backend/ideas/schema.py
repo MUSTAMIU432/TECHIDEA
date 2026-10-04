@@ -54,11 +54,20 @@ service describes what may be *used* today.
 
 import strawberry
 
-from ideas import lifecycle, selectors, services
+from ideas import go_ahead, lifecycle, selectors, services, states
 from ideas.models import Attachment, Category, Comment, Idea, IdeaTransition
 
 IdeaStatus = strawberry.enum(Idea.Status, name='IdeaStatus')
 IdeaVisibility = strawberry.enum(Idea.Visibility, name='IdeaVisibility')
+SubmissionContext = strawberry.enum(Idea.SubmissionContext, name='SubmissionContext')
+IdeaAction = strawberry.enum(states.Action, name='IdeaAction')
+IdeaStage = strawberry.enum(states.Stage, name='IdeaStage')
+IdeaTone = strawberry.enum(states.Tone, name='IdeaTone')
+# The problem story's closed vocabularies, built from the model's own
+# `TextChoices` for the same reason as the two above.
+IdeaFrequency = strawberry.enum(Idea.Frequency, name='IdeaFrequency')
+IdeaImpact = strawberry.enum(Idea.Impact, name='IdeaImpact')
+IdeaCurrentTool = strawberry.enum(Idea.CurrentTool, name='IdeaCurrentTool')
 
 
 @strawberry.type(description='A platform-wide classification an idea can be filed under.')
@@ -75,6 +84,51 @@ class CategoryType:
             name=category.name,
             slug=category.slug,
             description=category.description,
+        )
+
+
+@strawberry.type(
+    description=(
+        "An idea's state, in words, with the one thing this viewer should do "
+        'next. The counterpart of `IdeaType.status`, which stays the technical '
+        'vocabulary the server enforces; this is the human one the interface '
+        'renders. A client should never translate a status value itself.'
+    )
+)
+class IdeaStateType:
+    status: IdeaStatus
+    label: str
+    short_label: str
+    tone: IdeaTone
+    stage: IdeaStage
+    primary_action: IdeaAction
+    primary_action_label: str
+    is_locked: bool
+    is_terminal: bool
+    # `(current step, total steps)` for the progress indicator, one-based. Only
+    # an organization-context idea has the organization steps in its journey; an
+    # individual or team idea's bar is shorter rather than showing two steps it
+    # will never reach.
+    stage_index: int
+    stage_count: int
+
+    @staticmethod
+    def from_model(summary: states.IdeaStateSummary, idea: Idea | None = None) -> 'IdeaStateType':
+        stage_index, stage_count = (1, 1)
+        if idea is not None:
+            stage_index, stage_count = states.stage_index(idea)
+        return IdeaStateType(
+            status=IdeaStatus(summary.status),
+            label=summary.label,
+            short_label=summary.short_label,
+            tone=summary.tone,
+            stage=summary.stage,
+            primary_action=summary.primary_action,
+            primary_action_label=summary.primary_action_label,
+            is_locked=summary.is_locked,
+            is_terminal=summary.is_terminal,
+            stage_index=stage_index,
+            stage_count=stage_count,
         )
 
 
@@ -95,8 +149,48 @@ class IdeaType:
     # idea is platform-readable, so it must not carry a member's email address
     # in its payload.
     author_id: strawberry.ID
-    organization_id: strawberry.ID
+    # --- the submission context -------------------------------------------------
+    # Which of the three shapes this idea was filed in, and the tenant it names.
+    # `organizationId` is now **null** for an individual or team idea: an
+    # organization is optional, and a client that assumes it is always present
+    # is a client that will show an empty organization to somebody who filed an
+    # idea entirely on their own.
+    submission_context: SubmissionContext
+    organization_id: strawberry.ID | None
+    team_id: strawberry.ID | None
+    # The organization's or team's name, for a header or a card. Derived, so it
+    # cannot disagree with the row; empty for an individual idea.
+    tenant_name: str
+    # --- the platform stage -------------------------------------------------------
+    # Set when the official submission was frozen, and never cleared. Paired with
+    # `platformVersion`: "the submission the platform is holding does not move"
+    # is a fact about the idea, reported rather than inferred from the status.
+    platform_locked_at: str | None
+    platform_version: int
+    platform_approved_at: str | None
+    # The owner's explicit go-ahead. Null unless the owner has pressed it -
+    # receiving the report, the notification or the email never sets this.
+    owner_go_ahead_at: str | None
     category: CategoryType | None
+    # The problem story (the guided intake form). Content like `description`,
+    # so readable by exactly whoever may read the idea - the visibility filter
+    # that returns the row is the only gate, and there is no second one here.
+    # Blank strings, empty lists and nulls mean "not answered".
+    current_process: str
+    current_tools: list[IdeaCurrentTool]
+    current_tools_other: str
+    performed_by: str
+    affected_people: str
+    frequency: IdeaFrequency | None
+    time_required: str
+    people_involved: int | None
+    impacts: list[IdeaImpact]
+    impact_details: str
+    improvement_goal: str
+    desired_outcome: str
+    easier_for_people: str
+    expected_benefit: str
+    important_considerations: str
     # The statuses *this viewer* may move this idea to right now, derived from
     # the same transition matrix that enforces the change. It saves the client
     # from hard-coding a second, drifting copy of the lifecycle - and it is a
@@ -126,6 +220,22 @@ class IdeaType:
     _idea: strawberry.Private[Idea]
     _viewer: strawberry.Private[object]
 
+    @strawberry.field(
+        description=(
+            'What this state means in words, and the single action this viewer '
+            'should take next. Resolved on demand from `ideas.states`, so the '
+            'wording and the offered action come from one table that also '
+            'derives what the server will accept - the client never has to '
+            'translate an enum value itself. Null-invoked never: a viewer with '
+            'no rights gets `NOTHING_TO_DO`, not an error.\n\n'
+            '`primaryActionLabel` is the button text. It is empty when there is '
+            'nothing for this viewer to do, which is how the client knows not to '
+            'render a button at all.'
+        )
+    )
+    def state(self) -> 'IdeaStateType':
+        return IdeaStateType.from_model(states.summarize(self._viewer, self._idea), self._idea)
+
     # Review capabilities (S3-003). Resolved lazily rather than in
     # `from_model`, so the cost is only paid by a query that asks for them,
     # and both answer from the status alone - with no query - for every idea
@@ -138,12 +248,16 @@ class IdeaType:
     # which is what `docs/reviews-domain.md` §13 places on `IdeaType`.
     @strawberry.field(
         description=(
-            'Whether the current viewer is eligible to start a review of this '
-            'idea: a reviewer in its organization who can read it and did not '
-            'write it, on an idea waiting in SUBMITTED - or UNDER_REVIEW with a '
-            'review whose reviewer can no longer review it, which startReview '
-            'then takes over. A capability flag only; startReview checks '
-            'eligibility again.'
+            'Whether the current viewer may **claim this submission for platform '
+            'review**.\n\n'
+            'Authorized by the platform-scoped '
+            '`administration.review_platform_submissions` permission and by '
+            'nothing else: no organization role and no team role reaches it. Also '
+            'requires being able to read the idea and not having written it.\n\n'
+            'True on an idea waiting in SUBMITTED, and on an UNDER_REVIEW idea '
+            'whose reviewer can no longer review it - which `startReview` then '
+            'takes over. A capability flag only; `startReview` checks eligibility '
+            'again.'
         )
     )
     def viewer_can_start_review(self) -> bool:
@@ -151,10 +265,33 @@ class IdeaType:
 
         precomputed = getattr(self._idea, 'viewer_can_start_review', None)
         if precomputed is not None:
-            # Set by `reviews.selectors.review_queue`, which established it
-            # for the whole page in the queue's own filters.
+            # Set by the platform queue, which established it for the whole page
+            # in its own filters rather than asking per idea.
             return precomputed
         return eligibility.can_start_review(self._viewer, self._idea)
+
+    @strawberry.field(
+        description=(
+            'Whether the current viewer may **open this organization review**.\n\n'
+            "Requires being an active member of the idea's own organization "
+            'holding `idea.review` there, being able to read the idea, and not '
+            'having written it - so an author never sees this as true for their '
+            'own idea. Only ever true for an ORGANIZATION-context idea waiting in '
+            'SUBMITTED_TO_ORGANIZATION: a team or individual idea has no '
+            'organization to confirm it.\n\n'
+            'Organization confirmation is not platform approval, and this '
+            'permission grants nothing on the platform track.'
+        )
+    )
+    def viewer_can_start_organization_review(self) -> bool:
+        from reviews import eligibility
+
+        precomputed = getattr(self._idea, 'viewer_can_start_organization_review', None)
+        if precomputed is not None:
+            # Set by `reviews.selectors.review_queue`, which established it for
+            # the whole page in the queue's own filters.
+            return precomputed
+        return eligibility.can_start_organization_review(self._viewer, self._idea)
 
     @strawberry.field(
         description=(
@@ -180,8 +317,38 @@ class IdeaType:
             created_at=idea.created_at.isoformat(),
             updated_at=idea.updated_at.isoformat(),
             author_id=strawberry.ID(str(idea.author_id)),
-            organization_id=strawberry.ID(str(idea.organization_id)),
+            submission_context=SubmissionContext(idea.submission_context),
+            organization_id=(
+                strawberry.ID(str(idea.organization_id)) if idea.organization_id else None
+            ),
+            team_id=strawberry.ID(str(idea.team_id)) if idea.team_id else None,
+            tenant_name=idea.tenant_label,
+            platform_locked_at=(
+                idea.platform_locked_at.isoformat() if idea.platform_locked_at else None
+            ),
+            platform_version=idea.platform_version,
+            platform_approved_at=(
+                idea.platform_approved_at.isoformat() if idea.platform_approved_at else None
+            ),
+            owner_go_ahead_at=(
+                idea.owner_go_ahead_at.isoformat() if idea.owner_go_ahead_at else None
+            ),
             category=CategoryType.from_model(idea.category) if idea.category_id else None,
+            current_process=idea.current_process,
+            current_tools=[IdeaCurrentTool(tool) for tool in idea.current_tools],
+            current_tools_other=idea.current_tools_other,
+            performed_by=idea.performed_by,
+            affected_people=idea.affected_people,
+            frequency=IdeaFrequency(idea.frequency) if idea.frequency else None,
+            time_required=idea.time_required,
+            people_involved=idea.people_involved,
+            impacts=[IdeaImpact(impact) for impact in idea.impacts],
+            impact_details=idea.impact_details,
+            improvement_goal=idea.improvement_goal,
+            desired_outcome=idea.desired_outcome,
+            easier_for_people=idea.easier_for_people,
+            expected_benefit=idea.expected_benefit,
+            important_considerations=idea.important_considerations,
             available_transitions=[
                 IdeaStatus(status) for status in lifecycle.available_transitions(user, idea)
             ],
@@ -201,14 +368,68 @@ class IdeaInput:
     category_id: strawberry.ID | None = None
     # Omit to keep the model default, which is PRIVATE - fail closed.
     visibility: IdeaVisibility | None = None
+    # The problem story. All optional - a draft is incomplete by definition -
+    # and an update writes the whole input, so an omitted answer is cleared.
+    current_process: str = ''
+    current_tools: list[IdeaCurrentTool] = strawberry.field(default_factory=list)
+    current_tools_other: str = ''
+    performed_by: str = ''
+    affected_people: str = ''
+    frequency: IdeaFrequency | None = None
+    time_required: str = ''
+    people_involved: int | None = None
+    impacts: list[IdeaImpact] = strawberry.field(default_factory=list)
+    impact_details: str = ''
+    improvement_goal: str = ''
+    desired_outcome: str = ''
+    easier_for_people: str = ''
+    expected_benefit: str = ''
+    important_considerations: str = ''
+
+    def to_service_input(self) -> services.IdeaInput:
+        """The service's input: enums unwrapped, nothing else decided here."""
+        return services.IdeaInput(
+            title=self.title,
+            description=self.description,
+            category_id=self.category_id,
+            visibility=self.visibility.value if self.visibility else None,
+            current_process=self.current_process,
+            current_tools=[tool.value for tool in self.current_tools],
+            current_tools_other=self.current_tools_other,
+            performed_by=self.performed_by,
+            affected_people=self.affected_people,
+            frequency=self.frequency.value if self.frequency else None,
+            time_required=self.time_required,
+            people_involved=self.people_involved,
+            impacts=[impact.value for impact in self.impacts],
+            impact_details=self.impact_details,
+            improvement_goal=self.improvement_goal,
+            desired_outcome=self.desired_outcome,
+            easier_for_people=self.easier_for_people,
+            expected_benefit=self.expected_benefit,
+            important_considerations=self.important_considerations,
+        )
 
 
-@strawberry.input(description='Fields for filing a new idea.')
+@strawberry.input(
+    description=(
+        'Fields for filing a new idea.\n\n'
+        '`submissionContext` is the choice the interface offers as "How are you '
+        'submitting this idea?", and it decides which of `organizationId` and '
+        '`teamId` must be present: `INDIVIDUAL` needs neither (a user does not '
+        'need an organization to file an idea), `TEAM` needs `teamId`, and '
+        '`ORGANIZATION` needs `organizationId`.\n\n'
+        'It is an input to a decision, not a value to be written: the service '
+        'proves the caller belongs to whichever tenant is named and then uses it. '
+        'The author is never an input at all - it is the authenticated user. And '
+        'the context cannot be changed later, so it is not on the update input: '
+        'filing for a different audience means filing a new idea.'
+    )
+)
 class CreateIdeaInput:
-    # An input to a decision, not a value to be written: the service
-    # authorizes this organization and then uses it. The author is never an
-    # input at all - it is the authenticated user.
-    organization_id: strawberry.ID
+    submission_context: SubmissionContext
+    organization_id: strawberry.ID | None = None
+    team_id: strawberry.ID | None = None
     idea: IdeaInput
 
 
@@ -297,7 +518,11 @@ class IdeaPage:
         'and Delete on - an offer, never a control, since the service checks '
         'authorship itself.\n\n'
         '`content` is plain text. It is stored and returned verbatim, and it is '
-        'rendered as text, so a client must not interpret it as markup.'
+        'rendered as text, so a client must not interpret it as markup.\n\n'
+        '`parentId` is the comment this one answers, and is `null` for a '
+        'top-level comment. A thread is exactly one level deep - a reply cannot '
+        'be replied to - so a client can group the page it was given by this '
+        'one field alone, with no nested query and no second page of replies.'
     )
 )
 class CommentType:
@@ -305,6 +530,7 @@ class CommentType:
     idea_id: strawberry.ID
     author_id: strawberry.ID
     content: str
+    parent_id: strawberry.ID | None
     # ISO 8601 strings, as `IdeaType` reports its own timestamps: one
     # representation across the schema rather than two.
     created_at: str
@@ -317,6 +543,7 @@ class CommentType:
             idea_id=strawberry.ID(str(comment.idea_id)),
             author_id=strawberry.ID(str(comment.author_id)),
             content=comment.content,
+            parent_id=None if comment.parent_id is None else strawberry.ID(str(comment.parent_id)),
             created_at=comment.created_at.isoformat(),
             updated_at=comment.updated_at.isoformat(),
         )
@@ -388,10 +615,21 @@ class CommentInput:
     content: str
 
 
-@strawberry.input(description='Post a comment on an idea.')
+@strawberry.input(
+    description=(
+        'Post a comment on an idea. Omit `parentId` for a top-level comment; '
+        'set it to make this a reply to that comment, which the server checks '
+        'is readable, on the same idea, and not itself a reply.'
+    )
+)
 class CreateCommentInput:
     idea_id: strawberry.ID
     comment: CommentInput
+    # Nullable rather than a separate `replyToComment` mutation, so "a comment"
+    # stays one thing in the API and a client needs no second code path to
+    # answer somebody. The service resolves it against the caller's own
+    # readable comments; it is not an existence oracle.
+    parent_id: strawberry.ID | None = None
 
 
 @strawberry.input(description="Edit the current user's own comment.")
@@ -740,15 +978,12 @@ class Mutation:
     @strawberry.mutation(description='File a new idea as a draft.')
     def create_idea(self, info: strawberry.Info, input: CreateIdeaInput) -> CreateIdeaPayload:
         try:
-            idea = services.create_idea(
+            idea = services.create_idea_in_context(
                 info.context.user,
-                input.organization_id,
-                services.IdeaInput(
-                    title=input.idea.title,
-                    description=input.idea.description,
-                    category_id=input.idea.category_id,
-                    visibility=input.idea.visibility.value if input.idea.visibility else None,
-                ),
+                input.idea.to_service_input(),
+                submission_context=input.submission_context.value,
+                organization_id=input.organization_id,
+                team_id=input.team_id,
             )
         except services.IdeaError as exc:
             message, field = _service_error(exc)
@@ -766,12 +1001,7 @@ class Mutation:
             idea = services.update_idea(
                 info.context.user,
                 input.id,
-                services.IdeaInput(
-                    title=input.idea.title,
-                    description=input.idea.description,
-                    category_id=input.idea.category_id,
-                    visibility=input.idea.visibility.value if input.idea.visibility else None,
-                ),
+                input.idea.to_service_input(),
             )
         except services.IdeaError as exc:
             message, field = _service_error(exc)
@@ -816,9 +1046,73 @@ class Mutation:
             message, field = _service_error(exc)
             return SubmitIdeaPayload(success=False, message=message, field=field)
 
+        # The message names the stage the idea actually reached, because "submit"
+        # means two different things depending on the context and a client that
+        # prints one fixed string tells an organization Owner their idea is with
+        # the platform when it is in front of their own organization.
         return SubmitIdeaPayload(
             success=True,
-            message='Idea submitted for review.',
+            message=_submitted_message(idea),
+            idea=IdeaType.from_model(idea),
+        )
+
+    @strawberry.mutation(
+        description=(
+            'Submit a confirmed organization idea to the platform.\n\n'
+            'A separate mutation from `submitIdea` because this is a genuinely '
+            'different act rather than a variant of the same one: the '
+            'organization has already confirmed the idea, and now the **owner** '
+            'is choosing to put it in front of the platform. Organization '
+            'confirmation is not platform submission, and the two are never done '
+            'by the same click.\n\n'
+            'This freezes the submission: the content the platform receives is '
+            'copied into an immutable version, and no edit can change it. '
+            'Answering a later request for changes produces a new version rather '
+            'than overwriting this one.'
+        )
+    )
+    def submit_to_platform(self, info: strawberry.Info, id: strawberry.ID) -> SubmitIdeaPayload:
+        try:
+            idea = services.submit_to_platform(info.context.user, id)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return SubmitIdeaPayload(success=False, message=message, field=field)
+
+        return SubmitIdeaPayload(
+            success=True,
+            message='Idea submitted to the platform. It is now locked for review.',
+            idea=IdeaType.from_model(idea),
+        )
+
+    @strawberry.mutation(
+        description=(
+            'Give your go-ahead on an approved idea.\n\n'
+            '**Platform approval is not owner go-ahead**, and this is the only '
+            'operation that provides it. It requires you to be the author of the '
+            'idea - not an organization Owner, not a team Owner, not a platform '
+            'administrator - and a platform review report to exist, which the '
+            "reviewer's approval generated.\n\n"
+            'Opening the report, receiving the email and receiving the '
+            'notification do **not** count as this decision and none of them '
+            'changes the idea. Only this mutation does.\n\n'
+            '`READY_FOR_IMPLEMENTATION` means the owner has authorized the idea '
+            'to proceed toward implementation. It does not mean a developer has '
+            'been selected, a project exists, or any work has started.'
+        )
+    )
+    def give_go_ahead(self, info: strawberry.Info, id: strawberry.ID) -> SubmitIdeaPayload:
+        try:
+            idea = go_ahead.confirm_go_ahead(info.context.user, id)
+        except services.IdeaError as exc:
+            message, field = _service_error(exc)
+            return SubmitIdeaPayload(success=False, message=message, field=field)
+
+        return SubmitIdeaPayload(
+            success=True,
+            message=(
+                'Thank you. Your idea is now ready for implementation, which means it '
+                'will be made available to developers.'
+            ),
             idea=IdeaType.from_model(idea),
         )
 
@@ -827,21 +1121,28 @@ class Mutation:
             'Post a comment on an idea. Requires being able to *read* the idea '
             '- not membership of its organization, because participation '
             'follows readability and a `PUBLIC` idea is meant to be answered '
-            'across tenants. Refused on an idea whose discussion is closed.'
+            'across tenants. Refused on an idea whose discussion is closed. '
+            'With `parentId` it is a reply to that comment, which must be '
+            'readable, on the same idea, and not itself a reply.'
         )
     )
     def create_comment(
         self, info: strawberry.Info, input: CreateCommentInput
     ) -> CreateCommentPayload:
         try:
-            comment = services.add_comment(info.context.user, input.idea_id, input.comment.content)
+            comment = services.add_comment(
+                info.context.user,
+                input.idea_id,
+                input.comment.content,
+                parent_id=input.parent_id,
+            )
         except services.IdeaError as exc:
             message, field = _service_error(exc)
             return CreateCommentPayload(success=False, message=message, field=field)
 
         return CreateCommentPayload(
             success=True,
-            message='Comment posted.',
+            message='Reply posted.' if comment.parent_id is not None else 'Comment posted.',
             comment=_comment_payload(comment),
         )
 
@@ -965,3 +1266,17 @@ class Mutation:
             return DeleteAttachmentPayload(success=False, message=message, field=field)
 
         return DeleteAttachmentPayload(success=True, message='Attachment deleted.')
+
+
+def _submitted_message(idea: Idea) -> str:
+    """
+    What to tell the author after a submission, in their own vocabulary.
+
+    Two different things happen under the word "submit", so one fixed string
+    would be wrong for one of them: an organization idea stops at its own
+    organization, and telling its owner it is "submitted for review" - which is
+    what this used to say - leaves somebody wondering where to look.
+    """
+    if idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION:
+        return 'Idea submitted to your organization for review.'
+    return 'Idea submitted to the platform. It is now locked for review.'

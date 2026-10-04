@@ -535,6 +535,7 @@ mutation CreateIdea($input: CreateIdeaInput!) {
             'createIdea',
             {
                 'input': {
+                    'submissionContext': 'ORGANIZATION',
                     'organizationId': str(world['organization'].pk),
                     'idea': {'title': 'A new idea', 'description': DESCRIPTION},
                 }
@@ -604,7 +605,11 @@ mutation SubmitIdea($id: ID!) {{
         )
 
         assert result['success'] is True, result
-        assert result['idea']['status'] == 'SUBMITTED'
+        # An organization idea's `submitIdea` goes to its organization first -
+        # the operation resolves the stage from the idea's context, so this is
+        # the same call a client makes and the same answer whichever context the
+        # idea was filed in.
+        assert result['idea']['status'] == 'SUBMITTED_TO_ORGANIZATION'
         assert result['idea']['voteCount'] == 1, result
         assert result['idea']['viewerHasVoted'] is False
 

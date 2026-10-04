@@ -46,6 +46,14 @@ backend/
 │   ├── admin.py, forms.py
 │   ├── migrations/
 │   └── tests/
+├── administration/         # Platform administration console (see docs/administration.md)
+│   ├── models.py           # AdminAuditEntry + the administration.* permissions
+│   ├── authorization.py    # require_admin / capabilities_for
+│   ├── selectors.py        # cross-tenant reads for the console
+│   ├── services.py         # audited administrative operations
+│   ├── schema.py           # admin* GraphQL fields
+│   ├── views.py            # audited evidence download
+│   └── management/commands/grant_platform_admin.py
 └── graphql_api/            # GraphQL infrastructure (not a business domain)
     ├── apps.py
     ├── schema.py           # root Query/Mutation - merges identity.schema in
@@ -115,6 +123,34 @@ wired up correctly. You can also confirm the active backend directly:
 python manage.py shell -c "from django.db import connection; print(connection.vendor)"
 # postgresql
 ```
+
+### 4. Seed development categories (optional)
+
+An idea needs a category before it can be submitted. Categories are managed in
+the administration console (`/app/admin/categories`); for local development
+you can also load the temporary sample set:
+
+```bash
+python manage.py seed_dev_categories
+```
+
+It is idempotent and never changes or removes existing categories. These are
+development data, not the production taxonomy - see
+[Development categories](../docs/ideas-domain.md#development-categories-temporary-seed).
+
+### 5. Make yourself a platform administrator (optional)
+
+The administration console at `/app/admin` is for platform administrators
+only - organization Owners are not administrators. Grant an existing account
+every console permission (audited):
+
+```bash
+python manage.py grant_platform_admin you@example.com
+python manage.py grant_platform_admin you@example.com --revoke
+```
+
+A superuser (`createsuperuser`) also has every console permission. See
+[`docs/administration.md`](../docs/administration.md).
 
 ## Testing
 

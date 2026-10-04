@@ -532,7 +532,7 @@ class TestListAttachments:
         # that resolves `idea_id` through it, the COUNT, and the page fetch.
         # `select_related('uploaded_by')` is what keeps the last of those
         # from growing with the number of attachments.
-        with django_assert_num_queries(4):
+        with django_assert_num_queries(3):
             page = selectors.list_attachments(world['author'], idea.pk)
             for item in page.items:
                 _ = item.uploaded_by.email

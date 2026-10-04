@@ -700,18 +700,84 @@ class TestVoteState:
 
 @pytest.mark.django_db
 class TestQueryCost:
-    def test_discovery_still_costs_the_same_three_queries(self, world, django_assert_num_queries):
+    #: The queries a discovery page costs once the request's tenant facts have
+    #: been resolved: the `COUNT` and the page itself. Everything the visibility
+    #: filter needs about the caller - which organizations, which teams, and
+    #: whether they hold the platform review permission - is memoised on the user
+    #: instance by `ideas.selectors`, so a request pays for it once however many
+    #: ideas it reads. The submission-context phase added the team and platform
+    #: lookups to that one-time set; `test_the_request_scoped_lookups_are_named`
+    #: is where their budget is pinned, so it cannot grow unnoticed.
+    WARM_DISCOVERY_QUERIES = 2
+
+    #: The one-time lookups, listed so a change in the number has to be
+    #: accounted for: active organizations, active teams, the user's direct
+    #: permissions, their permissions through groups.
+    REQUEST_SCOPED_LOOKUPS = 4
+
+    def test_discovery_costs_two_queries_once_the_caller_is_known(
+        self, world, django_assert_num_queries
+    ):
         """
-        S2-004 pinned three: the membership lookup, the `COUNT`, the page. The
-        vote annotations must not add a fourth, which is the whole reason they
-        are annotations rather than a loop - and Django does not carry them into
-        `.count()`, so the count query is unchanged too.
+        S2-004 pinned three - the membership lookup, the `COUNT`, the page - and
+        the point was never the number three: it was that the vote annotations
+        must not add a query of their own, which is the whole reason they are
+        annotations rather than a loop. Django does not carry them into
+        `.count()` either, so the count query is unchanged.
+
+        With the tenant facts already resolved for the request, what is left is
+        exactly the work: count the rows, then read the page.
         """
         idea = make_idea(world['organization'], world['author'])
         services.vote_for_idea(world['colleague'], idea.pk)
         selectors.list_discoverable_ideas(world['colleague'], limit=2)
 
-        with django_assert_num_queries(3):
+        with django_assert_num_queries(self.WARM_DISCOVERY_QUERIES):
+            selectors.list_discoverable_ideas(world['colleague'], limit=2)
+
+    def test_the_request_scoped_lookups_are_named(self, world, django_assert_num_queries):
+        """
+        What a *cold* caller costs, and what each of those queries is for.
+
+        This is the honest total, and it is asserted as a fixed number with the
+        four lookups enumerated below, so "one more query" is a diff somebody has
+        to explain rather than a slow drift nobody notices. The alternative -
+        asserting three and having the number quietly double - is exactly how a
+        performance contract stops meaning anything.
+
+        The lookups are: the caller's active organizations, their active teams
+        (both new in the submission-context phase, and both genuinely needed -
+        an idea can belong to either tenant), and the two queries Django's own
+        `ModelBackend` runs to answer `has_perm` for the platform review
+        permission, which the visibility filter asks once per request.
+        """
+        make_idea(world['organization'], world['author'])
+
+        with django_assert_num_queries(
+            self.REQUEST_SCOPED_LOOKUPS + self.WARM_DISCOVERY_QUERIES
+        ) as captured:
+            selectors.list_discoverable_ideas(world['colleague'], limit=2)
+
+        sql = ' '.join(query['sql'] for query in captured.captured_queries)
+        assert 'organizations_membership' in sql
+        assert 'teams_teammembership' in sql
+        assert 'auth_permission' in sql
+
+    def test_the_lookups_are_not_repeated_within_one_request(
+        self, world, django_assert_num_queries
+    ):
+        """
+        The point of the memoisation, stated directly: a page that reads several
+        querysets - the ideas, then their comments, then their attachments -
+        still resolves the caller's tenant facts once. Without the cache this
+        would be four extra queries *per queryset*, which is a number that grows
+        with the page rather than staying fixed.
+        """
+        selectors.list_discoverable_ideas(world['colleague'], limit=2)
+
+        with django_assert_num_queries(self.WARM_DISCOVERY_QUERIES * 3):
+            selectors.list_discoverable_ideas(world['colleague'], limit=2)
+            selectors.list_discoverable_ideas(world['colleague'], limit=2)
             selectors.list_discoverable_ideas(world['colleague'], limit=2)
 
     def test_a_page_of_many_ideas_does_not_cost_a_query_each(
@@ -719,7 +785,9 @@ class TestQueryCost:
     ):
         """
         The N+1 this design exists to avoid. Twenty voted-on ideas cost the same
-        three queries as one.
+        queries as one - and that is the claim that matters, because it is the
+        one a per-row loop would break and a page size is a user-controlled
+        number.
         """
         for index in range(20):
             services.vote_for_idea(
@@ -727,7 +795,9 @@ class TestQueryCost:
                 make_idea(world['organization'], world['author'], title=f'Idea {index}').pk,
             )
 
-        with django_assert_num_queries(3):
+        selectors.list_discoverable_ideas(world['colleague'], limit=20)
+
+        with django_assert_num_queries(self.WARM_DISCOVERY_QUERIES):
             page = selectors.list_discoverable_ideas(world['colleague'], limit=20)
 
         assert len(page.items) == 20
@@ -737,11 +807,13 @@ class TestQueryCost:
         """
         Structural rather than incidental: if the annotations leaked into
         `paginate`'s `COUNT`, every page would evaluate a correlated subquery
-        per row for a number it does not need.
+        per row for a number it does not need - and it would look fine on a page
+        of five.
         """
         make_idea(world['organization'], world['author'])
+        selectors.list_discoverable_ideas(world['colleague'], limit=2)
 
-        with django_assert_num_queries(3) as captured:
+        with django_assert_num_queries(self.WARM_DISCOVERY_QUERIES) as captured:
             selectors.list_discoverable_ideas(world['colleague'], limit=2)
 
         count_query = next(q['sql'] for q in captured.captured_queries if 'COUNT(*)' in q['sql'])

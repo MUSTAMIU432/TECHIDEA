@@ -41,6 +41,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from ideas import selectors, services
+from ideas.models import Attachment
 from ideas.storage import AttachmentStorageError, open_object
 from identity.authentication import get_authenticated_user
 
@@ -185,6 +186,20 @@ def download_attachment_view(
     if attachment is None:
         return HttpResponse(status=404)
 
+    return attachment_file_response(attachment)
+
+
+def attachment_file_response(attachment: Attachment) -> HttpResponse:
+    """
+    Stream one *already authorized* attachment back as a forced download.
+
+    Every caller has decided, before reaching this, that the requester may
+    have the file: `download_attachment_view` through the idea's visibility
+    rule, and the administration console's download view
+    (`administration.views`) through its own platform permission. This
+    function authorizes nothing; it is the one place the safe-download rules
+    below live, so a second download path cannot quietly relax them.
+    """
     try:
         file_handle = open_object(attachment.storage_key)
     except FileNotFoundError:

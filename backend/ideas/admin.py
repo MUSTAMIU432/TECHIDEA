@@ -24,7 +24,7 @@ class IdeaAdmin(admin.ModelAdmin):
         'category',
         'created_at',
     ]
-    list_filter: ClassVar[list[str]] = ['status', 'visibility', 'category']
+    list_filter: ClassVar[list[str]] = ['status', 'visibility', 'category', 'frequency']
     # The organization-first ordering mirrors the indexes in the model: every
     # admin list is a tenant-scoped read, and the composite index exists for
     # exactly this shape of query.

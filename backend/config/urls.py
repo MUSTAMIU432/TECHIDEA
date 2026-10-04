@@ -18,6 +18,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
+from administration.views import admin_download_attachment_view
 from config.views import health
 from graphql_api.views import graphql_view
 from ideas.views import download_attachment_view, upload_attachment_view
@@ -39,5 +40,14 @@ urlpatterns = [
         'ideas/<int:idea_id>/attachments/<int:attachment_id>/download/',
         download_attachment_view,
         name='idea-attachment-download',
+    ),
+    # The administration console's evidence download: a separate endpoint
+    # with its own platform-permission check and an audit record per
+    # download, sharing the safe-download response with the one above. See
+    # `administration/views.py`.
+    path(
+        'administration/attachments/<int:attachment_id>/download/',
+        admin_download_attachment_view,
+        name='admin-attachment-download',
     ),
 ]

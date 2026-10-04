@@ -18,11 +18,10 @@ round, which only a reviewer opens).
 import json
 
 import pytest
-from django.utils import timezone
 
 from ideas import lifecycle
 from ideas import services as idea_services
-from ideas.models import Category, Idea
+from ideas.models import Idea
 from identity.models import User
 from identity.tokens import issue_access_token
 from organizations.models import Membership, MembershipRole, Role
@@ -33,6 +32,7 @@ from organizations.services import (
 )
 from reviews import services
 from reviews.models import Review, ReviewCriterionAssessment
+from reviews.tests.platform import grant_platform_reviewer, make_submitted
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 ORIGINAL = 'We key every invoice in by hand, every month.'
@@ -56,6 +56,11 @@ def add_member(organization, user, *, reviewer=False):
             membership=membership,
             role=Role.objects.get(organization=organization, slug=REVIEWER_ROLE_SLUG),
         )
+        # Platform review is authorized by a platform-scoped permission and by
+        # nothing else, so a reviewer built here is a *platform* reviewer too.
+        # The organization Reviewer role above still governs the organization
+        # review queue, which is a separate track with separate rules.
+        grant_platform_reviewer(user)
     return membership
 
 
@@ -66,6 +71,11 @@ def edit(title='Automate the invoice run', description=REVISED, category=None, v
         category_id=category.pk if category else None,
         visibility=visibility,
     )
+
+
+def platform_reviews(idea):
+    """`idea`'s **platform** reviews; the organization's confirmation is another track."""
+    return Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM)
 
 
 def send_back(reviewer, idea):
@@ -118,16 +128,14 @@ def world(db):
     add_member(acme, member)
     globex_owner = make_user('owner@globex.example')
     create_organization_for_user(globex_owner, CreateOrganizationInput(name='Globex'))
-    category = Category.objects.create(name='Finance')
-    idea = Idea.objects.create(
-        organization=acme,
-        author=author,
+    idea = make_submitted(
+        acme,
+        author,
         title='Automate the invoice run',
         description=ORIGINAL,
-        category=category,
+        # Organization-scoped rather than public, so the "who can see this"
+        # assertions below are about the tenant and not about the platform.
         visibility=Idea.Visibility.ORGANIZATION,
-        status=Idea.Status.SUBMITTED,
-        submitted_at=timezone.now(),
     )
     first = send_back(reviewer, idea)
     idea.refresh_from_db()
@@ -139,7 +147,7 @@ def world(db):
         'second': second,
         'member': member,
         'globex_owner': globex_owner,
-        'category': category,
+        'category': idea.category,
         'idea': idea,
         'first': first,
     }
@@ -273,9 +281,20 @@ class TestResubmission:
         assert idea.status == Idea.Status.SUBMITTED
 
     def test_resubmission_creates_no_review(self, world):
+        """
+        A resubmission creates no review. Only a reviewer's `start` does.
+
+        Asserted across **both** tracks, because a resubmission that quietly
+        opened an organization round would be just as wrong as one that opened a
+        platform round - the platform track is where the idea is now, and the
+        organization already confirmed it.
+        """
         idea_services.submit_idea(world['author'], world['idea'].pk)
 
-        assert list(Review.objects.filter(idea=world['idea'])) == [world['first']]
+        # Exactly the one round, unchanged - and the organization's confirmation
+        # that got the idea here is still the only other round on the history.
+        assert list(platform_reviews(world['idea'])) == [world['first']]
+        assert Review.objects.filter(idea=world['idea']).count() == 2
 
     def test_the_submission_rules_apply_again(self, world):
         Idea.objects.filter(pk=world['idea'].pk).update(description='Too short.')
@@ -301,6 +320,11 @@ class TestResubmission:
         assert Idea.objects.get(pk=world['idea'].pk).status == Idea.Status.CHANGES_REQUESTED
 
     def test_another_organization_cannot_resubmit(self, world):
+        """
+        Another organization's owner cannot resubmit somebody else's idea, and the
+        answer is indistinguishable from "no such idea" - which is what keeps the
+        operation from being an existence oracle.
+        """
         with pytest.raises(idea_services.IdeaError) as exc_info:
             idea_services.submit_idea(world['globex_owner'], world['idea'].pk)
 
@@ -331,12 +355,17 @@ class TestReviewHistoryIsKept:
         assert before['submission_snapshot']['description'] == ORIGINAL
 
     def test_the_next_round_is_opened_only_by_a_reviewer_and_snapshots_the_new_content(self, world):
+        """
+        A resubmission opens no round; the next reviewer's `start` does, and it
+        snapshots the new content - so round 1 keeps describing what it actually
+        looked at.
+        """
         before = frozen(world['first'])
         idea_services.update_idea(
             world['author'], world['idea'].pk, edit(category=world['category'])
         )
         idea_services.submit_idea(world['author'], world['idea'].pk)
-        assert Review.objects.filter(idea=world['idea']).count() == 1
+        assert platform_reviews(world['idea']).count() == 1
 
         second = services.start_review(world['second'], world['idea'].pk)
 
@@ -347,10 +376,10 @@ class TestReviewHistoryIsKept:
         assert second.submission_snapshot['description'] == REVISED
         assert frozen(world['first']) == before
         assert Idea.objects.get(pk=world['idea'].pk).status == Idea.Status.UNDER_REVIEW
+        # Two **platform** rounds. The organization's confirmation is a round in
+        # the other track and is not in this list.
         assert list(
-            Review.objects.filter(idea=world['idea'])
-            .order_by('round')
-            .values_list('round', flat=True)
+            platform_reviews(world['idea']).order_by('round').values_list('round', flat=True)
         ) == [1, 2]
 
     def test_the_first_reviewer_may_take_the_second_round(self, world):

@@ -8,17 +8,36 @@ nothing in it decides who may *read*. A caller that reached for
 tenants' - so the only way to obtain an idea is through a function here that
 has already applied the rules.
 
-The two rules applied, in this order:
+The rules applied, in this order:
 
-1. **Tenancy.** An idea belongs to an organization, and a reader may only see
-   an idea belonging to an organization they are an *active* member of -
-   except for a `PUBLIC` idea, which is platform-wide by definition. The
-   membership predicate is `organizations.authorization.get_membership`'s, so
-   a read and a write can never disagree about who belongs where.
+1. **Tenancy, which is now one of three shapes.** An idea is filed by one person,
+   by a team, or by an organization - `Idea.submission_context` says which - so
+   "whose idea is this" is answered from the idea rather than assumed from a
+   non-null organization. An `INDIVIDUAL` idea has no tenant at all beyond its
+   author, which is the case that makes "organization is optional" real rather
+   than aspirational. Each context's read rule below says which of the three it
+   is, and none of them falls through to another.
 2. **Visibility.** `Idea.visibility` narrows that further. This is the one
    genuinely Ideas-specific decision in the whole authorization story, and it
    lives here - as a *read* filter - rather than as a second permission
    hierarchy, exactly as `docs/ideas-domain.md` specified in S2-001.
+
+**Team visibility is membership, not organization visibility.**
+`visibility=ORGANIZATION` on a team idea means "visible to my team", because
+that is the only audience a team has: there is no organization to widen to, and
+treating it as author-only would make a team idea unreadable by the very people
+it was filed with. `visibility=PRIVATE` remains the author's alone.
+
+**A platform reviewer can read a locked submission.**
+The platform track has to be able to review what it was sent, and it is
+independent of every organization - so a reviewer who is not a member of the
+idea's organization must still be able to read the submission they were asked to
+decide. That is granted by `platform_reviewer_filter`, and it is deliberately
+narrow: only an idea that has actually been submitted to the platform
+(`platform_version >= 1`), and only to an account holding the platform-scoped
+`administration.review_platform_submissions` permission. It cannot expose a
+draft, an idea still in the organization track, or anything at all to an
+organization role or a team role.
 
 `DEPARTMENT` fails closed
 -------------------------
@@ -46,6 +65,81 @@ from ideas.pagination import Page, empty_page, paginate
 from identity.models import User
 from organizations import authorization
 
+# Per-request memoisation of the three facts the visibility filter needs.
+#
+# `_visibility_filter` runs inside every queryset a request builds - and a single
+# request usually builds several (a page of ideas, then its attachments, then its
+# comments). Without this, one request would ask "which organizations am I in?"
+# once per queryset and "do I hold the platform review permission?" once per
+# queryset, which is the difference between a fixed query count and one that
+# grows with the number of reads in a page.
+#
+# Stored on the user instance, like Django's own `_perm_cache`, so the cache has
+# exactly the lifetime Django's does: the request. Nothing else may read or write
+# these attributes, and they are only ever *filled* from the database.
+_ORGANIZATION_IDS_CACHE = '_active_organization_ids_cache'
+_TEAM_IDS_CACHE = '_active_team_ids_cache'
+_PLATFORM_REVIEWER_CACHE = '_is_platform_reviewer_cache'
+
+
+def _is_platform_reviewer(user: User | None) -> bool:
+    """
+    Whether `user` holds the platform review permission.
+
+    Asked through `user.has_perm` - Django's own permission backend, and the same
+    cache Django keeps - and memoised here too, because the visibility filter needs
+    the answer once per queryset rather than once per idea.
+    """
+    if user is None or not user.is_active:
+        return False
+
+    cached = getattr(user, _PLATFORM_REVIEWER_CACHE, None)
+    if cached is not None:
+        return cached
+
+    from administration.authorization import REVIEW_PLATFORM_SUBMISSIONS
+
+    answer = user.has_perm(REVIEW_PLATFORM_SUBMISSIONS)
+    setattr(user, _PLATFORM_REVIEWER_CACHE, answer)
+    return answer
+
+
+def _organization_ids(user: User) -> list[int]:
+    """The caller's active organization ids, once per request."""
+    cached = getattr(user, _ORGANIZATION_IDS_CACHE, None)
+    if cached is None:
+        cached = authorization.active_organization_ids(user)
+        setattr(user, _ORGANIZATION_IDS_CACHE, cached)
+    return cached
+
+
+def _team_ids(user: User) -> list[int]:
+    """The caller's active team ids, once per request."""
+    from teams import authorization as team_authorization
+
+    cached = getattr(user, _TEAM_IDS_CACHE, None)
+    if cached is None:
+        cached = team_authorization.active_team_ids(user)
+        setattr(user, _TEAM_IDS_CACHE, cached)
+    return cached
+
+
+def platform_reviewer_filter(user: User) -> Q:
+    """
+    The `Q` that lets a platform reviewer read a submission they must decide.
+
+    **Only ideas that have been submitted to the platform.** `platform_version
+    >= 1` is set by `ideas.versions.freeze_submission` in the same transaction
+    as the move to `SUBMITTED`, so this cannot match a draft, an idea still with
+    an organization, or anything an author has not deliberately put forward. An
+    empty `Q(pk__in=<none>)` for anybody without the permission, which matches
+    nothing rather than everything.
+    """
+    if not _is_platform_reviewer(user):
+        return Q(pk__in=Idea.objects.none().values('pk'))
+
+    return Q(platform_version__gte=1)
+
 
 def can_view_idea(user: User | None, idea: Idea | None) -> bool:
     """
@@ -67,11 +161,21 @@ def can_view_idea(user: User | None, idea: Idea | None) -> bool:
     if idea.author_id == user.pk:
         return True
 
+    # A submission the platform was actually sent. Checked before the tenant
+    # branches, because a platform reviewer is deliberately not a member of
+    # every idea's organization - see the module docstring.
+    if idea.platform_version >= 1 and _is_platform_reviewer(user):
+        return True
+
     # Everything below is tenant-scoped, and `DEPARTMENT` is deliberately
     # absent: with no department tier it is author-only, so it falls through to
-    # "must be a member of the idea's organization" being false. See the
-    # module docstring.
+    # "must be a member of the idea's tenant" being false. See the module
+    # docstring.
     if idea.visibility == Idea.Visibility.ORGANIZATION:
+        if idea.submission_context == Idea.SubmissionContext.TEAM:
+            from teams import authorization as team_authorization
+
+            return team_authorization.is_member_of(user, idea.team_id)
         return authorization.is_member_of(user, idea.organization_id)
 
     return False
@@ -92,13 +196,15 @@ def _visibility_filter(user: User) -> Q:
         | Q(author=user)
         | Q(
             visibility=Idea.Visibility.ORGANIZATION,
-            organization_id__in=authorization.active_organization_ids(user),
+            organization_id__in=_organization_ids(user),
         )
+        | Q(visibility=Idea.Visibility.ORGANIZATION, team_id__in=_team_ids(user))
+        | platform_reviewer_filter(user)
     )
 
 
 def _base_queryset() -> QuerySet[Idea]:
-    return Idea.objects.select_related('organization', 'author', 'category')
+    return Idea.objects.select_related('organization', 'team', 'author', 'category')
 
 
 def get_idea(user: User | None, idea_id: object) -> Idea | None:
@@ -199,6 +305,38 @@ def list_organization_ideas(
     return (
         _base_queryset()
         .filter(_visibility_filter(user), organization_id=normalized_id)
+        .order_by('-created_at')
+    )
+
+
+def list_team_ideas(user: User | None, team_id: object) -> QuerySet[Idea]:
+    """
+    The ideas one team has filed that `user` may read.
+
+    The team counterpart of `list_organization_ideas`, with the same two
+    properties that make it safe: empty for a team `user` is not an active
+    member of, and empty for a team that does not exist, without confirming
+    either. `Team` is a collaboration boundary rather than a tenant, so this is
+    "what my team is putting forward", never "a tenant's private feed" - which is
+    why it is a separate function rather than an `organization_id` argument that
+    happens to hold a team.
+    """
+    if user is None or not user.is_active:
+        return Idea.objects.none()
+
+    try:
+        normalized_id = int(str(team_id))
+    except (TypeError, ValueError):
+        return Idea.objects.none()
+
+    from teams import authorization as team_authorization
+
+    if team_authorization.get_membership(user, normalized_id) is None:
+        return Idea.objects.none()
+
+    return (
+        _base_queryset()
+        .filter(_visibility_filter(user), team_id=normalized_id)
         .order_by('-created_at')
     )
 
@@ -674,18 +812,26 @@ def vote_count_for(idea: Idea) -> int:
 
 def list_idea_transitions(user: User | None, idea_id: object) -> list[IdeaTransition]:
     """
-    One idea's lifecycle history (S3-007), oldest first, for whoever may read it.
+    One idea's lifecycle history, oldest first, for whoever may read it.
 
-    The same readers as the idea's review history, for the same reason: every
-    row names the member who made the move, and a `PUBLIC` idea is readable by
-    the whole platform. So the history is shown to
+    Every row names the member who made the move, so this is shown to
 
-    - the idea's **author**, whose idea it is, and
-    - **reviewers of the idea's organization** (`lifecycle.is_reviewer`: an
-      active member holding `idea.review` there, not the author),
+    - the idea's **author**, whose idea it is,
+    - **organization reviewers of the idea's organization** (`lifecycle.
+      is_organization_reviewer`: an active member holding `idea.review` there,
+      not the author), and
+    - **platform reviewers** (`lifecycle.is_platform_reviewer`), because the
+      platform track makes several of these moves and its reviewers need to see
+      that they happened.
 
-    and to nobody else - an empty list, which is also the answer for an idea
-    the caller cannot read or that does not exist, so the id reveals nothing.
+    and to nobody else - an empty list, which is also the answer for an idea the
+    caller cannot read or that does not exist, so the id reveals nothing.
+
+    Both reviewer kinds are listed because the idea now has **two** tracks' worth
+    of moves in its history - the organization stage and the platform track - and
+    a reader of either one needs the whole chain to make sense of where the idea
+    is. They are still different permissions, so this is not a way to see an
+    idea's history without being able to read the idea.
     """
     # Imported here: `ideas.lifecycle` imports this module.
     from ideas import lifecycle
@@ -693,6 +839,10 @@ def list_idea_transitions(user: User | None, idea_id: object) -> list[IdeaTransi
     idea = get_idea(user, idea_id)
     if idea is None:
         return []
-    if idea.author_id != user.pk and not lifecycle.is_reviewer(user, idea):
+    if (
+        idea.author_id != user.pk
+        and not lifecycle.is_organization_reviewer(user, idea)
+        and not lifecycle.is_platform_reviewer(user, idea)
+    ):
         return []
     return list(IdeaTransition.objects.filter(idea=idea).order_by('created_at', 'pk'))
