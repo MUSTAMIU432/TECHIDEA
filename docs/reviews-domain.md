@@ -30,8 +30,10 @@ half of D-6 followed in S3-008. S3-006 (approval) is implemented as
 §11 recommends: approval is `completeReview` with `decision = APPROVED`,
 through the same validation, locks and review-owned transition as the other
 decisions - no separate mutation or permission - and it ends at `APPROVED`:
-no opportunity or proposal is created, and `APPROVED → AUTOMATION_PROPOSAL`
-stays the existing reviewer transition. A completed review now also refuses
+no opportunity or proposal is created. (The hand-off out of `APPROVED` was
+`AUTOMATION_PROPOSAL` then; with the platform track it is
+`READY_FOR_IMPLEMENTATION`, reached only by the owner's go-ahead — see
+[§11](#11-approval-flow).) A completed review now also refuses
 `delete()`. The author's decision email (§15) was brought forward from
 S3-007 and ships in S3-006, for every decision. S3-007 (audit) is
 implemented as §15 describes (D-10): every successful status change writes
@@ -55,6 +57,48 @@ S3-008 confirmed this is sufficient for Sprint 3 and added no membership
 mechanism: `reviews/tests/test_end_to_end.py` builds every flow from
 registration, a membership added through the admin's own form, and the
 owner's `assignRoleToMembership`.
+
+### After Sprint 3: the platform track
+
+Everything above describes Sprint 3. The submission-context phase then changed
+this domain's shape, and the sections that changed are corrected below; §1 is
+left as the historical record it declares itself to be.
+
+- **Two review tracks, one row.** `Review.scope` is `organization` or
+  `platform` (`SCOPE_DECISIONS` decides which verdicts each may record, so an
+  organization review cannot `APPROVE` and a platform review cannot `CONFIRM`).
+  Rounds and the one-open-review constraint are numbered **per scope**, so the
+  approval report can say "platform review round 2" and mean it. See
+  [§5.4](#54-two-tracks-one-shape).
+- **An organization stage in front of the platform stage.** An
+  organization-context idea goes `DRAFT → SUBMITTED_TO_ORGANIZATION →
+  ORGANIZATION_CONFIRMED → SUBMITTED`; the organization confirms what *it*
+  wants to submit, and the owner is the one who submits it. See
+  [§5.4](#54-two-tracks-one-shape).
+- **Platform reviewers are independent.** The platform reviewer is an account
+  holding the platform-scoped `administration.review_platform_submissions`
+  permission — not an organization membership, role or team role — so no code
+  path exists in which holding `idea.review` anywhere also confers platform
+  review. Cross-tenant by construction, and the reason the platform track can
+  review an idea whose organization it is not a member of. See
+  [§6](#6-reviewer-authorization).
+- **The platform reviews a frozen version.** `ideas.versions` copies the idea's
+  content into an `IdeaSubmissionVersion` in the same transaction as the move
+  to `SUBMITTED`, and the report is generated against a version rather than a
+  mutable row. See [§3.4](#34-platformreviewreport) and
+  [§18](#18-integration-points).
+- **Approval ends at `APPROVED`, and the owner ends it.** A `PlatformReviewReport`
+  is written in the approval's transaction; the **author alone** then gives the
+  go-ahead (`APPROVED → READY_FOR_IMPLEMENTATION`), and the hand-off to the
+  opportunity track follows that rather than replacing it. See
+  [§11](#11-approval-flow).
+- **A platform reviewer can be assigned an idea**, which is what `platformIntake`
+  triages; and the queue nudges are in-app notifications, not emails. See
+  [§7](#7-assignment) and [§15](#15-notifications-and-audit).
+- **Notifications are no longer "minimal" in the sense of §1.7.** There is a
+  `notifications` app with 14 fixed kinds, a `DECISION_KINDS` subset that alone
+  may link a report, and one server-derived `actionPath` per kind. See
+  [§15](#15-notifications-and-audit).
 
 ### Sprint 3 as delivered (S3-008)
 
@@ -83,8 +127,8 @@ owner's `assignRoleToMembership`.
 
 Companion to [`ideas-domain.md`](ideas-domain.md), which owns the lifecycle
 this domain builds on. Where the two disagree about what exists, the code is
-the authority and this document was checked against it on the
-`feature/reviews` branch at `45db994`.
+the authority, and this document was checked against it on `feature/reviews`
+both at `45db994` and again after the submission-context phase.
 
 ## Contents
 
@@ -113,6 +157,12 @@ the authority and this document was checked against it on the
 ---
 
 ## 1. What exists today
+
+**§1 is the code as it stood before S3-002**, and is kept as the record that
+sprint started from. Where it disagrees with a later section — §1.2's
+transition table, §1.4's visibility table, §1.7's "no notification
+infrastructure", §1.8's "no audit infrastructure" — the later sections and the
+code are current, and §1 is not.
 
 ### 1.1 Reviewer authorization
 
@@ -267,32 +317,49 @@ as generic transition buttons (`Start review`, `Request changes`, `Approve`,
 ## 2. Domain overview
 
 ```
-Idea (SUBMITTED)
-  │  reviewer claims it from the organization's queue
-  ▼
-Review  (round n, reviewer, in progress)        Idea → UNDER_REVIEW
-  │  reviewer records criteria + feedback + decision, atomically
-  ▼
-Review  (completed, immutable)                  Idea → CHANGES_REQUESTED | APPROVED | REJECTED
+ORGANIZATION-CONTEXT IDEA
   │
-  ├─ CHANGES_REQUESTED: author edits, resubmits → SUBMITTED → Review round n+1
-  ├─ REJECTED: terminal
-  └─ APPROVED: ready for the opportunity track (→ AUTOMATION_PROPOSAL hand-off)
+  ▼  author: submitIdea
+Idea (SUBMITTED_TO_ORGANIZATION)
+  │  an organization reviewer claims it from their own organization's queue
+  ▼
+Review (scope=organization, round n, in progress)
+  ▼  reviewer records feedback + decision
+  ├─ CHANGES_REQUESTED → author edits, resubmits → back to the organization, round n+1
+  └─ CONFIRMED         → and now the OWNER submits it:
+        ▼  author: submitToPlatform
+        Idea (SUBMITTED) — frozen as IdeaSubmissionVersion 1
+          │  a platform reviewer claims it from the platform queue
+          ▼
+        Review (scope=platform, round n, in progress)   Idea → UNDER_REVIEW
+          │  criteria + feedback + decision, atomically; on APPROVED the
+          │  PlatformReviewReport is written in the same transaction
+          ▼
+        ├─ CHANGES_REQUESTED: author edits (the frozen version does not move),
+        │                    resubmits → version n+1 → platform round n+1
+        ├─ REJECTED: terminal
+        └─ APPROVED: the OWNER reads the report and gives the go-ahead
+                     → READY_FOR_IMPLEMENTATION → (hand-off) AUTOMATION_PROPOSAL
+
+INDIVIDUAL OR TEAM IDEA
+  └─ skips the organization stage entirely: DRAFT → SUBMITTED → the platform
 ```
 
 A new `reviews` Django app owns **the record of review**, which is who
 reviewed, what they assessed, what they decided and what they told the
 author. It does **not** own the lifecycle. `ideas.lifecycle` remains the only
-code that changes `Idea.status`; the reviews service calls it inside its own
-transaction so that a review and the status change it causes commit together
+code that changes `Idea.status`; the reviews services call it inside their own
+transactions so that a review and the status change it causes commit together
 or not at all.
 
-Dependency direction: `reviews → ideas → organizations → identity`. The Ideas
-*domain* (models, services, selectors, lifecycle) never imports reviews. The
-one exception is the Ideas GraphQL adapter, which reads
-`reviews.eligibility`/`reviews.selectors` to resolve the two viewer
-capability fields this section places on `IdeaType` (§13); it is an adapter
-composing two domains for the viewer, not Ideas depending on Reviews.
+Dependency direction: `reviews → ideas → organizations → identity`, plus
+`reviews → administration` for the two platform-scoped permissions - which is
+why the platform reviewer is not a tenant concept at all. The Ideas *domain*
+(models, services, selectors, lifecycle, versions, states, go_ahead) never
+imports reviews. The one exception is the Ideas GraphQL adapter, which reads
+`reviews.eligibility`/`reviews.selectors` to resolve the viewer capability
+fields this document places on `IdeaType` (§13); it is an adapter composing two
+domains for the viewer, not Ideas depending on Reviews.
 
 ---
 
@@ -310,14 +377,21 @@ The brief lists six candidates. Two are needed.
 | ReviewAssignment | Not needed | Queue-based self-claim is the existing `SUBMITTED → UNDER_REVIEW` move; the claim **is** `Review.reviewer`. See [§7](#7-assignment). |
 | ReviewHistory | Not needed | Review rows are append-only and numbered by round; the set of rows for an idea is its history. See [§8](#8-review-history). |
 
+Two more rows arrived with the platform track, and neither was on the brief:
+**ReviewAssignment** ([§3.3](#33-reviewassignment)), which routes a submission
+to a named platform reviewer before it is claimed, and **PlatformReviewReport**
+([§3.4](#34-platformreviewreport)), the document the owner reads before giving
+the go-ahead.
+
 ### 3.1 `Review`
 
 | Field | Type | Why |
 | ----- | ---- | --- |
 | `idea` | FK `ideas.Idea`, `CASCADE` | The review's subject **and its tenant**. There is deliberately no `organization` FK: a review's tenant is its idea's, and a second copy could disagree. |
+| `scope` | `CharField`, `Review.Scope` choices, default `platform` | **Which track this round belongs to.** `organization` or `platform`. Added with the platform track; `platform` is the default so every review written before the field existed is a platform review, which is what they were. See [§5.4](#54-two-tracks-one-shape). |
 | `reviewer` | FK `User`, `PROTECT` | Who is accountable. `PROTECT` because an audit record must not vanish with an account; users are deactivated, not deleted, so this never blocks a supported operation. |
-| `round` | `PositiveSmallIntegerField` | 1 for the first review, n+1 after each resubmission. Orders history without relying on timestamps, and lets the UI say "second review". |
-| `decision` | `CharField`, `ReviewDecision` choices, nullable | `CHANGES_REQUESTED`, `APPROVED`, `REJECTED`. Null while the review is in progress. The values are the target idea statuses, 1:1. |
+| `round` | `PositiveSmallIntegerField` | 1 for the first review **of its scope**, n+1 after each resubmission into the same track. |
+| `decision` | `CharField`, `ReviewDecision` choices, nullable | `CHANGES_REQUESTED`, `APPROVED`, `REJECTED`, `CONFIRMED`, `WITHDRAWN`. Null while the review is in progress. Which of them a row may hold depends on its `scope` (`SCOPE_DECISIONS`). |
 | `feedback` | `TextField`, blank | The reviewer's message to the author. Required for some decisions ([D-3](#20-open-product-decisions)). |
 | `submission_snapshot` | `JSONField` | Title, description and category of the idea **as it was when the review started**. Required once S3-005 makes content editable in `CHANGES_REQUESTED`: without it a completed review points at text that has since changed, and its feedback no longer makes sense. |
 | `created_at` | `DateTimeField(auto_now_add)` | When the reviewer claimed the idea (the `SUBMITTED → UNDER_REVIEW` moment). |
@@ -347,45 +421,112 @@ Not added, and why:
 Unique `(review, criterion)`. Written only together with the decision (see
 [§5](#5-state-and-decision-model)), so it inherits the review's immutability.
 
+### 3.3 `ReviewAssignment`
+
+Added with the platform track, and **only for the platform scope**: it records
+that a submission has been routed to a named reviewer before it is claimed.
+
+| Field | Type | Why |
+| ----- | ---- | --- |
+| `idea` | FK `ideas.Idea`, `CASCADE` | The routed submission. At most one live assignment per idea, enforced by a partial unique constraint. |
+| `reviewer` | FK `User`, `PROTECT` | Who it was routed to. |
+| `assigned_by` | FK `User`, `PROTECT` | Who routed it - accountability for the routing decision, which is not the reviewer's accountability. |
+| `released_at` | `DateTimeField`, nullable | Set when the assignment is released. Null means "still routed". |
+
+It is a **routing record, not a claim.** `PlatformReviewReport` generation, the
+`SUBMITTED → UNDER_REVIEW` move and the `Review` row all belong to the reviewer
+themselves, so an assignment that outlives its reviewer cannot quietly stand in
+for a review nobody did. Assignment and the queue coexist deliberately: the
+platform intake list ([§7](#7-assignment)) is the triage that decides *whether*
+to route, and the queue remains the thing an unassigned reviewer works from.
+
+Two constraints say so at the row level: at most one **current** assignment per
+idea (`review_one_current_assignment_per_idea`, partial on `released_at`), and
+`assignment_reviewer_is_not_itself_unless_released` — routing an idea to
+yourself is a no-op rather than a routing decision, unless it has since been
+released, which is how a released self-assignment can be re-taken.
+
+### 3.4 `PlatformReviewReport`
+
+The written record the owner is asked to read before giving the go-ahead, and
+the only thing `ideas.go_ahead` requires to exist.
+
+| Field | Type | Why |
+| ----- | ---- | --- |
+| `idea` | FK `ideas.Idea`, `CASCADE` | The approved submission, indexed by `reports_idea_created_idx`. |
+| `review` | `OneToOneField` `Review` | The platform review that produced it, so "the report" and "the round that approved" cannot be two different things — and a round cannot be approved twice. |
+| `version` | FK `IdeaSubmissionVersion`, `PROTECT` | **The frozen version that was approved.** This is why the report stays true after the author edits the working copy. |
+| `submission_context`, `organization`, `team` | copies of the idea at approval time | An organization idea is still an organization idea when the report is read months later, and the tenant columns are nullable per context. |
+| `round` | `PositiveSmallIntegerField` | The platform round, not a count across both tracks. |
+| `decision` | `CharField` | The verdict, copied so the report reads correctly even if the vocabulary is later extended. |
+| `review_summary`, `recommendations`, `important_considerations`, `constraints`, `next_steps`, `approval_summary` | text | The report body. `approval_summary` is required; the rest are blank-able. |
+| `criteria` | `JSONField` | The criterion ratings copied in verbatim - "Meets", "Partially meets", "Does not meet". **No score, no weighting, no total, and no field that could hold one**: a number attached to an approval would be a new claim about the idea that no reviewer made. |
+| `approved_at`, `generated_at` | datetimes | `approved_at` is copied from the review rather than generated on a schedule, so the report cannot describe a decision that has not been made. |
+
+Written in the **same transaction** as the approval, so an `APPROVED` idea
+without a report is not a state a crash between two statements can leave
+behind — which is why `ideas.go_ahead.can_give_go_ahead` checks for the report
+rather than trusting the status. `report_is_for_a_platform_approval` states the
+scope rule on the report itself (only a completed, approving, **platform**
+review may have one), enforced on the decision the report copies in, because a
+`CHECK` cannot join to the review.
+
 ---
 
 ## 4. Relationships
 
 ```
-Organization 1──* Membership *──1 User
-     │                │
-     │                └──* MembershipRole *──1 Role (per organization)
+Organization 1──* Membership *──1 User        Team 1──* TeamMembership *──1 User
+     │                │                              │
+     │                └──* MembershipRole *──1 Role   └──* Idea
      │
      └──* Idea *──1 User (author)
             │
             ├──* Comment / Vote / Attachment        (S2, unchanged)
             │
-            └──* Review *──1 User (reviewer)       (S3)
-                   │
-                   └──* ReviewCriterionAssessment  (S3)
+            ├──* IdeaSubmissionVersion *──1 User (submitted_by)
+            │
+            ├──* Review *──1 User (reviewer)         (S3, +scope)
+            │       │
+            │       └──* ReviewCriterionAssessment  (S3)
+            │
+            ├──* ReviewAssignment *──1 User (reviewer, assigned_by)
+            │
+            └──* PlatformReviewReport ──1 Review ──1 IdeaSubmissionVersion
 ```
 
-- `Review.idea` gives each review exactly one tenant, the idea's
-  organization.
-- `Review.reviewer` must hold, at claim time and at decision time, reviewer
-  eligibility **in the idea's organization** ([§6](#6-reviewer-authorization)).
-- At most one **in-progress** review per idea (partial unique constraint,
-  [§17](#17-database-indexes-and-constraints)).
+- `Review.idea` gives each review exactly one tenant, which is the idea's
+  organization, team or neither - so "the tenant" is reached through the idea
+  rather than copied, and `Review` needs no context column of its own beyond
+  the `scope` that says which track it belongs to.
+- `Review.reviewer` must hold, at claim time and at decision time, eligibility
+  **for that scope**: organization membership plus `idea.review`, or the
+  platform permission ([§6](#6-reviewer-authorization)).
+- At most one **in-progress** review per idea **per scope** (partial unique
+  constraint, [§17](#17-database-indexes-and-constraints)).
+- `PlatformReviewReport` points at both the approving `Review` and the
+  `IdeaSubmissionVersion` it describes, so "the report", "the round that
+  approved" and "the submission that was read" cannot be three different things.
 
 ---
 
 ## 5. State and decision model
 
 The Review domain adds **no idea status and no lifecycle pair**. It attaches a
-record to four existing moves and takes ownership of how they are made:
+record to six existing moves and takes ownership of how they are made:
 
 | Idea move | Made by | Review effect |
 | --------- | ------- | ------------- |
-| `DRAFT → SUBMITTED` | author, `submitIdea` | none |
-| `SUBMITTED → UNDER_REVIEW` | reviewer, **`startReview`** | creates `Review(round=n, reviewer, submission_snapshot)` |
-| `UNDER_REVIEW → CHANGES_REQUESTED` / `APPROVED` / `REJECTED` | **the review's reviewer**, **`completeReview`** | sets `decision`, `feedback`, assessments, `completed_at` |
-| `CHANGES_REQUESTED → SUBMITTED` | author, `submitIdea` | none; the next `startReview` opens round n+1 |
-| `APPROVED → AUTOMATION_PROPOSAL` | see [§11](#11-approval-flow) | none |
+| `DRAFT → SUBMITTED_TO_ORGANIZATION` | author, `submitIdea` | none |
+| `SUBMITTED_TO_ORGANIZATION → ORGANIZATION_CHANGES_REQUESTED` / `ORGANIZATION_CONFIRMED` | an organization reviewer, **`startOrganizationReview` / `completeOrganizationReview`** | creates `Review(scope=organization, round=n)`, then sets `decision`, `feedback`, `completed_at` |
+| `ORGANIZATION_CHANGES_REQUESTED → SUBMITTED_TO_ORGANIZATION` | author, `submitIdea` | none; the next organization review opens round n+1 |
+| `ORGANIZATION_CONFIRMED → SUBMITTED` | **the author**, `submitToPlatform` | none — an organizational fact and a platform submission are two separate events |
+| `DRAFT → SUBMITTED` (individual or team) | author, `submitIdea` | none |
+| `SUBMITTED → UNDER_REVIEW` | platform reviewer, **`startReview`** | creates `Review(scope=platform, round=n, reviewer, submission_snapshot)` |
+| `UNDER_REVIEW → CHANGES_REQUESTED` / `APPROVED` / `REJECTED` | **the review's reviewer**, **`completeReview`** | sets `decision`, `feedback`, assessments, `completed_at`; on approval also generates the `PlatformReviewReport` |
+| `CHANGES_REQUESTED → SUBMITTED` | author, `submitIdea` | none; freezes a **new** `IdeaSubmissionVersion`, and the next `startReview` opens round n+1 |
+| `APPROVED → READY_FOR_IMPLEMENTATION` | **the author**, `giveGoAhead` | none — see [§11](#11-approval-flow) |
+| `READY_FOR_IMPLEMENTATION → AUTOMATION_PROPOSAL` | platform reviewer | none — the hand-off to the opportunity track |
 
 A review therefore has two states, **in progress** (`completed_at` null) and
 **completed**. There is no separate "draft review" state on the server
@@ -477,6 +618,63 @@ throughout.
 
 ---
 
+### 5.4 Two tracks, one shape
+
+An idea can be reviewed twice over, by two kinds of reviewer who have nothing
+in common except the shape of a round. `Review.scope` says which:
+
+| | Organization review | Platform review |
+| - | ------------------ | --------------- |
+| Question it answers | "is this what **we** want to put forward?" | "is this worth automating?" |
+| Reviewer is | an active member of the idea's own organization holding `idea.review` there, not the author | an account holding `administration.review_platform_submissions`, not the author |
+| Statuses | `SUBMITTED_TO_ORGANIZATION` → `ORGANIZATION_CHANGES_REQUESTED` \| `ORGANIZATION_CONFIRMED` | `SUBMITTED` → `UNDER_REVIEW` → `CHANGES_REQUESTED` \| `REJECTED` \| `APPROVED` |
+| Verdicts it may record | `CHANGES_REQUESTED`, `CONFIRMED` | `CHANGES_REQUESTED`, `REJECTED`, `APPROVED` |
+| Service | `reviews/organization_review.py` | `reviews/services.py` + `reviews/platform_review.py` |
+| Criteria | optional — a confirmation is not an assessment, and the form allows none | the five fixed criteria |
+| Notifies the author | in-app + email (`idea.organization_changes_requested` / `idea.organization_confirmed`) | in-app + email for every decision |
+
+**Three rows rather than one model per track.** A review round is the same row
+in both cases — reviewer, round, decision, feedback, snapshot, timestamps — and
+what differs is *who may decide* and *what the decision means*. Two models
+would have duplicated every column and every invariant to separate two things
+that differ in two fields. The distinction is then enforced where it can be
+enforced structurally:
+
+- **`SCOPE_DECISIONS`** maps each scope to the verdicts it may record, and
+  `Review.clean()` refuses a decision outside that set. So "the organization
+  approved it" is not a state **any** code path can produce, whatever a
+  resolver or a service asks for — an organization review cannot `APPROVE` and
+  a platform review cannot `CONFIRM`.
+- **`ideas.lifecycle.TRANSITION_REVIEW_SCOPE`** fixes which track each
+  review-owned lifecycle pair belongs to, so the row the review writes and the
+  status change it causes cannot disagree about scope.
+- `lifecycle.context_allows` refuses the three organization statuses to a
+  non-organization idea, so an individual or team idea cannot be parked in a
+  stage that means nothing for it.
+
+**Rounds are numbered per scope, and that is not cosmetic.** An organization
+idea's history is: organization round 1 → confirmed → platform round 1 →
+changes requested → platform round 2 → approved. A reader of the approval
+report counts *platform* rounds, and the organization's confirmation before it
+is not round 0 of the same sequence. The uniqueness constraint is therefore
+`(idea, scope, round)` rather than `(idea, round)`, and the cost — rounds are
+not gapless across the whole history — is asserted per scope in
+`reviews/tests/invariants.py` instead of across the idea.
+
+**The same constraint that made rounds per-scope also made the open-review rule
+per-scope**, for the same underlying reason: an idea may legitimately have an
+organization review open while a platform review is being routed. They are
+different tracks over the same row, and one blocking the other would be a race
+mistaken for a conflict.
+
+**An individual or team idea has no organization review at all**, and that is a
+rule rather than a UI condition: `eligibility.can_organization_review` is
+`False` for one even for a user who holds `idea.review` in every tenant on the
+platform, because there is no organization to confirm it. Its journey is
+`DRAFT → SUBMITTED` and nothing else before the platform sees it.
+
+---
+
 ## 6. Reviewer authorization
 
 ### Options
@@ -515,8 +713,35 @@ nothing in B.
 is consulted.
 
 **The one-member problem** is not solved by B alone: someone must be able to
-join an organization. Membership invitation belongs to the Organizations
-domain ([D-1](#20-open-product-decisions)).
+join an organization. Membership invitation belongs to the Organizations domain
+([D-1](#20-open-product-decisions)) — and it did arrive, in the
+`invitations` app, which is the only writer of a `Membership` in this platform.
+
+### The platform reviewer is a different kind of thing
+
+`idea.review` is an **organization** permission: it is granted to a `Role`, a
+role belongs to an organization, and the membership it is checked through is
+the membership of the idea's own organization. It therefore cannot answer
+"may this account review for the platform", and the platform track does not try
+to make it.
+
+A platform reviewer holds `administration.review_platform_submissions` — a
+**Django permission on a platform-scoped model**, checked with
+`user.has_perm`. No organization role and no team role can produce it, so:
+
+- an organization Owner or Reviewer is never a platform reviewer, whatever else
+  they hold;
+- a platform reviewer needs no membership of the idea's organization, and in
+  practice holds none — that is what "the platform reviews submissions from
+  tenants its reviewers do not belong to" means;
+- there is no code path in which holding `idea.review` somewhere also confers
+  platform review, so "an organization reviewer cannot platform-approve" is
+  structural rather than careful.
+
+The asymmetry is the whole point. It is why the organization stage cannot
+approve anything (its only verdicts are `CHANGES_REQUESTED` and `CONFIRMED`,
+see [§5.4](#54-two-tracks-one-shape)) and why the platform track is reachable
+by accounts that have never heard of the idea's organization.
 
 ---
 
@@ -536,20 +761,52 @@ organization will have very few reviewers. Explicit assignment can be added
 later without migrating `Review`: an assignment row would precede the claim
 and constrain who may make it.
 
+**As built, on the platform side only.** `reviews.ReviewAssignment` arrived with
+the platform track, and only for it: `platformIntake` lists what is sitting in
+platform intake, `assignPlatformReviewer` routes one of those submissions to a
+named reviewer, and `releasePlatformReviewer` gives it back. An organization
+queue has no equivalent, because an organization's reviewers are its own members
+and already know the queue exists.
+
+Three things it deliberately is **not**:
+
+- **Not a claim.** The `Review` row, the `SUBMITTED → UNDER_REVIEW` move and the
+  report are all created by the reviewer themselves. An assignment that
+  outlived its reviewer must not be able to stand in for a review nobody did.
+- **Not an eligibility grant.** Routing requires
+  `administration.assign_platform_reviewers`, and the reviewer it names must
+  themselves hold `administration.review_platform_submissions` — checked
+  *before* the row exists, so the platform cannot route an idea to somebody who
+  could never decide it and leave it stranded. The assignment narrows who
+  *should* look first, not who is allowed.
+- **Not a substitute for the queue.** `platformReviewQueue` remains the thing an
+  unassigned reviewer works from, so routing improves latency without reducing
+  the number of ideas that can be picked up by whoever is free.
+
+Option 2's remaining costs — an "assign reviewers" permission and the
+reassignment/unassignment rules — are the reason it was not extended to the
+organization track.
+
 ---
 
 ## 8. Review history
 
 - Rows are **append-only**. `startReview` inserts; `completeReview` sets the
   decision once; nothing deletes a review (no delete service, no delete
-  mutation, admin delete disabled). The only removal is cascade from the
-  idea's organization, which removes the whole tenant.
-- `round` increments per idea: the idea's history is
-  `Review.objects.filter(idea=idea).order_by('round')`.
+  mutation, admin delete disabled). The only removal is cascade from the idea's
+  organization or team, which removes the whole tenant.
+- `round` increments **per scope**: an idea's history is
+  `Review.objects.filter(idea=idea).order_by('round')` with `scope` on every
+  row, and the rounds of the two tracks are independent counters (see
+  [§5.4](#54-two-tracks-one-shape)). A withdrawn round is a completed row like
+  any other and carries no feedback.
 - `submission_snapshot` preserves what each round actually reviewed, so
   editing content after `CHANGES_REQUESTED` never rewrites the meaning of an
-  earlier review.
-- A resubmission does not touch any existing review.
+  earlier review. Above the platform stage the same job is done for the whole
+  submission by `IdeaSubmissionVersion`, so the frozen copy a reviewer read
+  cannot change under them either.
+- A resubmission does not touch any existing review — only the version count
+  and the round that comes next.
 
 ---
 
@@ -588,15 +845,19 @@ Review round n completed: decision = CHANGES_REQUESTED, feedback required
 Author reads feedback (review history on their idea)
         │
         ▼
-Author edits content          ← NEW in S3-005: update_idea accepts CHANGES_REQUESTED
+Author edits content          ← update_idea accepts CHANGES_REQUESTED
 Author adds evidence          ← already possible (attachments in any status)
         │
         ▼
-Author resubmits (submitIdea) ← existing CHANGES_REQUESTED → SUBMITTED, re-validated
-        │
+Author resubmits (submitIdea) ← existing CHANGES_REQUESTED → SUBMITTED, re-validated,
+        │                          and a new IdeaSubmissionVersion is frozen
         ▼
-Idea back in the queue → startReview → Review round n+1 (new row, new snapshot)
+Idea back in the platform queue → startReview → Review round n+1 (new snapshot)
 ```
+
+The organization stage has the same shape one step earlier, with the author's
+resubmission going to `SUBMITTED_TO_ORGANIZATION` rather than `SUBMITTED`, and
+no version frozen — the platform has not seen it yet.
 
 What Sprint 3 must add (S3-005). None of it is done in this task:
 
@@ -623,34 +884,65 @@ by the audit trail ([§15](#15-notifications-and-audit)), not by rewriting it.
 
 ## 11. Approval flow
 
-Options for `APPROVED → AUTOMATION_PROPOSAL`:
+Options for the end of the track:
 
 | Option | Assessment |
 | ------ | ---------- |
 | Create an `AutomationOpportunity` entity | Belongs to the Opportunities domain (`docs/architecture.md` lists `opportunities` separately). Creating it here would give Reviews ownership of the next domain's vocabulary. |
 | Create a proposal placeholder | A row with no behaviour behind it, and one the proposals domain would have to migrate or adopt. |
-| **Expose approved ideas as ready** | **Recommended.** An approved idea is identifiable by status (`ideas(filters: {status: APPROVED})` already works) and carries its approving review. The next domain reads that; Reviews writes nothing for it. |
+| **Expose approved ideas as ready** | **Recommended.** An approved idea is identifiable by status (`ideas(filters: {status: APPROVED})` already works), carries its approving review and its report. The next domain reads that; Reviews writes nothing for it. |
 
-Recommendation for Sprint 3:
+As built, approval is three separate facts rather than one, and the whole shape
+of §11 is that they cannot be collapsed:
 
-- `completeReview(decision: APPROVED)` moves the idea to `APPROVED` and stops.
-- `APPROVED → AUTOMATION_PROPOSAL` stays the existing reviewer transition,
-  still available through `transitionIdea`. It is not review-owned, since no
-  review is open. It is labelled "Hand off", and nothing acts on the
-  resulting state until the Opportunities domain exists. Whether Sprint 3
-  offers it in the UI at all is [D-7](#20-open-product-decisions).
-- The hand-off, like every transition, is recorded in the audit trail.
+```
+completeReview(decision: APPROVED)         Idea: UNDER_REVIEW → APPROVED
+        │  in the same transaction:
+        ├── PlatformReviewReport written against the frozen IdeaSubmissionVersion
+        └── notification + decision email to the author ("Platform review completed")
+        ▼
+the author reads the report                │  reports awaiting my confirmation
+        │  Give go-ahead  (giveGoAhead)   ← ideas.go_ahead.confirm_go_ahead
+        ▼
+Idea: APPROVED → READY_FOR_IMPLEMENTATION  owner_go_ahead_at / owner_go_ahead_by stamped
+        │
+        ▼  (a platform reviewer; nothing in this repository acts on it)
+Idea: READY_FOR_IMPLEMENTATION → AUTOMATION_PROPOSAL
+```
 
-The boundary: Reviews ends at "this idea was approved, by whom, when, and
-why". Everything after that belongs to Opportunities and Proposals.
+- **Approval is `completeReview` with `decision = APPROVED`**, through the same
+  validation, locks and review-owned transition as the other decisions - no
+  separate mutation and no separate permission.
+- **The report is part of the approval, not a follow-up.**
+  `platform_review.generate_report` runs in the caller's transaction, so an
+  approval without a report is not a state a crash can leave behind and a
+  report can never describe a decision that rolled back. A report that could
+  not be generated rolls the approval back, because an approval the owner is
+  never told about is not a decision anybody acted on.
+- **Only the author gives the go-ahead** ([`ideas-domain.md`](ideas-domain.md)
+  §[The owner's go-ahead](ideas-domain.md#the-owners-go-ahead)): not an organization Owner, not a team Owner, not a
+  platform administrator. Receiving the report, the notification or the email is
+  not consent, and `confirm_go_ahead` does not care whether the report was
+  opened.
+- **The hand-off follows the go-ahead.** `READY_FOR_IMPLEMENTATION →
+  AUTOMATION_PROPOSAL` is a platform reviewer move, is not review-owned (no
+  review is open by then), and is recorded in the audit trail like every other
+  transition. It follows the go-ahead rather than replacing it so that the
+  record of *who authorized this* survives the hand-off — which is also why
+  `idea_go_ahead_only_when_ready` names both states explicitly.
+
+The boundary is unchanged: Reviews ends at "this idea was approved, by whom,
+when, why, and against which frozen version". Everything after that belongs to
+Opportunities and Proposals.
 
 ---
 
 ## 12. Security model
 
-Every rule below is enforced in `reviews/services.py` / `reviews/selectors.py`
-through `organizations.authorization` and `ideas.selectors`. The client is
-never the control.
+Every rule below is enforced in `reviews/services.py`, `reviews/selectors.py`,
+`reviews/organization_review.py` and `reviews/platform_review.py` through
+`organizations.authorization`, `administration.authorization` and
+`ideas.selectors`. The client is never the control.
 
 **Every review is reached through an authorized idea.** A review selector
 first resolves the idea with `ideas.selectors.get_idea` (the visibility
@@ -660,15 +952,23 @@ and answers `null` for every failure.
 
 | Surface | Rule |
 | ------- | ---- |
-| Review queue | Caller must be an eligible reviewer in the requested organization. Returns `SUBMITTED` ideas of **that organization only** that the caller can read, excluding the caller's own. Another tenant's `PUBLIC` ideas never appear. Non-reviewers receive an empty page, which is indistinguishable from an empty queue. |
-| Review detail / history (`ideaReviews`) | Readable by the idea's **author** (completed reviews only) and by **eligible reviewers** of the idea's organization (all reviews). Not readable by other readers of the idea, including platform-wide readers of a `PUBLIC` idea ([D-9](#20-open-product-decisions)). |
-| Create review (`startReview`) | `can_review(user, idea)`, idea in `SUBMITTED`, no open review. Idea row locked. Membership and eligibility re-checked inside the transaction. On `UNDER_REVIEW`, only the take-over of §5.3 (S3-008). |
-| Decision (`completeReview`) | Caller is the review's reviewer **and** still `can_review` the idea; review in progress; idea `UNDER_REVIEW`; decision valid; feedback rule met. Idea and review rows locked. |
-| Assignment | Not introduced. The only reassignment is the take-over in [§5.3](#53-a-reviewer-who-stops-being-eligible-mid-review), gated on the previous reviewer's **current** ineligibility. |
+| Organization review queue (`reviewQueue`, `organizationReviewQueue`) | Caller must hold `idea.review` in the requested organization. Returns that organization's `SUBMITTED_TO_ORGANIZATION` **organization-context** ideas, oldest submission first, excluding the caller's own and anything they cannot read. Another tenant's `PUBLIC` idea never appears; a team or individual idea is in no organization's queue. Non-reviewers - including a reviewer of another organization and an organization that does not exist - receive an empty page, which is indistinguishable from an empty queue. |
+| Platform review queue (`platformReviewQueue`) | Caller must hold `administration.review_platform_submissions`. **Not tenant-scoped at all**, because the platform reviews submissions from every organization; it returns the ideas a platform reviewer may read that are in `SUBMITTED` or `UNDER_REVIEW`, oldest first, never their own. Holding an organization Owner or Reviewer role appears nowhere here and grants nothing here. |
+| Platform intake (`platformIntake`) | Gated on `administration.assign_platform_reviewers`, not on the review permission: it is the triage list of an administrator, not a reviewer's queue. |
+| Review history (`ideaReviews`) | The idea's **author** (completed reviews only) and a **platform reviewer** of that idea (all reviews, including one in progress). Nobody else - including an organization reviewer who is not the author, and every platform-wide reader of a `PUBLIC` idea. Review history is not public because the idea is ([D-9](#20-open-product-decisions)). `scope` travels on each row so the two tracks are distinguishable. |
+| Approval report (`ideaReviewReport`) | The idea's **author** and platform reviewers only - not an organization reviewer who happens to be a colleague, and not a team Owner. `null` for an idea with no report yet, which is also the answer for one the caller may not read. |
+| Submission versions (`ideaSubmissionVersions`) | Any reader of the idea may read them, because a version *is* the idea's own content; an unreadable idea answers an empty list. |
+| Start platform review (`startReview`) | `can_review(user, idea)`, idea in `SUBMITTED`, no open **platform** review. Idea row locked. Eligibility re-checked inside the transaction. On `UNDER_REVIEW`, only the take-over of [§5.3](#53-a-reviewer-who-stops-being-eligible-mid-review). |
+| Decide platform review (`completeReview`) | Caller is the review's reviewer **and** still `can_review` the idea; review in progress; idea `UNDER_REVIEW`; decision valid **for the platform scope**; feedback rule met; on approval the report must be generatable or the whole transaction rolls back. Idea and review rows locked. |
+| Start / decide organization review | `can_organization_review`, which is `False` for any non-organization-context idea; the caller must be the round's own reviewer to decide; `CONFIRMED` and `CHANGES_REQUESTED` only, by `SCOPE_DECISIONS`. |
+| Submit to platform (`submitToPlatform`) | **The author**, on an `ORGANIZATION_CONFIRMED` idea. Not the organization's Owner role and not the reviewer who confirmed it — an organizational fact and a platform submission are two separate events. |
+| Go-ahead (`giveGoAhead`) | **The author**, on an `APPROVED` idea with a report, through `ideas.go_ahead`. No role can stand in for the person who wrote it. |
+| Assignment (`assignPlatformReviewer` / `releasePlatformReviewer`) | `administration.assign_platform_reviewers`, and the reviewer named must already hold `administration.review_platform_submissions`. Routing to somebody who could never decide is refused before the row exists. |
+| Take-over | The only reassignment of an open review, gated on the previous reviewer's **current** ineligibility ([§5.3](#53-a-reviewer-who-stops-being-eligible-mid-review)). |
 | Feedback | Stored on the review, returned only under the review read rule. Never copied into comments. Text only, rendered as text; no HTML. |
-| Cross-organization | Reviewer eligibility is looked up for the idea's organization; ids from another tenant resolve to `null` / "unavailable", identical to nonexistent ids. |
-| Author/reviewer separation | Author refused as reviewer before any role check, at claim and at decision. |
-| Historical records | No update after completion, no delete path, `PROTECT` on reviewer, read-only admin. |
+| Cross-organization | Organization reviewer eligibility is looked up for the idea's organization; ids from another tenant resolve to `null` / "unavailable", identical to nonexistent ids. |
+| Author/reviewer separation | Author refused as reviewer before any role check, at claim and at decision, in **both** scopes, and refused again by `Review.clean()` behind the eligibility check. |
+| Historical records | No update after completion, no delete path, `PROTECT` on reviewer and on `IdeaTransition.actor`, read-only admin. |
 
 **Leak review.** `ReviewType` exposes `reviewerId`, not a nested user. Both
 the author-facing and the reviewer-facing read go through the same selector,
@@ -687,7 +987,7 @@ The smallest coherent API, merged into `graphql_api/schema.py` as
 
 | Field | Returns | Authorization |
 | ----- | ------- | ------------- |
-| `reviewQueue(organizationId: ID!, offset: Int, limit: Int)` | `IdeaPage` (existing type) | eligible reviewer in that organization; otherwise an empty page |
+| `reviewQueue(organizationId: ID!, offset: Int, limit: Int)` | `IdeaPage` (existing type) | holds `idea.review` in that organization; otherwise an empty page. **This is the organization's queue** — the status it filters on became `SUBMITTED_TO_ORGANIZATION` with the platform track, and the platform's queue is a different query ([below](#the-platform-tracks-own-seam)) |
 | `ideaReviews(ideaId: ID!)` | `[ReviewType!]!`, ordered by round | [§12](#12-security-model) review read rule; otherwise `[]` |
 | `viewerCanReviewIn(organizationId: ID!)` | `Boolean!` | answers only about the caller; `false` for a non-member or unknown organization |
 
@@ -701,9 +1001,14 @@ from "nothing to review".
 **Additions to `IdeaType`** (computed per viewer, like
 `availableTransitions`; convenience, never the control):
 
-- `viewerCanStartReview: Boolean!`
+- `viewerCanStartReview: Boolean!` — the **platform** track
 - `viewerActiveReviewId: ID` (the in-progress review this viewer owns, if
   any)
+- `viewerCanStartOrganizationReview: Boolean!` — the organization track
+- `state.primaryAction` / `primaryActionLabel`, resolved from
+  `ideas.states` per viewer, which is what offers "Review Idea",
+  "Give Go-Ahead" or "Waiting for Your Organization" without the client
+  re-deriving a lifecycle rule
 
 **Mutations**
 
@@ -736,11 +1041,71 @@ As built (S3-008): `startReview` also takes over a stalled review (§5.3);
 `completeReview` refuses; `ideaTransitions(ideaId)` (S3-007) is the read-only
 lifecycle history.
 
+### The platform track's own seam
+
+The platform track arrived with its **own** `Query` / `Mutation` pair
+(`reviews.schema.PlatformTrackQuery` / `PlatformTrackMutation`), merged into
+`graphql_api/schema.py` beside the original two rather than folded into them.
+That is a shape decision with a reason: everything below is either about the
+organization stage, about the platform stage, or about the *record* a review
+leaves, and mixing the two tracks into one bag of fields is how a client ends up
+offering "Confirm" on a platform queue. `reviewQueue` and `ideaReviews` kept
+their meaning; the new names say which track they are about.
+
+**Queries**
+
+| Field | Returns | Authorization |
+| ----- | ------- | ------------- |
+| `organizationReviewQueue(organizationId: ID!)` | `[IdeaType!]!`, oldest submission first | holds `idea.review` in that organization; otherwise `[]` |
+| `platformReviewQueue` | `[IdeaType!]!`, not tenant-scoped | `administration.review_platform_submissions`; otherwise `[]` |
+| `platformIntake` | `[IdeaType!]!` | `administration.assign_platform_reviewers` |
+| `ideaReviewReport(ideaId: ID!)` | `PlatformReviewReportType` or `null` | the author or a platform reviewer ([§12](#12-security-model)) |
+| `ideaSubmissionVersions(ideaId: ID!)` | `[SubmissionVersionType!]!`, oldest first | any reader of the idea; `[]` otherwise |
+| `ideaReviewAssignment(ideaId: ID!)` | `ReviewAssignmentType` or `null` | any reader of the idea |
+| `viewerCanStartOrganizationReview(ideaId: ID!)` | `Boolean!` | answers only about the caller |
+
+**Mutations**
+
+| Mutation | Input | Payload |
+| -------- | ----- | ------- |
+| `startOrganizationReview(ideaId: ID!)` | none | `ReviewPayload` |
+| `completeOrganizationReview(input: CompleteOrganizationReviewInput!)` | `ideaId`, `reviewId`, `decision: ReviewDecision!` (`CONFIRMED` \| `CHANGES_REQUESTED` — the server refuses any other value), `feedback` (required for a changes request), `assessments` (optional) | `ReviewPayload` |
+| `assignPlatformReviewer(input: AssignPlatformReviewerInput!)` | `ideaId`, `reviewerId` | `ReviewAssignmentPayload` |
+| `releasePlatformReviewer(ideaId: ID!)` | none | `ReviewAssignmentPayload` |
+
+The two author's moves in the platform track are **Ideas** operations and live
+in `ideas.schema`, not here: `submitToPlatform(id)` and `giveGoAhead(id)`. The
+go-ahead in particular belongs to `ideas.go_ahead`, and its confirmation wording
+is defined on the server so the sentence the backend considers sufficient and
+the sentence the user reads are edited in the same commit - a dialog that asks
+for less than the backend requires is a consent problem, not a copy problem.
+
+**Types**
+
+- `PlatformReviewReportType { ideaId, round, decision, reviewSummary,
+  recommendations, importantConsiderations, constraints, nextSteps,
+  approvalSummary, criteria, approvedAt, generatedAt, submissionContext,
+  tenantLabel }`. The criterion ratings are the categorical list copied in
+  verbatim; there is no score field, because there is no score.
+- `SubmissionVersionType { version, submissionContext, submittedById,
+  submittedAt, isCurrent, snapshot }`.
+- `ReviewAssignmentType { id, ideaId, reviewerId, assignedById, createdAt,
+  releasedAt }`.
+- `ReviewType` also carries `scope`, so a client can tell an organization's
+  confirmation from a platform round instead of inferring it from the decision.
+
+**Still deliberately not added:** `requestChanges` / `approveIdea` /
+`rejectIdea` as three mutations (one `completeReview` with a decision enum
+keeps the transaction and validation in one place), `updateReview` for
+server-side drafts, and an organization-side assignment mutation ([§7](#7-assignment)).
+
 ---
 
 ## 14. Frontend boundary
 
-New `frontend/src/features/reviews/`, mirroring `features/ideas/`:
+New `frontend/src/features/reviews/`, mirroring `features/ideas/`. As planned
+in Sprint 3 (kept as the plan; the tree as built is at the end of this
+section):
 
 ```
 features/reviews/
@@ -755,10 +1120,15 @@ features/reviews/
   utils/reviewLabels.ts          decision/criterion/rating labels (presentation only)
 ```
 
-- **Route** `/app/reviews` (queue) and `/app/reviews/:ideaId` (workspace),
-  added to `app/routes.tsx`. The nav link is shown when the viewer can review
-  in the current organization. Hiding it is presentation; the queue itself
-  is authorized server-side.
+- **Route** `/app/reviews`, added to `app/routes.tsx`, hosting both the
+  organization's queue and the workspace for the idea it opens. The nav link is
+  shown when the viewer can review in the current organization. Hiding it is
+  presentation; the queue itself is authorized server-side. The per-idea review
+  is **not** a separate route: it is `IdeaReviewSection` inside
+  `/app/ideas/:id`, so a reviewer reads a submission where every other reader
+  reads it. One route arrived with the platform track:
+  `/app/ideas/:ideaId/report` (`IdeaReportPage`) — the approval report the
+  author reads before deciding.
 - **Ideas workspace changes** are limited to three things. Replace the
   generic reviewer transition buttons with an "Open review" link driven by
   `viewerCanStartReview` / `viewerActiveReviewId`. Render `ReviewHistory`
@@ -774,6 +1144,51 @@ features/reviews/
   server reports `viewerCanStartReview` on an `UNDER_REVIEW` idea, and
   `ReviewHistory` labels a withdrawn round. The decision form offers the three
   verdicts only. No lifecycle-history (`ideaTransitions`) view: deferred.
+- **As built (platform track):** the module is now
+
+  ```
+  features/reviews/
+    api/reviewsApi.ts              the documents and typed requests for both tracks
+    hooks/useReviewQueue.ts        paged queue; same superseded-response discipline
+                                   as useIdeaDiscovery
+    hooks/useIdeaReviews.ts        history for one idea
+    hooks/useCanReview.ts          whether the viewer reviews in a given organization
+    components/ReviewsWorkspace.tsx       the organization's queue, and the
+                                   workspace for the idea it opens
+    components/ReviewDecisionForm.tsx     criteria ratings, feedback, decision; one submit
+    components/ReviewHistory.tsx           completed rounds; used by reviewers and authors
+    components/IdeaReviewSection.tsx       the review block inside the idea detail
+    components/IdeaReportPage.tsx         the approval report, and the go-ahead entry point
+    utils/reviewLabels.ts                  decision/criterion/rating labels (presentation only)
+  ```
+
+  Three client decisions worth stating, because each is the client half of a
+  server rule:
+
+  - **The report is a page, not a panel.** The owner is being asked to make a
+    decision, and the confirmation wording comes from the server
+    (`ideas.go_ahead.CONFIRMATION_STATEMENT`), so the sentence the backend
+    considers sufficient and the sentence the reader reads cannot drift.
+  - **Rounds are labelled with their track.** `ReviewType.scope` travels on
+    every row precisely because the round counter is per scope (see
+    [§5.4](#54-two-tracks-one-shape)): an organization confirmation and a
+    platform round can both be "round 1", and a history rendered without the
+    scope reads as though the same track had two first rounds.
+  - **Nothing infers a decision from having read something.** The report page
+    renders; it records nothing. The only thing that writes `ownerGoAheadAt` is
+    the author's click, and the client never enables that button from local
+    state.
+- **Not in the UI, on purpose for now.** `platformReviewQueue`,
+  `platformIntake`, the two assignment mutations, and the two organization
+  review mutations (`startOrganizationReview`, `completeOrganizationReview`)
+  are implemented and authorized on the server, and `reviewsApi.ts` carries
+  typed request functions for all of them, but **no component calls them**. What
+  the screens do use is `reviewQueue` and `startReview`/`completeReview` (the
+  platform round, claimed and decided from the queue page), `ideaReviews`, and
+  on the report page `ideaReviewReport` and `ideaSubmissionVersions`. The
+  missing screens are the platform triage view, the assignment controls and the
+  organization's own confirm/request-changes form. Recorded rather than
+  glossed, because a client function with no caller reads like a feature.
 
 ---
 
@@ -852,6 +1267,61 @@ sending is acceptable at current scale. Celery is not introduced for this.
 The email carries a link and the decision, not the feedback text, which stays
 behind authentication. No in-app notification centre.
 
+**As built after the platform track.** The in-app notification centre arrived
+with the `notifications` app, so Reviews writes into it rather than into its
+own sender. It carries 14 fixed kinds, and the review-related ones that are
+actually written today are:
+
+| Kind | Recipient | Channel |
+| ---- | --------- | ------- |
+| `idea.organization_changes_requested`, `idea.organization_confirmed` | the author | in-app + email (`organization_review._notify_author`) |
+| `idea.platform_changes_requested`, `idea.platform_rejected`, `idea.platform_approved` | the author | in-app + email — `DECISION_KINDS` is the gate that lets a notification link a report |
+| `idea.owner_go_ahead` | the author | in-app + email (`ideas.go_ahead`) |
+| `review.organization_queue`, `review.platform_queue` | the reviewers now holding that queue | **in-app only** |
+
+Two kinds are **reserved vocabulary with no writer**: `idea.submitted_to_platform`
+("your idea was submitted to the platform") and `review.assigned`. They are in
+the `kind` CHECK constraint and in the action-path mapping, and nothing delivers
+them yet — the first because the author's own submission needs no announcement
+(the queue nudge covers the other side and the button they just pressed is the
+confirmation), the second because assignment
+([§7](#7-assignment)) writes a row rather than a notification. Recorded here so
+nobody reads the enum as a list of things that happen.
+
+Three decisions in the table above:
+
+- **A queue nudge is not emailed** (`send_email=False`). There may be many
+  platform reviewers, "somebody has submitted something" is not addressed to
+  anybody in particular, and mailing every one of them for every submission is
+  how a notification stops being read. The queue remains the channel; the badge
+  is a courtesy.
+- **The author is never nudged about their own submission.** Recipients are
+  filtered by `author_id` before delivery, because an organization's Owner can
+  be both the reviewer and the author, and being told "somebody's idea is
+  waiting" about your own is exactly what teaches people to ignore a badge.
+- **A resubmission does not re-notify the queue it lands in.** Only the *first*
+  move into each queue is announced; the queue was told by the original
+  submission, and saying it twice makes two submissions look like two different
+  ideas arriving.
+
+Delivery cannot fail a decision: `notifications.services.deliver` runs on
+commit, returns the rows it wrote (empty on failure) and never raises. A mail
+outage cannot roll back an approval.
+
+**`actionPath` is derived server-side** from the notification's kind and the
+ids on the row, so the in-app link and any future channel's payload are one
+mapping. A notification for an idea the recipient may no longer read is not
+offered a link to it, and the whole platform now has exactly one place where a
+deep link is decided.
+
+**There is still no push subsystem**, and that is a fact about this codebase
+rather than an oversight: no VAPID keys, no subscription model, no delivery
+library, no service worker and no `requestPermission` call. Real push needs a
+worker to retry through, so it is downstream of the queue decision rather than
+beside it — and a delivery function that reported success without a transport
+would be a silent failure. What the notification surface provides is the
+substrate any channel needs.
+
 ---
 
 ## 16. Test strategy
@@ -871,6 +1341,11 @@ fixtures, the fast password hasher from `backend/conftest.py`):
 | GraphQL | `test_schema.py` | Every query and mutation for anonymous, non-member, member, author, reviewer, and other-org reviewer; unauthorized reads identical to nonexistent; no nested user objects. |
 | Security integration | `test_integration_security.py` | Two organizations in both directions, the S2-008 pattern extended to reviews; review ids borrowed across tenants; a former reviewer's history access. |
 | Audit/notifications | `test_audit.py`, `test_notifications.py` | One `IdeaTransition` per successful move; none on refusal; email sent on commit only, not on rollback; failed send logged, not raised. |
+| Two tracks | `test_approval.py`, `platform.py` fixtures | An organization review cannot `APPROVE` and a platform review cannot `CONFIRM` (`SCOPE_DECISIONS`); rounds numbered per scope; one open review per scope; an organization reviewer is never a platform reviewer and vice versa. |
+| Organization review | `test_services.py`, `test_schema.py` | Queue is that organization's, organization-context ideas only, never the caller's own; only the round's reviewer may decide; `CONFIRMED` requires the author to submit to the platform separately. |
+| Platform track security | `test_integration_security.py`, `test_selectors.py` | A platform reviewer can read and decide a submission from an organization they are not a member of; an organization role grants nothing platform-wide; the platform queue is not tenant-scoped and never contains the caller's own ideas; the report is not readable by an organization reviewer who is not the author. |
+| Report and go-ahead | `test_approval.py`, `ideas/tests/test_lifecycle.py` | Report written in the approval's transaction and rolled back with it; report readable by the author and platform reviewers only; go-ahead refused for a non-author, for a missing report and for a not-approved idea; `owner_go_ahead_at/by` stamped by the move. |
+| Frozen submissions | `ideas/tests/test_models.py`, `test_lifecycle.py` | Every move to `SUBMITTED` freezes a version and stamps the lock together; exactly one current version; a resubmission creates n+1 and never overwrites. |
 
 Frontend, Vitest + Testing Library: API request shapes; queue paging and
 superseded-response handling; decision form validation and submit; history
@@ -883,63 +1358,128 @@ edit and resubmit in `CHANGES_REQUESTED`.
 
 `reviews_review`
 
-- `UniqueConstraint(idea, round)`, `review_round_unique_per_idea`.
-- `UniqueConstraint(idea) WHERE completed_at IS NULL`,
-  `review_one_open_per_idea` (partial). The database-level backstop for the
-  claim race, behind the row lock.
-- `CheckConstraint`: `(decision IS NULL) = (completed_at IS NULL)`.
+- `UniqueConstraint(idea, scope, round)`, `review_round_unique_per_idea_scope`.
+  **Per scope**, so each track numbers its own rounds from 1 (see
+  [§5.4](#54-two-tracks-one-shape)).
+- `UniqueConstraint(idea, scope) WHERE completed_at IS NULL`,
+  `review_one_open_per_idea_scope` (partial). The database-level backstop for
+  the claim race, behind the row lock — and scoped, because an idea may
+  legitimately have an organization review open while a platform review is
+  being routed.
+- `CheckConstraint`: decided iff completed — no completed review without a
+  decision, no decision on an open one.
 - `CheckConstraint`: `decision IN (...)`, derived from the enum as
   `idea_status_is_known` is.
 - `CheckConstraint`: `round >= 1`.
-- If [D-3](#20-open-product-decisions) requires feedback for some decisions:
-  `CheckConstraint` that `feedback <> ''` when `decision IN
-  ('changes_requested','rejected')`.
-- Indexes: `(idea, round)` via the unique constraint serves history;
-  `(reviewer, -created_at)` for "my reviews"; no separate `idea` index (it is
-  the prefix of the unique constraint).
-- The queue query uses the existing `ideas_org_status_idx`
-  (`organization, status`).
+- The decision-vs-scope rule is enforced in `Review.clean()` rather than by a
+  `CHECK`, because a constraint cannot join to look up the scope: a
+  `SCOPE_DECISIONS` violation is refused wherever the row is written.
+- Index `(reviewer, -created_at)`, `reviews_reviewer_created_idx`, for "my
+  reviews"; no separate `idea` index (it is the prefix of the unique
+  constraint).
+- The queues use the existing `ideas_org_status_idx` (`organization, status`);
+  the platform queue is not tenant-scoped and relies on
+  `platform_reviewer_filter` plus `ideas_vis_created_idx`.
 
 `reviews_reviewcriterionassessment`
 
 - `UniqueConstraint(review, criterion)`; CHECK constraints on `criterion` and
   `rating` enums.
 
+`reviews_reviewassignment`
+
+- `UniqueConstraint(idea) WHERE released_at IS NULL`,
+  `review_one_current_assignment_per_idea` (partial).
+- `CheckConstraint`: an assignment cannot name its own assigner unless it has
+  been released.
+- Indexes `(idea, -created_at)` and `(reviewer, -created_at)`.
+
+`reviews_platformreviewreport`
+
+- `OneToOneField(review)` — one report per approving round, so a round cannot
+  be approved twice.
+- `CheckConstraint`: `report_is_for_a_platform_approval`, stated on the
+  decision the report copies in because a `CHECK` cannot join to the review.
+- `CheckConstraint`: `round >= 1`. Index `(idea, -generated_at)`.
+
+`ideas_ideasubmissionversion` (the frozen submission the report describes)
+
+- `UniqueConstraint(idea, version)`; `UniqueConstraint(idea) WHERE
+  is_current`; `CheckConstraint` `version >= 1`; index `(idea, version)`.
+- Owned by `ideas`, not `reviews` — see
+  [`ideas-domain.md`](ideas-domain.md) §"Locked submissions".
+
 `ideas_ideatransition` (S3-007, if D-10 is accepted)
 
-- Index `(idea, created_at)`; CHECK constraints on both status columns.
+- Index `(idea, created_at)`; CHECK constraints on both status columns plus
+  `idea_transition_changes_status`.
 
 Migrations: `organizations` data migration for `idea.review` + `Reviewer`
-role (S3-002); `reviews/0001_initial` (S3-002/S3-004); `ideas` migration for
-`IdeaTransition` (S3-007); `reviews/0002_review_withdrawn_decision` adds
-`withdrawn` to the decision choices and `review_decision_is_known` (S3-008).
-No change to existing `ideas` columns.
+role (S3-002); `reviews/0001_initial` (S3-002/S3-004); `ideas/0002` for
+`IdeaTransition` (S3-007); `reviews/0002_review_withdrawn_decision` (S3-008);
+and, with the platform track, `reviews/0003_review_scope_and_platform_report`
+(`scope`, `PlatformReviewReport`), `reviews/0004_review_rounds_per_scope`
+(re-keying rounds and the open-review constraint per scope),
+`ideas/0005`–`0009` for the contexts, the go-ahead and `TEAM` visibility, and
+`notifications/0002_invitation_declined_kind`. No existing `ideas` column
+changed meaning.
 
 ---
 
 ## 18. Integration points
 
-**Identity.** `User` as reviewer (`PROTECT`); `is_active` checked on every
-review operation via `organizations.authorization._active_user`; access-token
-authentication unchanged. No Identity changes.
+**Identity.** `User` as reviewer, assigner and report reader (`PROTECT`);
+`is_active` checked on every review operation; access-token authentication
+unchanged. No Identity changes.
 
-**Organizations.** New permission code `idea.review`, granted to `Owner`;
-new non-system `Reviewer` role at bootstrap and by migration; existing
-`assignRoleToMembership` grants it. Eligibility uses
-`get_membership` + `membership_has_permission`. **Dependency:** a way for a
-second person to join an organization ([D-1](#20-open-product-decisions)).
+**Organizations.** `idea.review`, granted to `Owner`; the non-system
+`Reviewer` role at bootstrap and by migration; `assignRoleToMembership` grants
+it. Organization-review eligibility uses `get_membership` +
+`membership_has_permission`. **Dependency, resolved:** a way for a second
+person to join an organization is the `invitations` app, which is the only
+writer of a `Membership` (see [D-1](#20-open-product-decisions)).
+
+**Administration.** The platform reviewer is authorized by
+`administration.review_platform_submissions` and the routing triage by
+`administration.assign_platform_reviewers` — both Django permissions on a
+platform-scoped model, neither reachable from an organization or team role. The
+console also reads ideas, reviews and reports for its own sections; those reads
+are gated on `inspect_idea_content`, which is also why a message **body** is
+withheld there.
 
 **Ideas.**
-- `lifecycle`: reviewer check switched to `idea.review`; review-owned moves
+- `lifecycle`: the three actor kinds; `context_allows` refusing the
+  organization statuses outside the organization context; review-owned moves
   closed to `transition_idea` and opened through `apply_review_transition`;
-  `IdeaTransition` written per move (S3-007).
-- `services`: `update_idea` accepts `CHANGES_REQUESTED` (S3-005), with
-  visibility locked after submission.
+  `IdeaTransition` written per move; `freeze_submission` on every move to
+  `SUBMITTED`; `apply_owner_go_ahead` as the single entry point for the
+  author's go-ahead.
+- `versions`: the frozen `IdeaSubmissionVersion` the platform reviews and the
+  report describes. This is the change that makes "answering feedback never
+  rewrites history" true at the platform stage rather than only within a round.
+- `states`: the per-(idea, reader) label, stage and single next action, with
+  the organization steps omitted for an individual or team idea.
+- `services`: `update_idea` accepts both changes-requested states, with
+  visibility locked after submission; `submit_idea` resolves its own target from
+  the context; `submit_to_platform` is the owner's separate act; the queue
+  nudges are written here for the first submission into each queue.
 - `selectors`: reused as-is (`get_idea`, `get_idea_for_update`,
-  `can_view_idea`); the queue is built on `_base_queryset` + visibility filter
-  + organization + status.
-- `schema`: `IdeaType` gains `viewerCanStartReview`, `viewerActiveReviewId`.
+  `can_view_idea`), plus `platform_reviewer_filter` — the one branch that lets
+  a platform reviewer read a submission from an organization they are not in.
+- `schema`: `IdeaType` gains `viewerCanStartReview`, `viewerActiveReviewId`,
+  `viewerCanStartOrganizationReview`, `state`, and the platform-stage columns
+  (`platformLockedAt`, `platformVersion`, `ownerGoAheadAt`).
 - Comments, votes and attachments: unchanged, reused in the review workspace.
+
+**Teams.** A team idea is filed by a member, submitted by somebody holding
+`team.ideas.submit`, and reviewed only by the platform. A team can never hold
+a review or approval permission, which is why `can_organization_review` is
+`False` for one and why the organization stage is not reachable from a team
+context at all.
+
+**Notifications.** One call site per business event, all through
+`notifications.services.deliver` after the commit and never raising; the kinds
+listed in [§15](#15-notifications-and-audit).
 
 ---
 
@@ -949,32 +1489,42 @@ Developer marketplace and applications, project management, tasks,
 milestones, payments, subscriptions, research and consultation marketplaces,
 licensing, AI scoring and recommendations, the Department domain, the
 `AutomationOpportunity` entity and anything that acts on
-`AUTOMATION_PROPOSAL`, explicit or automatic reviewer assignment, review
-panels/quorum, numeric scoring, organization-defined criteria, in-app
-notification centre, Celery, generic audit framework, membership invitation
-(Organizations domain; see D-1), and unrelated Identity or Ideas changes.
+`AUTOMATION_PROPOSAL`, **organization-side** reviewer assignment (the platform
+track has it; an organization's reviewers already know their own queue), review
+panels/quorum, numeric scoring, organization-defined criteria, Celery, a queue,
+a generic audit framework, push notifications (downstream of that queue
+decision), and unrelated Identity or Ideas changes.
+
+Still true of the platform track, and worth stating because each was a
+deliberate absence rather than an oversight: **no ownership transfer** (no
+write input anywhere names a new owner, so "whose idea is this" cannot be
+reassigned), **no scoring of any kind** in the report, and **no review of an
+individual or team idea by its team**.
 
 ---
 
 ## 20. Open product decisions
 
 Each needed an answer before the listed task started. The recommendation is
-the smallest option consistent with the existing code. As of S3-008 every
-recommendation is implemented as written except D-1: membership stays
-staff-managed (see the top of this document). D-11's optional reviewer email
-is deliberately off, as recommended.
+the smallest option consistent with the existing code. Every recommendation is
+implemented as written. **D-1 is no longer open**: membership is created by
+accepting an invitation (`invitations`, the only writer of a `Membership`),
+which is what finally makes an organization reviewer somebody other than the
+organization's single Owner. **D-11's optional reviewer email is deliberately
+off**, as recommended — the queue is the channel, and the queue nudge it
+produced is in-app only.
 
 | # | Decision | Recommendation | Blocks |
 | - | -------- | -------------- | ------ |
-| **D-1** | How does a second person join an organization? Without it no real reviewer can exist. | Add a minimal "add existing user as member" or invitation flow **in the Organizations domain**, as a Sprint 3 prerequisite or a parallel task, not inside Reviews. | S3-002 usefulness; S3-008 end-to-end |
+| **D-1** | How does a second person join an organization? Without it no real reviewer can exist. | Add a minimal "add existing user as member" or invitation flow **in the Organizations domain**, as a Sprint 3 prerequisite or a parallel task, not inside Reviews. **Delivered** by the `invitations` app. | S3-002 usefulness; S3-008 end-to-end |
 | **D-2** | Who may record a decision, and what happens if the claimant becomes ineligible? | Only the claimant; take-over (`WITHDRAWN` + new round) allowed only when the claimant is no longer eligible. | S3-004 |
 | **D-3** | Is feedback required? | Required for `CHANGES_REQUESTED` and `REJECTED`, optional for `APPROVED`. | S3-004 |
 | **D-4** | Criteria: which ones, required or optional, org-defined or fixed? | Fixed five ([§9](#9-validation-criteria)), all rated before any decision, `NOT_APPLICABLE` allowed; no rating forces a decision. | S3-004 |
 | **D-5** | Single reviewer or several? One approval sufficient? | One reviewer per round; one decision resolves the round. | S3-004 |
-| **D-6** | Submitted `PRIVATE` ideas are unreviewable. Should submission require `ORGANIZATION`/`PUBLIC` visibility, and is visibility locked after submission? | Refuse submission of `PRIVATE`/`DEPARTMENT` ideas with a clear message; lock visibility outside `DRAFT`. | S3-003, S3-005 |
-| **D-7** | Is the `APPROVED → AUTOMATION_PROPOSAL` hand-off offered in the S3 UI, and by whom? | Keep the existing reviewer transition, hidden in the UI until the Opportunities domain consumes it. | S3-006 |
-| **D-8** | Should `problem_statement` / `proposed_solution` / `expected_benefit` become editable so criteria have content to assess? | Not in S3; assess `description` and attachments. | S3-004 (criteria wording) |
-| **D-9** | Who may read reviews: can other org members see decisions and feedback? Is the reviewer's identity shown to the author? | Author + org reviewers only; reviewer id shown to author (accountability). | S3-003, S3-004 |
+| **D-6** | Submitted `PRIVATE` ideas are unreviewable. Should submission require `ORGANIZATION`/`PUBLIC` visibility, and is visibility locked after submission? | Refuse submission of `PRIVATE`/`DEPARTMENT` ideas with a clear message; lock visibility outside `DRAFT`. **Extended** by the platform track: an individual or team submission requires `PUBLIC`, because its reviewer holds no membership of the author's tenant. | S3-003, S3-005 |
+| **D-7** | Is the hand-off offered in the UI, and by whom? | Keep the existing reviewer transition, hidden in the UI until the Opportunities domain consumes it. **Superseded in position:** the hand-off now follows the owner's go-ahead (`READY_FOR_IMPLEMENTATION → AUTOMATION_PROPOSAL`), and nothing acts on it. | S3-006 |
+| **D-8** | Should `problem_statement` / `proposed_solution` / `expected_benefit` become editable so criteria have content to assess? | Not in S3; assess `description` and attachments. **Partly delivered:** `expected_benefit` is now written by the guided intake form and assessed by the criteria; the other two remain deliberately unwritten. | S3-004 (criteria wording) |
+| **D-9** | Who may read reviews: can other org members see decisions and feedback? Is the reviewer's identity shown to the author? | Author + org reviewers only; reviewer id shown to author (accountability). **As built:** author (completed rounds) + platform reviewers (all rounds); an organization reviewer who is not the author sees nothing. | S3-003, S3-004 |
 | **D-10** | Is an `IdeaTransition` audit row acceptable as the audit mechanism? | Yes, in `ideas`, append-only. | S3-007 |
 | **D-11** | Should reviewers be emailed on every submission? | Author on decision: yes. Reviewers on submission: off for S3 (queue is the channel). | S3-007 |
 
@@ -1022,3 +1572,19 @@ by `ideas.lifecycle` (D-10); structured logging of refusals;
 security suite for reviews (S2-008 pattern); GraphQL authorization sweep;
 end-to-end reviewer and author flows in the frontend; full CI; docs
 (`architecture.md`, `ideas-domain.md`, this file, `CHANGELOG.md`).
+
+**Platform track (after S3).** `Review.scope` and the two tracks it separates;
+the three organization statuses and `context_allows`;
+`reviews/organization_review.py` and the organization queue;
+`administration.review_platform_submissions` and `is_platform_reviewer`;
+`platform_reviewer_filter` so the platform can read what it must decide;
+`IdeaSubmissionVersion` and `ideas.versions`; `PlatformReviewReport` in the
+approval's transaction; `ideas/go_ahead.py` and the owner's go-ahead;
+`ReviewAssignment` plus platform intake; `PlatformTrackQuery` /
+`PlatformTrackMutation`; the review notification kinds; and the docs this
+section and [§5.4](#54-two-tracks-one-shape) now describe.
+
+**Tests for it.** `reviews/tests/platform.py` (shared fixtures for both
+tracks), `test_approval.py`, `test_admin.py`, `test_operations_schema.py`, plus
+`ideas/tests/test_ownership.py`, `test_contexts.py` and `test_discovery.py` for
+the contexts, the `TEAM` visibility and the new filters.

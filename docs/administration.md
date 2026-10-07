@@ -53,6 +53,13 @@ All codes are `administration.<codename>`. Every capability other than
 | `manage_organization_roles` | Assign and remove an organization's roles on its memberships |
 | `manage_categories` | Create, rename and retire/restore categories |
 
+`inspect_idea_content` also gates **private message bodies** - see §3.1. It is
+the console's "content a member wrote" permission, and a message is the one place
+on the platform where somebody wrote something meant for named people rather
+than for the platform. Everything else the console reports about teams,
+invitations, conversations and notifications is metadata about the platform and
+needs `access_console` alone.
+
 An active superuser holds every permission (Django semantics). `is_staff` on
 its own grants nothing here.
 
@@ -121,11 +128,61 @@ compromised administrator account into many.
 | Reviews | `/app/admin/reviews`, `/reviews/:id` | `adminReviews`, `adminReview` | Open/completed, decision, organization, reviewer. Detail shows whether an open round is **stalled** (`isStalled`, computed on request) |
 | Approvals | `/app/admin/approvals` | `adminReviews` (completed, verdict decisions) | Decision, round, reviewer, date, and the idea's status now |
 | Categories | `/app/admin/categories` | `adminCategories` | Active and retired, with idea counts |
+| Teams | `/app/admin/teams`, `/teams/:id` | `adminTeams`, `adminTeam`, `adminTeamInvitations` | Active **and** inactive member counts, owner, ideas, invitations sent. Detail adds roles with their permission codes, the full membership, and ideas by status |
+| Invitations | `/app/admin/invitations` | `adminInvitations` | Both scopes, filterable by scope and status, with whether each one could still be accepted |
+| Messages | `/app/admin/messages`, `/messages/:id` | `adminMessageThreads`, `adminMessageThread`, `adminThreadMessages` | Metadata only: participants, counts, last activity. Bodies need `inspect_idea_content` (§3.1) |
+| Notifications | `/app/admin/notifications` | `adminNotifications` | Filterable by kind and unread, with the recipient. These are the platform's own words |
 | Audit trail | Dashboard, user detail | `adminAuditEntries` | Filterable by target |
 
 Every list is paged by the server (`ideas.pagination`, max 50 per page) and
 filtered in the database. A page costs a fixed number of queries regardless
 of its size, which `test_reads.py::TestQueryCounts` pins.
+
+### 3.1 The collaboration set
+
+Teams, invitations, messages and notifications are **read-only here**, and that
+is the owning domains' position rather than an omission in this console:
+
+- **A membership is only ever created by accepting an invitation.** There is no
+  console operation that adds somebody to an organization or a team, because the
+  only two facts involved - who was asked, and who accepted - are written by the
+  invitation flow. An administrator who could write a membership row would be
+  recording an acceptance that never happened.
+- **A message belongs to its participants.** There is no delete, no edit and no
+  "mark read": the read position is per participant, and a message is a record of
+  what was said to named people.
+- **A team is not a tenant**, so nothing here validates or approves anything on
+  its behalf.
+
+So the console's job on these four is to make them *legible*:
+
+| Surface | What it answers |
+| ------- | -------------- |
+| Teams | Who writes ideas with whom, who has left (their row is kept, so a team does not re-invite them), what each team role may hold |
+| Invitations | Who was invited where, by whom, and whether it could still be accepted. `isOpen` rather than `status`, because a pending invitation past its expiry is still "pending" in the database |
+| Messages | That a conversation exists, who is in it, how much has been said and when it was last active |
+| Notifications | What the platform told each person, and whether they opened it |
+
+**Two redaction rules, both inherited from the idea rules rather than invented
+here.** A message body needs `inspect_idea_content`; every body is then `null`
+and the page says "restricted" instead of drawing an empty message. And a
+**thread subject is withheld with the idea it is anchored to**, because
+`messaging.services.start_thread` defaults an anchored thread's subject to that
+idea's title - so a subject is sometimes an idea title, and redacting one
+without the other would leave the answer in the other. Searching follows the
+same rule: the subject of an anchored thread is only searchable by a caller who
+may read that idea.
+
+**`staleParticipantCount` is not an unread count.** Unread is a position per
+reader and the console has no reader, so what it reports is how many
+participants have not opened the thread - a fact about the platform rather than a
+fictional reader's state.
+
+**No invitation token is exposed anywhere, so there is nothing to redact.**
+`Invitation` stores only the SHA-256 digest of a 32-byte `secrets` token, and
+lookup is by digest; the plaintext exists in exactly one place, the email. This
+is asserted against the schema itself in
+`tests/test_collaboration_reads.py::TestInvitations::test_no_invitation_token_is_ever_exposed`.
 
 ### Operations
 
@@ -177,7 +234,9 @@ it; it does not duplicate it.
 - **No deletion** of users, organizations, ideas, reviews or categories.
 - **No granting of platform administration from the console** (see §1).
 - **No organization editing, member invitation or removal**, and no
-  platform-level settings page.
+  platform-level settings page. The console reads invitations and memberships;
+  it cannot write either (see §3.1)
+- **No message or notification operations**, and no team membership changes
 - **No profile photo**: `User` has none yet.
 - **No future domains**: automation opportunities, requirements, proposals,
   developers, projects, payments. When Sprint 4 adds an entity, it gets a
@@ -196,7 +255,8 @@ it; it does not duplicate it.
 | GraphQL (`admin*`) | `backend/administration/schema.py` |
 | Evidence download | `backend/administration/views.py` |
 | Command | `backend/administration/management/commands/grant_platform_admin.py` |
-| Tests | `backend/administration/tests/` |
+| Collaboration reads | `administration/selectors.py` (teams, invitations, messages, notifications) |
+| Tests | `backend/administration/tests/`, incl. `test_collaboration_reads.py` |
 | Frontend API | `frontend/src/features/administration/api/` |
 | Capabilities (nav + gate) | `frontend/src/features/administration/context/` |
 | Layout, pages | `frontend/src/features/administration/components/`, `pages/` (lazy-loaded) |

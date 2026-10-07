@@ -14,8 +14,98 @@ distinction it is about.
 | `notifications` | What has the platform decided? | A notification is the platform speaking, never a user |
 
 They depend on `identity`, `organizations` and `ideas`, and depend on nothing
-else in the platform: a team cannot review, a message cannot approve, and a
+else in the platform: a team cannot *approve*, a message cannot approve, and a
 notification cannot move an idea.
+
+## 0. The levels, the audience, and who reviews (current rules)
+
+This section is authoritative. Where an older passage in this file or in
+`ideas-domain.md`, `reviews-domain.md` or `architecture.md` says an idea can be
+`PUBLIC`, that a team "validates nothing", or that a team idea goes straight to
+the platform, this section is the later decision.
+
+**An idea is filed at one of three levels - individual, team or organization - and
+the level decides who can see it. It is not a separate choice.**
+
+| Level | Who sees it | Who checks it before the platform |
+| ----- | ----------- | --------------------------------- |
+| Individual | Only the author; platform reviewers once it is submitted | Nobody - it goes straight to the platform |
+| Team | The team's members, once submitted | The team's **reviewers** |
+| Organization | The organization's members, once submitted | The organization's **reviewers** (`idea.review`) |
+
+- There is **no public audience.** `Idea.visibility` is still a column (every read
+  path filters on it) but the service always writes the value the level dictates
+  (`ideas.services.AUDIENCE_BY_CONTEXT`); naming a different one is refused, not
+  ignored. Existing ideas were converted to their owner's level by migration
+  `ideas/0010`.
+- A **draft** is visible only to its author, at every level.
+- **Joining.** People enter a team or an organization through an invitation link;
+  acceptance is the only thing that creates a membership. Every member can *see*
+  the idea; only **designated reviewers** can verify it.
+- **Team reviewers.** A team's Owner can make any member a reviewer
+  (`setTeamReviewer`), which adds the team Reviewer role (`team.ideas.review`).
+  Owners hold the permission too. A team still has no `team.ideas.approve` and
+  cannot gain one: approval is the platform's.
+- **The loop (same for a team and an organization).** The author submits; the
+  idea enters `SUBMITTED_TO_ORGANIZATION` (the stage is shared, the name is the
+  older one) and appears in the reviewers' queue - never for its own author. A
+  reviewer **verifies** it or **sends it back asking for changes or more
+  documents**; the author is notified, fixes it, adds the documents, and resubmits.
+  Once verified the idea **leaves the queue** and returns to its owner, who alone
+  **publishes it to the platform**, where the platform reviewers see it.
+- **Documents.** A reviewer *asks* for them in their feedback; only the author
+  attaches files, so the record of who supplied what stays clean.
+
+### The platform level: reviewers and review teams
+
+Once the owner publishes an idea to the platform, platform admins route it to a **review
+team** (`reviews/review_teams.py`, console page *Reviewers*, and *Assign to a review team* on
+an idea):
+
+- **Making reviewers.** A new permission, `administration.manage_reviewers`, lets an admin turn
+  an existing account into a platform reviewer (the "Platform reviewers" group) and form
+  reviewers into teams. It is separate from `assign_platform_reviewers` (routing an idea to a
+  team), so whoever builds teams need not be whoever hands them work. Until this existed
+  there was no way to make a reviewer outside the test suite.
+- **One lead, many contributors.** A team has a lead (always a member). Every member can read
+  the idea and send it back to its owner for changes; **only the lead approves or rejects**, so
+  every decision has one accountable name. `Review.decided_by` records who actually recorded a
+  decision when it was not the person who opened the round.
+- **Routing rules.** An idea can be routed once it has reached the platform and is not already
+  under review; not to a retired team; not to a team that includes its author; and an admin
+  cannot hand work to a team they lead. A team-routed idea can be worked only by that team's
+  members; an unrouted one is open to any reviewer, as before.
+- **Status.** While a team works it, the idea reads "under review"; when the lead approves it
+  reads "approved" (admin console included).
+
+**The proposal, and the go-ahead after it (`reviews/proposals.py`).**
+
+1. After the lead approves, the review team **writes the proposal** on the idea's page: any member
+   edits, only the **lead** sends it to the admin, and only once the executive summary, problem,
+   proposed solution, scope, deliverables, timeline and acceptance criteria are filled in.
+2. A platform admin holding the new `administration.release_proposals` permission (console page
+   *Proposals*) **releases** it to the owner, **sends it back** with feedback, or **declines** it
+   with a reason. Anyone who wrote or sent the proposal is refused, even holding the permission.
+   Every decision is audited.
+3. The owner is notified and reads it at `/app/ideas/:id/proposal`, a **view-only** page: no
+   download, copy, cut, drag, right-click or print, and the reader's name, email and the time as
+   a watermark across it. Each opening is recorded (`IdeaProposalView`). The page says plainly
+   that a photo or screenshot of the screen cannot be prevented - the watermark is the deterrent.
+   The owner never sees the proposal before it is released, and never edits it.
+4. The owner gives the **go-ahead from that page**. The go-ahead is refused until a proposal has
+   been released (`ideas.go_ahead.NO_PROPOSAL`). The review report page no longer has a go-ahead
+   button; it points to the proposal.
+5. The go-ahead **opens the automation opportunity in the same transaction**, already *ready for
+   assignment* and carrying the accepted proposal, and notifies the delivery managers, who assign
+   a developer from the Developer Queue.
+
+This **replaces** the earlier Sprint 4 flow: there is no longer a delivery-team proposal that the
+owner accepts, no manual "Create Automation Opportunity" for the owner, and no draft, discovery,
+requirements, solution-design or proposal stages on an opportunity. Requirements and the solution
+remain as the delivery team's working material while the opportunity is ready, assigned or under
+way. The old stage names stay in the database vocabulary (no rows use them) so no migration was
+needed to remove them.
+
 
 ## 1. Teams
 
@@ -112,6 +202,13 @@ it and the security is identical.
 - **Bound to an email address.** Acceptance requires that the signed-in account's
   own stored address matches, case-insensitively. Signed in as somebody else is
   *refused*, not silently switched.
+- **Declinable, by the recipient only.** `PENDING -> DECLINED`, with the decliner
+  and the moment recorded and a CHECK constraint pairing them, refused *before*
+  the claim so a link cannot be burned for its real recipient. **It creates
+  nothing and deactivates nothing** - there is no membership to undo, because
+  acceptance is the only writer of one; what it writes is the invitation's own
+  terminal state, which is the record an inviter is asking for when they wonder
+  whether a link went stale or was turned down.
 - **Unguessable.** `token` is 32 bytes of `secrets.token_urlsafe`; only its
   SHA-256 digest is stored. A dump of the table cannot be replayed, and the
   plaintext exists in exactly one place - the email.
@@ -137,8 +234,8 @@ because a team owner inviting a co-owner is the ordinary thing.
 
 ### Refusals on acceptance
 
-An unknown, revoked, expired or already-accepted token, and a token whose address
-is not the signed-in account's, all refuse - and the messages are deliberately
+An unknown, revoked, expired, already-accepted or already-**declined** token, and
+a token whose address is not the signed-in account's, all refuse - and the messages are deliberately
 uninformative about *which* half failed, so the endpoint cannot be used to
 confirm that an invitation existed. "No account yet" is not handled here: the
 frontend sends an unauthenticated visitor to register first and back to the link.
@@ -154,11 +251,28 @@ invitation only. Sent on `transaction.on_commit`, plain text, and never raises -
 a delivery failure is logged, the invitation still stands, and the inviter can
 revoke it and send another.
 
+### Telling the recipient
+
+An address that already has an account is told **in the app** as well as by
+email (`invitation.received` - a kind that was declared in the vocabulary and
+emitted by nothing until now). An address with no account gets the email only,
+which is the right answer for somebody who has never signed in.
+
+**The in-app notification carries no accept link, and that is deliberate.**
+Acceptance needs the plaintext token; only its digest is stored, and the email is
+the only place the token exists. So the notification says what happened and where
+to look, and the link in the app is to the notifications list. A fabricated link
+that cannot work would be worse than no link.
+
 ### Frontend
 
 `/invitations/accept?token=…` is a **top-level** route, not an `/app` child: the
 recipient may have no account yet, and the invitation may be the reason they
-arrive. It shows only what `invitationDetails` returns - scope, tenant name,
+arrive. **Join and Decline sit side by side**, each disabled while the other runs,
+because a reader who does not want this needs a way to say so that is not
+"close the tab". The three dead states - expired, revoked, declined - are kept
+apart in the copy, because they mean three different things to the person looking
+at them. It shows only what `invitationDetails` returns - scope, tenant name,
 role, address, state - so a link that leaked reveals nothing about the tenant.
 It refuses politely when the reader is signed in with another address, because it
 has no way to switch accounts and saying so beats failing with a redirect.
@@ -284,6 +398,29 @@ to it, and the report stays behind authentication.
 `is_read_at`, which is that reader's own business, and `recipient` is `PROTECT`:
 deleting an account must not rewrite the fact that somebody was told something.
 
+### Where a notification takes you
+
+`Notification.action_path` is **derived**, from the kind and the ids the row
+already holds, and never stored. A stored URL is a second copy of the product's
+routes that goes stale silently; a derived one is edited in one place. The rules:
+
+- a notification carrying a `report` goes to that idea's report page, and
+  `DECISION_KINDS` is the gate - so a queue nudge cannot send somebody to an
+  approval report;
+- a notification carrying an `idea` goes to that idea, **only if this recipient
+  may still read it**. A notification outlives the access it was written under:
+  an author removed from an organization, or a shared device, must not be handed
+  a link to something they can no longer open;
+- an invitation has **no** link, because acceptance needs a token the server
+  stores only as a digest;
+- everything else - a message, a queue nudge - goes to its list, or nowhere.
+
+One mapping serves the in-app link and any payload built from the same row, so a
+notification tapped in a browser and one delivered by any future channel cannot
+land on different screens. The client used to compose its own destinations out of
+`ideaId` and the kind, which is how three links came to point at a route that did
+not exist.
+
 ### Frontend
 
 `/app/notifications`, plus a bell in the app chrome whose badge is the **server's**
@@ -291,6 +428,20 @@ count (`unreadNotificationCount`), asked once per mount so it is right even on a
 page where the list has never been opened. Marking read is per notification and
 "mark all read" - a person clearing their inbox has one intent, and a partial
 clear invites repeated clicking.
+
+## 4.1 What the administration console sees
+
+The console reads all four of these, and writes none of it - see
+[`administration.md`](administration.md) §3.1 for why that is the domains'
+position rather than a gap. What it adds is `access_console` plus one rule worth
+knowing here: **a message body is content**, so it is behind
+`inspect_idea_content` like idea content, while everything else about a
+conversation is metadata.
+
+That rule reaches further than the body. `messaging.services.start_thread`
+defaults an anchored thread's subject to its idea's title, so a thread subject is
+sometimes an idea title - and both the console's redaction and its search follow
+the title's rule rather than treating the subject as the writer's own words.
 
 ## 5. Deliberately not here
 
@@ -303,6 +454,11 @@ clear invites repeated clicking.
   editing.** A message is a record of what was said to named people.
 - **No notification preferences, digests, batching or per-kind muting.** One
   email per delivery event, and the list is the record.
+- **No push.** There is no push subsystem in this project at all - no VAPID keys,
+  no subscription model, no delivery library, no service worker - and nothing here
+  pretends otherwise. What the notification surface does provide is the substrate
+  any channel needs: one server-derived `actionPath` per notification, so an
+  in-app link and a future payload are built from the same mapping.
 - **No Celery.** Notifications and emails are delivered synchronously on commit;
   the queue is still the plan for anything that must retry.
 

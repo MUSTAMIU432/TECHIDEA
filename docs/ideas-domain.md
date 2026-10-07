@@ -10,6 +10,16 @@ implements no business operation, no GraphQL operation and no UI. What is
 specified but not yet built is written down here so the next sprint has a
 contract rather than a guess.
 
+**Corrected against the code.** The submission-context phase changed this
+domain's shape - three contexts instead of one tenant, an organization stage
+in front of the platform stage, `TEAM` as a visibility, a frozen submission
+version and the owner's go-ahead - and the sections below were written before
+it. Lifecycle, Visibility, the tenancy rules, the constraint and index tables,
+the selector list and the GraphQL and frontend boundaries have been brought
+back into agreement with `backend/ideas/` on `feature/reviews`; the S2 and S3
+narratives further down are left as they were written, because a record of what
+each sprint decided is worth more than a document that was always current.
+
 For the whole-platform picture see [`architecture.md`](architecture.md).
 
 ## Purpose
@@ -30,30 +40,79 @@ require a migration of an idea.
 ## Entities
 
 ```
-Organization                       User
-    │                                 │
-    ├── Idea                         ├── authored Ideas      (ideas.ideas)
-    │     ├── Category               ├── Comments           (idea_comments)
-    │     ├── Comment                ├── Votes              (idea_votes)
-    │     ├── Vote                   └── Attachments         (idea_attachments)
-    │     └── Attachment
+Organization                       Team                        User
+    │                                │                           │
+    ├── Idea                        ├── Idea                    ├── authored Ideas      (ideas_ideas)
+    │     ├── Category               │     ├── Category          ├── Comments           (idea_comments)
+    │     ├── Comment                │     ├── Comment           ├── Votes              (idea_votes)
+    │     ├── Vote                   │     ├── Vote              └── Attachments        (idea_attachments)
+    │     ├── Attachment             │     ├── Attachment
+    │     ├── IdeaTransition         │     └── IdeaTransition
+    │     └── IdeaSubmissionVersion  └── IdeaSubmissionVersion
     │
-    └── Membership
+    └── Membership                  TeamMembership
+
+individual: no tenant column at all — the author is the tenant
 ```
+
+An `Idea` hangs off **one of three** owners, and the diagram above draws only
+two branches because an individual idea belongs to neither - see [Submission
+context](#submission-context).
 
 | Entity | Table | Notes |
 | ------ | ----- | ----- |
 | `Category` | `ideas_category` | Platform-wide, flat, reusable. Not tenant-scoped. |
-| `Idea` | `ideas_idea` | The submission, and the tenant boundary. |
+| `Idea` | `ideas_idea` | The submission. Its tenant is the **context**, not a column that is always set. |
 | `Comment` | `ideas_comment` | One idea, one authenticated author. A reply names its parent; one level deep. |
 | `Vote` | `ideas_vote` | One row per (user, idea). No value, no downvotes. |
 | `Attachment` | `ideas_attachment` | Metadata only; the bytes live in object storage. |
+| `IdeaTransition` | `ideas_ideatransition` | One append-only row per successful status change: from, to, actor, when. The lifecycle's audit trail (S3-007). |
+| `IdeaSubmissionVersion` | `ideas_ideasubmissionversion` | The idea's content **frozen** at the moment it went to the platform. Never written again (see [Locked submissions](#locked-submissions-the-platform-holds-a-copy)). |
 
 `Category` is deliberately **not** organization-scoped. It is what makes two
 organizations' ideas comparable to each other, which is the input a future
 cross-tenant discovery or matching feature needs. An organization-scoped
 category would silently make "customer support" in one company unrelated to
 "customer support" in another.
+
+## Submission context
+
+**Every idea has exactly one creation context, and it is stated rather than
+inferred.**
+
+| `submission_context` | Owner column | Who may file one | Who validates it first |
+| -------------------- | ------------ | ---------------- | ---------------------- |
+| `individual` | none - the author *is* the tenant | any active user | the platform |
+| `team` | `team` | an active member of that team | the platform |
+| `organization` | `organization` | an active member of that organization | **its own organization**, then the platform |
+
+This is the field that replaced "an idea belongs to an organization". The
+organization column is **nullable**, because a user with no organization can
+file an individual idea and take it all the way through platform review - so
+the tenant cannot be inferred from the row and has to be stated.
+
+**One model, three contexts, deliberately.** Not `IndividualIdea` /
+`TeamIdea` / `OrganizationIdea`: a comment, a vote, an attachment, a review and
+a lifecycle status all mean the same thing in every context, and splitting the
+model would mean either duplicating all of them or making them multi-table
+foreign keys. What the context changes is *who may see it* and *whose review
+comes first* - never the shape of the row.
+
+**Enforced three times, on purpose.** The write path proves it
+(`services._resolve_context`, which refuses a mismatched combination with a
+message naming the impossible pair), `Idea.clean()` repeats it, and
+`idea_submission_context_matches_tenants` enforces it in the database. Three
+enforcements of one rule is not redundancy to be tidied away: each catches a
+path the other two do not - a service that forgot to ask, a `bulk_create` that
+bypasses `full_clean()`, and a future app writing a row directly.
+
+The two contexts are proved differently, and the difference is the point: a
+team submission needs an active **team membership** (filing is not submitting,
+so it is not `team.ideas.submit`), an organization submission needs an active
+**organization membership** through the same
+`organizations.authorization.get_membership` every other write uses, and an
+individual submission needs nothing beyond being an active user filing their
+own idea.
 
 ### The problem story (guided intake form)
 
@@ -99,10 +158,10 @@ Design decisions:
   duplicate `description`) and `proposed_solution` is **deliberately never
   asked of the author**.
 - **Same rules as all content.** Written only through `create_idea` /
-  `update_idea` (author, active member, editable status); read through the
-  same visibility-filtered selectors as `description`. An update writes the
-  whole input, so an omitted answer is cleared - the form always sends every
-  field.
+  `update_idea` (author, per-context tenant standing, editable status); read
+  through the same visibility-filtered selectors as `description`. An update
+  writes the whole input, so an omitted answer is cleared - the form always
+  sends every field.
 - `IDEA_STORY_FIELDS` lists the columns once; the review snapshot
   (`reviews.services._submission_snapshot`, key `story`) uses it so a
   reviewer's record of what they assessed includes every answer.
@@ -162,50 +221,86 @@ Reverse accessors are named for what they are, not for symmetry:
 
 ## Lifecycle
 
-| Status | Meaning | Sprint |
-| ------ | ------- | ------ |
-| `DRAFT` | Being written. May be incomplete. Visible per `visibility`. | S2-002 |
-| `SUBMITTED` | Put forward for review. | S2-002 |
-| `UNDER_REVIEW` | A reviewer is looking at it. | S2-003 |
-| `CHANGES_REQUESTED` | Sent back to the author with reasons. | S2-003 |
-| `REJECTED` | Not going forward. | S2-003 |
-| `APPROVED` | Accepted as worth automating. | S2-003 |
-| `AUTOMATION_PROPOSAL` | Handed off to the opportunity/proposal track. | S2-003 |
+Eleven statuses, in two stages. The **organization stage** exists only for an
+organization-context idea; the **platform stage** is identical for all three
+contexts, so no code after it has to ask what kind of idea it is looking at.
 
-The vocabulary was established in S2-001 and every transition above is
-implemented in S2-003, so the review workflow is behaviour rather than a
-migration. What is *not* implemented is the management of it: there is no
-review queue, no reviewer assignment, no reason text on a changes-requested
-idea, and nothing acts on an idea once it reaches `AUTOMATION_PROPOSAL`.
+| Status | Meaning | Reached in |
+| ------ | ------- | ---------- |
+| `DRAFT` | Being written. May be incomplete. Visible per `visibility`. | any context |
+| `SUBMITTED_TO_ORGANIZATION` | Put forward to the idea's **own organization** to confirm. | organization only |
+| `ORGANIZATION_CHANGES_REQUESTED` | The organization asked for changes. | organization only |
+| `ORGANIZATION_CONFIRMED` | The organization confirmed this is what it wants to submit. Not yet a submission. | organization only |
+| `SUBMITTED` | Submitted **to the platform**, and frozen as a version. | any context |
+| `UNDER_REVIEW` | A platform reviewer has it. | any context |
+| `CHANGES_REQUESTED` | The platform sent it back with reasons. | any context |
+| `REJECTED` | Not going forward. Terminal. | any context |
+| `APPROVED` | The platform approved it. **Waiting for the owner's confirmation.** | any context |
+| `READY_FOR_IMPLEMENTATION` | The owner gave the go-ahead. Handed to the developer track. | any context |
+| `AUTOMATION_PROPOSAL` | In the opportunity/proposal track. | any context |
 
-### Transition matrix (implemented, S2-003)
+**`organization_review` is deliberately not a status.** "A reviewer has it
+open" is a fact about the `reviews.Review` row, and is exactly the duplication
+that `Review`'s docstring argues against when it declines to carry a `status`
+column. The idea is `SUBMITTED_TO_ORGANIZATION` the whole time somebody is
+looking at it.
 
-The table is `ideas.lifecycle.TRANSITIONS`: `(from, to) -> required actor`.
-It is the whole lifecycle — anything not listed is not a transition, and
-`transition_idea` refuses it.
+**`APPROVED` is deliberately one state, not two.** "platform approved" and
+"platform approved, awaiting the owner's go-ahead" would be a distinction
+without a second possible action: from `APPROVED` the only move in the whole
+domain is the owner's explicit go-ahead, and it is guarded the same way either
+way. A client renders it as "Platform Approved — Your Confirmation Needed",
+which is what `ideas.states.FRIENDLY_LABELS` says and why.
 
-**Review-owned moves (S3-004).** Four of the reviewer's pairs —
-`SUBMITTED → UNDER_REVIEW` and `UNDER_REVIEW → CHANGES_REQUESTED | APPROVED |
-REJECTED` — are `lifecycle.REVIEW_OWNED_TRANSITIONS`. `transition_idea`
-refuses them (after the actor check, so only a would-be reviewer learns why)
-and `availableTransitions` never lists them; they are made only by the
-Reviews domain's `startReview` / `completeReview`, through
-`lifecycle.apply_review_transition`, in the same transaction as the `Review`
-record. The matrix itself is unchanged. See
-[`reviews-domain.md`](reviews-domain.md) §5.
+**`READY_FOR_IMPLEMENTATION` means the owner authorized this idea to proceed.**
+It does **not** mean a developer was selected, a project exists, or any work
+has started.
 
-| From | To | Actor |
-| ---- | -- | ----- |
-| `DRAFT` | `SUBMITTED` | author |
-| `SUBMITTED` | `UNDER_REVIEW` | reviewer |
-| `UNDER_REVIEW` | `CHANGES_REQUESTED` | reviewer |
-| `UNDER_REVIEW` | `APPROVED` | reviewer |
-| `UNDER_REVIEW` | `REJECTED` | reviewer |
-| `CHANGES_REQUESTED` | `SUBMITTED` | author |
-| `APPROVED` | `AUTOMATION_PROPOSAL` | reviewer |
+The vocabulary was established in S2-001 and every transition is implemented,
+so the review workflow is behaviour rather than a migration. What is *not*
+implemented is the far end: nothing acts on an idea once it reaches
+`AUTOMATION_PROPOSAL`.
 
-`SUBMITTED → REJECTED` is deliberately absent: a submission has to be picked
-up before it can be resolved, which is what the `UNDER_REVIEW` state records.
+### Transition matrix
+
+The table is `ideas.lifecycle.TRANSITIONS`: `(from, to) -> required actor`. It
+is the whole lifecycle — anything not listed is not a transition, and
+`transition_idea` refuses it. There are **three** kinds of actor, and the
+matrix names them rather than a bare boolean.
+
+| From | To | Actor | Context |
+| ---- | -- | ----- | ------- |
+| `DRAFT` | `SUBMITTED_TO_ORGANIZATION` | author | organization |
+| `DRAFT` | `SUBMITTED` | author | individual, team |
+| `SUBMITTED_TO_ORGANIZATION` | `ORGANIZATION_CHANGES_REQUESTED` | organization reviewer | organization |
+| `SUBMITTED_TO_ORGANIZATION` | `ORGANIZATION_CONFIRMED` | organization reviewer | organization |
+| `ORGANIZATION_CHANGES_REQUESTED` | `SUBMITTED_TO_ORGANIZATION` | author | organization |
+| `ORGANIZATION_CONFIRMED` | `SUBMITTED` | author | organization |
+| `SUBMITTED` | `UNDER_REVIEW` | platform reviewer | any |
+| `UNDER_REVIEW` | `CHANGES_REQUESTED` | platform reviewer | any |
+| `UNDER_REVIEW` | `REJECTED` | platform reviewer | any |
+| `UNDER_REVIEW` | `APPROVED` | platform reviewer | any |
+| `CHANGES_REQUESTED` | `SUBMITTED` | author | any |
+| `APPROVED` | `READY_FOR_IMPLEMENTATION` | **author** | any |
+| `READY_FOR_IMPLEMENTATION` | `AUTOMATION_PROPOSAL` | platform reviewer | any |
+
+**The context column is `lifecycle.context_allows`, and it is load-bearing.**
+The matrix is decided over statuses, so `DRAFT → SUBMITTED` appears in it once
+- as "an individual or team author submits their idea". For an *organization*
+author the same pair would be a way to put an idea in front of the platform
+without its organization ever seeing it, which would make the entire
+organization stage optional and every organization-review guarantee in the
+module decorative. So each pair is legal only for the contexts it means, and a
+refusal is about the *idea* rather than the caller: the person asking is the
+author, who is allowed to submit; the thing they cannot do yet is skip a stage
+their organization owns. Checked in the same two places as the actor rule -
+`can_transition`, which renders what the UI offers, and the two write paths -
+so an idea cannot be offered a move that would be refused, nor moved by one
+that would have been.
+
+`SUBMITTED → REJECTED` is deliberately absent, in both stages: a submission has
+to be picked up before it can be resolved, which is what the `UNDER_REVIEW`
+state (or the open organization review) records.
 
 **Nothing returns to `DRAFT`.** A draft is by definition an idea with no
 `submitted_at`, so moving back to it would have to either erase an audit fact
@@ -213,48 +308,86 @@ or contradict the model's own invariant. The route back to the author is
 `CHANGES_REQUESTED → SUBMITTED`, without pretending the idea was never
 submitted.
 
-**What the author can change while changes are requested (S3-005).** The
-content: `update_idea` accepts an idea in `services.EDITABLE_STATUSES` -
-`DRAFT` and `CHANGES_REQUESTED` - for its author, with an active membership,
-and the same validation as a draft. **Visibility is fixed once submitted**:
-in `CHANGES_REQUESTED` a different visibility is refused as a field error,
-because narrowing an idea under review would hide it from its reviewers
-([`reviews-domain.md`](reviews-domain.md) D-6). The author then resubmits
-with the existing `submitIdea` (`CHANGES_REQUESTED → SUBMITTED`, re-running the
-submission validation; `submitted_at` keeps its first value), and may attach
-further evidence at any point. The flow is
+**Review-owned moves.** Six of the pairs are `lifecycle.REVIEW_OWNED_TRANSITIONS`:
+`SUBMITTED_TO_ORGANIZATION → ORGANIZATION_CHANGES_REQUESTED | ORGANIZATION_CONFIRMED`,
+and `SUBMITTED → UNDER_REVIEW`, `UNDER_REVIEW → CHANGES_REQUESTED | APPROVED |
+REJECTED`. `transition_idea` refuses them (after the actor check, so only a
+would-be reviewer learns why) and `availableTransitions` never lists them: each
+must leave a `Review` row written in the same transaction as the status change,
+so they are made only by `reviews.organization_review` /
+`reviews.services` through `lifecycle.apply_review_transition`. The matrix
+itself is unchanged - these are still the lifecycle's moves and still need a
+reviewer of the right kind; what changes is that they cannot be made without a
+review. `TRANSITION_REVIEW_SCOPE` fixes which track each belongs to, so a
+platform decision can never be recorded as an organization one. See
+[`reviews-domain.md`](reviews-domain.md) §5.
 
-    CHANGES_REQUESTED → author edits → SUBMITTED → a reviewer starts round n+1
+`READY_FOR_IMPLEMENTATION → AUTOMATION_PROPOSAL` is **not** review-owned: no
+review is open by then, and `APPROVED → READY_FOR_IMPLEMENTATION` is the
+owner's rather than a reviewer's. It is the hand-off to the automation-opportunity track, and the go-ahead that
+precedes it survives it - which is why `idea_go_ahead_only_when_ready` names
+both states explicitly. Nothing in this
+repository acts on the resulting state and no UI offers the move; it exists so a
+later sprint is behaviour rather than a migration.
 
-Nothing in it touches a review: the completed review that asked for the
-changes is immutable and keeps its own snapshot, and resubmission creates no
-review - the next round exists only once a reviewer calls `startReview`.
+**The three actors, and why the platform one is not an organization role.**
 
-**The two actors.** Before review begins the lifecycle belongs to the author,
-who must still hold an active membership; from `SUBMITTED` onward it belongs
-to a *reviewer* — an active member holding the **`idea.review`** permission in
-the idea's own organization, who is **not** the author. The self-review
-exclusion is structural rather than a matter of hoping two roles go to
-different people: bootstrap makes everybody's own organization theirs, so an
-author who also holds the `Owner` role genuinely holds `idea.review`, and no
-permission check would catch them.
+- **Author.** The idea's `author_id`, and they must still hold standing in the
+  idea's tenant - an organization membership, a team membership, or, for an
+  individual idea, nothing, because the author *is* its tenant. Checked per
+  context in `_require_tenant_standing`.
+- **Organization reviewer.** An active member of the idea's **own organization**
+  holding `idea.review` there, and not the author
+  (`lifecycle.is_organization_reviewer`). The self-review exclusion is
+  structural rather than a matter of hoping two roles go to different people:
+  bootstrap makes everybody's own organization theirs, so an author who also
+  holds `Owner` genuinely holds `idea.review`, and no permission check would
+  catch them.
+- **Platform reviewer.** An account holding the platform-scoped
+  `administration.review_platform_submissions` permission, and not the author
+  (`lifecycle.is_platform_reviewer`). No organization membership, no
+  organization role, no team role - so no code path exists in which holding
+  `idea.review` anywhere also confers platform review. Platform review is
+  cross-tenant by construction, so a platform move is **exempt** from the
+  tenant-standing check: requiring membership would make the platform track
+  unreachable for anybody outside the idea's own tenant, which is the track not
+  working rather than a restriction. The authorization is the platform
+  permission, and `ideas.selectors.can_view_idea` has already established that
+  this reviewer may read the submission.
 
-**From system role to `idea.review` (S3-002).** Until S3-002 the reviewer gate
-was "holds a system role", which meant only an Owner could review. It is now
-the `idea.review` permission, checked through
+**From system role to `idea.review` (S3-002).** The reviewer gate used to be
+"holds a system role", which meant only an Owner could review. It is now the
+`idea.review` permission, checked through
 `organizations.authorization.membership_has_permission` like every other
 capability. The Owner role holds it (at bootstrap, and by migration
 `organizations/0003` for organizations that already existed), so nobody who
 could review lost the ability; the non-system **Reviewer** role holds it too,
-so reviewing can be granted without ownership. See
-[`reviews-domain.md`](reviews-domain.md) §6.
+so organization reviewing can be granted without ownership.
 
-`submitted_at` is set once, by the first `DRAFT → SUBMITTED`, and never
+**What the author can change while changes are requested (S3-005, extended).**
+The content: `update_idea` accepts an idea in `services.EDITABLE_STATUSES` -
+`DRAFT`, `CHANGES_REQUESTED` and `ORGANIZATION_CHANGES_REQUESTED` - for its
+author, who must still hold tenant standing, with the same validation as a
+draft. **Visibility is fixed once submitted**: in either changes-requested
+state a different visibility is refused as a field error, because narrowing an
+idea under review would hide it from its reviewers
+([`reviews-domain.md`](reviews-domain.md) D-6). The author then resubmits with
+the existing `submitIdea` (re-running the submission validation;
+`submitted_at` keeps its first value), and may attach further evidence at any
+point. The flow is
+
+    CHANGES_REQUESTED → author edits → SUBMITTED → a reviewer starts round n+1
+
+and the same shape one stage earlier for the organization. Nothing in it
+touches a review: the completed review that asked for the changes is immutable
+and keeps its own snapshot, and resubmission creates no review - the next round
+exists only once a reviewer claims it.
+
+`submitted_at` is set once, by the first move out of `DRAFT`, and never
 rewritten: it is an audit fact, and `created_at` (the row was written) and
 `submitted_at` (somebody deliberately put it forward) are genuinely different
-moments. A re-submission after `CHANGES_REQUESTED` keeps the original stamp.
-The model enforces that a draft has no `submitted_at` and anything else has one,
-which is why a transition writes the two together.
+moments. The model enforces that a draft has no `submitted_at` and anything
+else has one, which is why a transition writes the two together.
 
 **Concurrency.** Every transition reads its row with `SELECT … FOR UPDATE`
 inside the transaction, so two transitions of the same idea cannot both read
@@ -262,6 +395,93 @@ the same starting status and both succeed: the second waits, then re-reads a
 status that no longer permits its move. Without the lock, "approve" and
 "reject" fired together would both apply and the last write would silently
 win.
+
+### What a status means to the person reading it
+
+`ideas/states.py` is the third question this domain has to answer - *where is
+my idea, who is reviewing it, what do I need to do next* - and it answers it
+**per (idea, reader)**:
+
+- `FRIENDLY_LABELS` / `SHORT_LABELS`: one label per status, deliberately more
+  specific than `Status.label`. "Under review" was true of every review the
+  platform did, which is no longer true; `PLATFORM_APPROVED` reading as
+  "Approved" is what made a user think the idea was done when it was waiting on
+  them.
+- `Stage`: six buckets, and `stages_for(idea)` drops the two organization steps
+  for an individual or team idea rather than drawing them struck through - a
+  progress bar that can never complete is worse than a shorter honest one.
+- `primary_action_for(user, idea)`: **one** next action, read from
+  `lifecycle.available_transitions` plus the two eligibility predicates. It can
+  therefore never offer something the server would refuse, and an author and a
+  reviewer looking at the same approved idea see different things - which is
+  the whole point of a state-aware UI.
+- `TERMINAL_STATUSES = {REJECTED}`. `REJECTED` is the only terminal state the
+  platform itself produces; "done" is the word that made people think an
+  approved idea was on its way to a developer when it was waiting for its owner.
+
+Nothing in that module mutates and nothing in it authorizes: it is
+presentation, and every action it names is enforced by the service behind it.
+
+### Locked submissions: the platform holds a copy
+
+`Idea.is_locked` is `platform_locked_at is not None` and nothing else, so
+"locked" has exactly one definition in the codebase.
+
+When - and only when - an idea moves to `SUBMITTED`, `ideas/versions.py`
+copies its content into an **`IdeaSubmissionVersion`** inside the same
+transaction, and stamps `platform_locked_at` and `platform_version` on the
+same save (they are constrained to move together by
+`idea_platform_lock_matches_version`, so two saves could not be written at
+all). Three consequences, each a requirement the module exists for:
+
+1. **A reviewer approves a specific thing.** The platform reviews the version,
+   not the mutable row.
+2. **Answering feedback never rewrites history.** The author edits the working
+   copy, resubmits, and version n+1 appears beside version n. The old round's
+   review still describes the old submission.
+3. **"Locked" needs no special case in the edit path.** Because the official
+   copy is a different row, `update_idea` does not have to know that locking
+   exists in order to be correct - the thing that must not change cannot be
+   changed by editing the row that is allowed to change.
+
+A resubmission creates a **new** version; nothing overwrites one, and
+`unique_current_version_per_idea` is the backstop for two submissions racing to
+be the official one. Unlocking is not an operation this domain has.
+
+### The owner's go-ahead
+
+`ideas/go_ahead.py` keeps three facts apart which a single "approved" state
+would collapse:
+
+    PLATFORM_APPROVED  a platform reviewer approved it; a report was generated
+                       and delivered to the owner.
+    GO-AHEAD           the **owner** has read that report and authorized this
+                       idea to proceed toward implementation.
+    READY              the idea is handed to the developer track.
+
+Only the second is the owner's to give, and only the author's: not an
+organization Owner, not a team Owner, not a platform administrator. A company
+cannot approve its own member's idea into implementation, and no role anywhere
+can stand in for the person who wrote it. Deliberately unfriendly to
+automation:
+
+- **Opening the report is not approval.** `confirm_go_ahead` does not care
+  whether the report has been opened; a `platform_report_read_at` column would
+  be a temptation to infer consent from a page view, and consent inferred from
+  a page view is not consent.
+- **Receiving the email or the notification is not approval.** Both are
+  delivered by `notifications.services.deliver`, after the commit and never
+  raising, and this module has no coupling to it.
+- **The click must be the author's**, recorded as `owner_go_ahead_at` /
+  `owner_go_ahead_by` (`PROTECT`: an audit fact must not vanish with an
+  account) by the transition itself, so an idea cannot reach implementation
+  without an attributable moment and an attributable person.
+
+`confirm_go_ahead` is a thin wrapper over the lifecycle's
+`apply_owner_go_ahead`, which has exactly one caller. The *meaning* of the
+operation lives in `go_ahead`; the *move* stays in the matrix, because that is
+the only place in the platform that decides who may take an idea from one
+status to another.
 
 ### Why the free-text fields are blank-able
 
@@ -273,12 +493,36 @@ constrain review states this domain does not own.
 
 ## Visibility
 
+**Ownership and audience are separate facts.** `submission_context` and its two
+nullable tenant columns say *whose* idea this is; `visibility` says *who may read
+it*. They are stored separately and no write path sets one from the other, so a
+team idea made `PUBLIC` is still that team's - which is the property
+`ideas/tests/test_ownership.py` pins from both sides.
+
+> **Superseded in part.** The audience of an idea now follows its level and is not
+> chosen; there is no `PUBLIC` option and `ideas.services.AUDIENCE_BY_CONTEXT`
+> replaces `SELECTABLE_VISIBILITIES_BY_CONTEXT`. See `collaboration.md` section 0.
+> The table below describes the values that exist in the column.
+
 | Visibility | Who may read the idea | Enforceable today |
 | ---------- | -------------------- | ----------------- |
 | `PUBLIC` | Any authenticated platform user, in any organization. | Yes |
-| `ORGANIZATION` | Any active member of the idea's organization. | Yes |
+| `ORGANIZATION` | Any active member of the idea's **organization**. Offered only on an organization idea. | Yes |
+| `TEAM` | Any active member of the idea's **team**. Offered only on a team idea. | Yes |
 | `DEPARTMENT` | Active members of the idea's organization who are also in the author's department. | **No — fails closed** |
 | `PRIVATE` | The author only. | Yes |
+
+`TEAM` exists because `visibility=ORGANIZATION` on a team idea used to mean "my
+team", which made an idea's owner and its audience the same word — and the one
+thing a reader of a list cannot be allowed to confuse. Each value is now scoped to
+the tenant it actually names: a team idea is not readable through an organization
+membership and an organization idea is not readable through a team one.
+
+**The audience must belong to the owner's kind.** `ideas.services
+.SELECTABLE_VISIBILITIES_BY_CONTEXT` offers `private` and `public` in every
+context and one tenant audience per context; anything else is refused with a
+sentence that says which combination is impossible rather than a generic "choose
+who can see this".
 
 `DEPARTMENT` fails closed in both directions. The service **refuses it as a
 choice** (`ideas.services.SELECTABLE_VISIBILITIES` omits it, so the picker
@@ -296,6 +540,16 @@ are in `ideas/selectors.py` and a test asserts they agree for every
 `selectors.get_idea_for_update`, the same filter with `FOR UPDATE` added, so
 "you may not see it" and "you may not act on it" cannot come apart.
 
+**One branch is not the visibility rule: a submission the platform was actually
+sent.** `platform_reviewer_filter(user)` adds `platform_version >= 1` for an
+account holding the platform review permission. It is narrow on purpose -
+`platform_version` is stamped by `versions.freeze_submission` in the same
+transaction as the move to `SUBMITTED`, so it cannot match a draft, an idea
+still with its organization, or anything an author has not deliberately put
+forward. Without this branch the platform track would be unreachable for
+every reviewer outside the idea's own organization, and a platform reviewer is
+by definition not a member of it.
+
 `visibility` defaults to `PRIVATE`, so a new submission is visible to nobody
 but its author until somebody deliberately widens it. Code that forgets to
 consider visibility at all therefore leaks nothing.
@@ -305,21 +559,33 @@ who can read it, and nothing in the lifecycle widens (or narrows) visibility.
 Two consequences follow, both intended and both pinned by
 `ideas/tests/test_integration_security.py`:
 
-- An `ORGANIZATION` or `PUBLIC` *draft* is readable by its readers before it is
-  submitted. Drafts are only author-only when they are `PRIVATE`.
-- A `PRIVATE` idea cannot be submitted (S3-008,
-  [`reviews-domain.md`](reviews-domain.md) D-6). A reviewer can only act on
-  an idea they can read (see [Transition matrix](#transition-matrix-implemented-s2-003)),
-  so a submitted `PRIVATE` idea would wait in `SUBMITTED` where no reviewer
-  could reach it. Every move to `SUBMITTED` - the first submission and a
-  resubmission - therefore requires `ORGANIZATION` or `PUBLIC`
-  (`services.REVIEWABLE_VISIBILITIES`, checked with the other submission
-  rules) and refuses anything else with a message telling the author to
-  widen it first. `PRIVATE` keeps its meaning: a private draft stays
-  author-only, and nothing widens visibility on the author's behalf. The
-  frontend says so next to the visibility picker. Ideas submitted as
-  `PRIVATE` before S3-008 are not changed; they stay out of every queue
-  until staff widen them in the Django admin with the author's agreement.
+- An `ORGANIZATION`, `TEAM` or `PUBLIC` *draft* is readable by its readers
+  before it is submitted. Drafts are only author-only when they are `PRIVATE`.
+- **What a submission must be readable by now depends on who reviews it**
+  (`services._validate_submission_visibility`). A reviewer can only act on an
+  idea they can read, so a submission nobody can read would wait in its queue
+  for ever:
+
+  | Context | Required to submit | Refusal |
+  | ------- | ------------------ | ------- |
+  | organization | `ORGANIZATION` or `PUBLIC` (`REVIEWABLE_VISIBILITIES`) | "A private idea cannot be reviewed. Share it with your organization or make it public before submitting." |
+  | individual, team | `PUBLIC` only | "An idea you submit on your own, or for a team, is reviewed by the platform. Make it public so platform reviewers can read it before submitting." |
+
+  The second row is the rule that surprises people, and it follows from the
+  platform track being cross-tenant: a platform reviewer holds no membership of
+  the author's team, so `TEAM` visibility would hide the very submission the
+  platform is waiting for. It is also why an individual or team idea has no
+  organization stage - there is nothing local to confirm it, and the platform
+  is the whole audience.
+
+  The rule applies to every move into a submission status - the first
+  submission, the resubmission after either track's changes request, and the
+  `ORGANIZATION_CONFIRMED → SUBMITTED` handoff - and is checked with the other
+  submission rules rather than as a field error. `PRIVATE` keeps its meaning: a
+  private draft stays author-only, and nothing widens visibility on the
+  author's behalf. The frontend says so next to the visibility picker. Ideas
+  submitted as `PRIVATE` before S3-008 are not changed; they stay out of every
+  queue until staff widen them in the Django admin with the author's agreement.
 
 ### DEPARTMENT is a reserved value, not a missing feature
 
@@ -352,15 +618,40 @@ There is **one** authorization mechanism in this platform and it is Sprint
 Every Ideas write operation therefore has this shape:
 
 ```python
-membership = authorization.require_permission(user, idea.organization, IDEA_UPDATE)
+_require_membership(user, idea.organization_id)   # organization context
 if idea.author_id != user.pk:
     raise ...
 ```
 
-The chain `User → Membership → Organization → Idea` is enforced by the fact
-that `Idea.organization` is **required on every row**: there is no such thing
-as an idea that exists outside a tenant, so a forgotten tenant filter cannot
-reach anything.
+**Tenant standing is proved per context, and the individual case proves
+nothing.** `services._load_editable_idea` and `lifecycle
+._require_tenant_standing` each branch three ways, and the two must agree -
+otherwise one of them refuses an operation the other allows:
+
+| Context | Proof required on every write |
+| ------- | ---------------------------- |
+| organization | an active `Membership` in `idea.organization` (`authorization.get_membership`) |
+| team | an active `TeamMembership` in `idea.team` (`teams.authorization.is_member_of`) |
+| individual | none - the author **is** the tenant |
+
+That branch is not a formality. It used to ask for an organization membership
+unconditionally, which meant a team or individual idea could not be edited by
+anybody, **its author included**: `organization_id` is null for those two, and
+a null tenant is not a membership. A team submission additionally needs
+`team.ideas.submit` to *submit* (`services.submission_target`) - filing is not
+submitting, which is why a plain member can file for a team while the
+submission itself is a permission the team's roles decide. A team can never be
+granted an approval permission, so that is the furthest a team reaches in the
+lifecycle.
+
+**The chain `User → Membership → Organization → Idea` is still enforced, but by
+the context rather than by a required column.** `Idea.organization` is
+**nullable** - it has to be, since an individual idea has no organization - so
+"there is no such thing as an idea outside a tenant" is now "there is no such
+thing as an idea whose tenant is not stated", enforced by
+`idea_submission_context_matches_tenants`, by `Idea.clean()` and by
+`_resolve_context`. A tenant filter that forgets the context cannot reach
+anything, because there is no fourth shape for a row to be in.
 
 ### Why there is no `ideas/permissions.py`
 
@@ -422,7 +713,11 @@ no bucket yet to presign a URL against.
 
 ## Database design
 
-Migration: `ideas/0001_initial.py`.
+Migrations: `ideas/0001_initial.py` through `ideas/0009_idea_team_visibility.py`.
+The later ones are additive — `0005` adds the context and its nullable tenant
+columns, `0006` the context CHECK, `0007` widens the go-ahead constraint so the
+survives the hand-off, `0008` drops the duplicate `Idea.team` index, and `0009`
+adds `TEAM` as a visibility value. **No migration moves a row.**
 
 ### Constraints
 
@@ -431,36 +726,55 @@ Migration: `ideas/0001_initial.py`.
 | `unique_category_name`, `unique_category_slug` | `Category` | Both are user-facing identifiers; a same-spelled category is a data-entry mistake, not two categories |
 | `idea_status_is_known` | `Idea` (`CHECK`) | `choices` only covers `full_clean()`; `bulk_create`, `QuerySet.update` and a management command all bypass it |
 | `idea_visibility_is_known` | `Idea` (`CHECK`) | Same |
+| `idea_submission_context_matches_tenants` | `Idea` (`CHECK`) | Exactly one of the three shapes, and no fourth. Without it an `individual` idea carrying an organization would silently inherit that organization's tenancy on every read, and an organization-context idea with no organization would be a row no reviewer could ever reach |
+| `idea_platform_lock_matches_version` | `Idea` (`CHECK`) | Lock and version number are one fact, so "submitted to the platform without a locked submission" is not a state a crash between two statements can leave behind |
+| `idea_go_ahead_only_when_ready` | `Idea` (`CHECK`) | The owner's go-ahead is exactly the move into `ready_for_implementation` (or the hand-off that follows it), and belongs to nobody else — so an idea cannot reach implementation without an attributable moment and person |
 | `unique_vote_per_user_idea` | `Vote` | A second vote must be impossible regardless of which service or adapter issued it - including two concurrent ones |
 | `storage_key` unique | `Attachment` | Two rows pointing at one object would make deleting either silent data loss |
+| `idea_transition_from_is_known`, `idea_transition_to_is_known`, `idea_transition_changes_status` | `IdeaTransition` | Both statuses are real and the move actually changed something, so a "transition" to the status it was already in cannot be recorded as history |
+| `version_number_unique_per_idea`, `unique_current_version_per_idea` (partial), `version_number_is_positive` | `IdeaSubmissionVersion` | The frozen copy is identified, and at most one version per idea is the current one — the backstop for two submissions racing to be official |
+
+`idea_go_ahead_only_when_ready` names `ready_for_implementation` **and**
+`automation_proposal` explicitly rather than testing "not before ready". A
+constraint that passes by exclusion stops being a fact about the go-ahead the
+moment a fourth state is added, and naming only the first state would have made
+the lifecycle's own hand-off unsatisfiable the moment it was taken.
 
 `Idea.category` is `PROTECT`, not `CASCADE`: an idea that has been submitted
 and reviewed must not be erased because someone tidied up the category list.
 Retirement (`is_active=False`) is the supported operation; deletion is only
 for a category that was never used.
 
-`Idea.organization` and `Comment`/`Vote`/`Attachment`'s `idea` are `CASCADE`:
-a row that exists only inside a tenant cannot outlive the tenant, which is
-the same rule `Membership` follows in Sprint 1.
+`Idea.organization` and `Idea.team` are `CASCADE`, and so are
+`Comment`/`Vote`/`Attachment`/`IdeaTransition`/`IdeaSubmissionVersion`'s `idea`:
+a row that exists only inside a tenant cannot outlive the tenant, which is the
+same rule `Membership` follows in Sprint 1. `IdeaTransition.actor`,
+`IdeaSubmissionVersion.submitted_by` and `owner_go_ahead_by` are `PROTECT` -
+users are deactivated, not deleted, and an audit fact must not disappear with an
+account.
 
 ### Indexes
 
-Django adds an index per foreign key by default. Three of `Idea`'s four FKs
-lead a composite index below, so a single-column index on them would be a
-strict prefix of an existing index and is switched off - every write to an
-idea would otherwise update an index PostgreSQL could never choose over the
-composite one. `ideas/tests/test_models.py::TestIdeaIndexes` asserts both the
-index set and this, so the two cannot silently diverge.
+Django adds an index per foreign key by default. Four of `Idea`'s FKs lead a
+composite index below, so a single-column index on them would be a strict
+prefix of an existing index and is switched off (`db_index=False`) - every
+write to an idea would otherwise update an index PostgreSQL could never choose
+over the composite one. `ideas/tests/test_models.py::TestIdeaIndexes` asserts
+both the index set and this, so the two cannot silently diverge.
 
 | Index | Columns | The query it serves |
 | ----- | ------- | ------------------- |
 | `ideas_org_created_idx` | `organization, created_at DESC` | The organization idea feed, newest first. The most common read. |
-| `ideas_org_status_idx` | `organization, status` | A tenant-scoped board filtered by state. Needed separately: a status filter is not a prefix of the index above, so without it PostgreSQL scans every idea in the tenant. |
+| `ideas_org_status_idx` | `organization, status` | A tenant-scoped board filtered by state - the organization review queue is the first consumer. Needed separately: a status filter is not a prefix of the index above, so without it PostgreSQL scans every idea in the tenant. |
+| `ideas_team_created_idx` | `team, created_at DESC` | A team's ideas, newest first. Leads on `team` for the same reason the organization index leads on `organization`: it is the tenant filter every team-scoped read includes. |
+| `ideas_author_status_idx` | `author, status, created_at DESC` | The author's action list - "my drafts", "changes requested", "reports awaiting my confirmation". `ideas_author_created_idx` cannot serve it: it has no status column, so the filter would scan that author's whole history. |
 | `ideas_category_created_idx` | `category, created_at DESC` | Browsing one category, newest first. Leads on the category so a category page is a single index range rather than a filter over the table. |
 | `ideas_vis_created_idx` | `visibility, created_at DESC` | Visibility-filtered discovery, newest first. The ordering is part of the access path, not a sort bolted on afterwards. |
 | `ideas_author_created_idx` | `author, created_at DESC` | "My ideas" - drafts, submissions, history. |
 | `comments_idea_created_idx` | `idea, created_at` | One idea's discussion, oldest first. The FK index cannot order the result. |
 | `attachments_idea_created_idx` | `idea, created_at` | One idea's files, oldest first. |
+| `ideas_trans_idea_created_idx` | `idea, created_at` | One idea's lifecycle history, oldest first. |
+| `versions_idea_version_idx` | `idea, version` | The submission history, oldest version first, and the "which version is current" probe the review workspace opens with. |
 
 No index on `status` or `visibility` alone: both are low-cardinality columns
 that are only ever queried with a tenant or a category alongside them, and the
@@ -477,9 +791,10 @@ through HTTP.
 Intended operations, and nothing else until it is needed:
 
 ```python
-create_idea(user, organization_id, data) -> Idea
+create_idea_in_context(user, data, *, submission_context, organization_id, team_id) -> Idea
 update_idea(user, idea_id, data) -> Idea
-submit_idea(user, idea_id) -> Idea          # DRAFT -> SUBMITTED
+submit_idea(user, idea_id) -> Idea          # -> SUBMITTED_TO_ORGANIZATION or SUBMITTED
+submit_to_platform(user, idea_id) -> Idea    # ORGANIZATION_CONFIRMED -> SUBMITTED
 add_comment(user, idea_id, content) -> Comment
 update_comment(user, comment_id, content) -> Comment
 delete_comment(user, comment_id) -> None
@@ -489,16 +804,35 @@ upload_attachment(user, idea_id, uploaded_file) -> Attachment
 delete_attachment(user, attachment_id) -> None
 ```
 
-`create_idea` must require an active membership in the target organization
-(there is no idea without a tenant); `update_idea` and `submit_idea` must
-require the author; `vote_for_idea` must be idempotent at the service level
-and enforced at the database level, and a user may not vote on an idea they
-cannot read.
+`create_idea_in_context` is the one way an idea comes into existence; the
+original `create_idea(user, organization_id, data)` survives as a delegation to
+it with the organization spelled out, because the `createIdea` mutation's first
+signature and the S2 tests call that. Both go through the same validation, so
+the older entry point gains the context rules rather than bypassing them.
+
+`update_idea` and `submit_idea` require the author and per-context tenant
+standing; `vote_for_idea` must be idempotent at the service level and enforced
+at the database level, and a user may not vote on an idea they cannot read.
+
+**`submit_idea` is one operation that resolves its own target.** It asks
+`lifecycle.submission_target`, which reads the idea's context and returns
+`SUBMITTED_TO_ORGANIZATION` for an organization idea and `SUBMITTED` otherwise.
+That is the point: the author does not choose a workflow, they choose *who they
+are submitting with*, and the platform decides what "submit" means. The same
+call serves a resubmission after either track's changes request, because both
+resolve through the lifecycle's `RESUBMISSION_TARGET`.
+
+`submit_to_platform` is named separately **because it is a genuinely different
+act, not a variant of the same one**: the organization has already said this is
+what it wants to submit, and now the *owner* is the one choosing to submit it.
+A separate name is what stops a reader of the file assuming "submit" covers
+both.
 
 **As implemented (S2-002).** `create_idea`, `update_idea` and `submit_idea`
 ship, with `IdeaInput` carrying the four writable content fields and nothing
 else. `add_comment`, `update_comment` and `delete_comment` joined them in
-S2-005; `vote_for_idea` and `remove_vote` joined them in S2-006. Nothing in
+S2-005; `vote_for_idea` and `remove_vote` joined them in S2-006; and the
+context-aware pair above arrived with the submission-context phase. Nothing in
 this list is stubbed.
 
 ### Votes (implemented, S2-006)
@@ -696,10 +1030,12 @@ anticipate:
   one-word description is not a problem statement. It is a module constant, so
   changing it is a visible decision.
 - **A submitted idea is no longer editable, by anybody** - until a reviewer
-  sends it back. `update_idea` refuses everything except `DRAFT` and, since
-  S3-005, `CHANGES_REQUESTED` (see [Lifecycle](#lifecycle)). `submit_idea` is the lifecycle's author move and
-  accepts exactly `DRAFT → SUBMITTED` and, since S2-003,
-  `CHANGES_REQUESTED → SUBMITTED`; anything else is refused.
+  sends it back. `update_idea` refuses everything except `DRAFT`,
+  `CHANGES_REQUESTED` and `ORGANIZATION_CHANGES_REQUESTED` (see
+  [Lifecycle](#lifecycle)). `submit_idea` is the lifecycle's author move and
+  accepts `DRAFT → SUBMITTED_TO_ORGANIZATION | SUBMITTED`, the two
+  resubmissions, and `ORGANIZATION_CONFIRMED → SUBMITTED`; anything else is
+  refused.
 
 ### Attachments (implemented, S2-007)
 
@@ -710,7 +1046,7 @@ touching PostgreSQL or GraphQL.
 
 | Operation | Requires |
 | --------- | -------- |
-| `upload_attachment(user, idea_id, uploaded_file)` | The idea's own **author**, with an active membership - not merely being able to read the idea |
+| `upload_attachment(user, idea_id, uploaded_file)` | The idea's own **author**, with standing in the idea's tenant - an organization membership, a team membership, or nothing for an individual idea - not merely being able to read the idea |
 | `delete_attachment(user, attachment_id)` | The same, resolved through the attachment's idea |
 | Listing (`attachments(ideaId)`) and download | Anyone who can **read** the idea - the looser, comment/vote-shaped rule |
 
@@ -720,10 +1056,11 @@ votes) followed *readability*, deliberately, because participation and
 interest both follow what a reader is shown. Evidence is different: it is
 closer to editing the idea than to responding to it, so `_load_attachable_idea`
 in `ideas/services.py` requires the same two conditions `update_idea` does -
-authorship and an active membership - while deliberately **not** requiring
-`update_idea`'s `DRAFT`-only lifecycle gate, because evidence accumulates
-throughout review, not only while an idea is still being written. This is
-the vote shape (readability/authorship with no status condition) applied to
+authorship and per-context tenant standing - while deliberately **not**
+requiring `update_idea`'s `DRAFT`-only lifecycle gate, because evidence
+accumulates throughout review, not only while an idea is still being written.
+This is the vote shape (readability/authorship with no status condition)
+applied to
 a *write* rule instead of a read one, and it is written down here for the
 same reason S2-006's no-lifecycle-gate decision was: it is easy to "fix"
 into a copy of a stricter neighbor's rule, and the fix would be wrong.
@@ -737,7 +1074,7 @@ refused without the application processing the file:
 | ------- | ------ |
 | No valid token (anonymous, expired, or a deactivated account) | 401 |
 | Idea unknown, unreadable, or not the caller's own | 404 - one answer, so the endpoint is not an existence oracle |
-| The author, without an active membership any more | 403 |
+| The author, without standing in the idea's tenant any more | 403 |
 | No file, or a file that fails validation (type, content, size, name) | 400, with `field: "file"` |
 | The storage backend failed | 502 |
 | Stored | 201 |
@@ -824,39 +1161,48 @@ and tenancy rules are applied in exactly one place:
 
 ```python
 get_idea(user, idea_id) -> Idea | None          # None for anything unreadable
+get_idea_for_update(user, idea_id) -> Idea | None
 list_discoverable_ideas(user, filters, *, offset, limit) -> Page[Idea]
 list_ideas(user) -> QuerySet[Idea]              # already visibility-filtered
 list_organization_ideas(user, organization_id) -> QuerySet[Idea]
+list_team_ideas(user, team_id) -> QuerySet[Idea]
 list_own_ideas(user) -> QuerySet[Idea]
 list_active_categories() -> QuerySet[Category]
+list_idea_transitions(user, idea_id) -> list[IdeaTransition]
 can_view_idea(user, idea) -> bool
+platform_reviewer_filter(user) -> Q
 ```
 
-`list_ideas` and `list_organization_ideas` return an already-filtered
-`QuerySet`, not a list, so a caller cannot forget the filter by forgetting to
-apply it: the only way to get ideas is through a selector that applied it.
-The filter is built from `get_membership`, so it is the same membership
-Sprint 1 authorizes with.
+`list_ideas`, `list_organization_ideas` and `list_team_ideas` return an
+already-filtered `QuerySet`, not a list, so a caller cannot forget the filter by
+forgetting to apply it: the only way to get ideas is through a selector that
+applied it. The filter is built from `get_membership` and
+`teams.authorization.is_member_of`, so it is the same membership Sprint 1
+authorizes with — and a tenant the caller does not belong to yields an empty
+queryset, which is also the answer for a tenant that does not exist.
 
 `list_own_ideas` is deliberately *not* visibility-filtered: an author can
 always read their own idea, whatever state it is in. It is the one scope
 rather than a filter in the module, and the reason it is safe is that the
 author set is exactly the caller's own id.
 
-### Discovery (implemented, S2-004)
+### Discovery (implemented, S2-004; extended for the contexts)
 
-`list_discoverable_ideas` is the single read path for browsing, and both
-`ideas` and `organizationIdeas` go through it. It is the only place the
+`list_discoverable_ideas` is the single read path for browsing, and `ideas`,
+`organizationIdeas` and `teamIdeas` all go through it. It is the only place the
 visibility filter, the discovery filters and pagination meet, so there is no
 second queryset for an unfiltered idea to escape through.
 
 ```python
 filters = selectors.IdeaFilters(
     organization_id=None,   # narrows to a tenant the caller belongs to
+    team_id=None,           # likewise, for the team's own feed
     category_id=None,
     status=None,
     search=None,
-)
+    submission_context=None,
+    visibility=None,
+    mine=False,
 ```
 
 **Every filter can only remove rows, never add them**, because
@@ -865,19 +1211,22 @@ the whole design, and `test_every_filter_together_still_excludes_what_it_should`
 is the test that says it: an idea matching the tenant, the category, the
 status and the search exactly is still not returned when it is private.
 
-Two fields are absent from `IdeaFilters` on purpose:
+`submission_context`, `visibility` and `mine` were added with the contexts, and
+all three read like a grant without being one — which is the test they have to
+pass:
 
-- **`visibility`** - a filter that reads like a grant. `visibility=public`
-  is indistinguishable, in a query, from asking for everybody's public ideas,
-  and the day it is added somebody will send it and be surprised.
-- **`author_id`** - nobody needs "ideas by X" in discovery, and it is one more
-  surface to keep honest.
+- `visibility=PUBLIC` returns only ideas the caller could already see *and*
+  that happen to be public.
+- `mine=True` is the caller's own id rather than an id the caller chose, so it
+  cannot become a way of asking for somebody else's rows.
+- **`author_id` as a caller-supplied value is deliberately absent**, for
+  exactly the reason `mine` exists instead.
 
-`organization_id` looks like the same problem and is not: it can only ever
-narrow, and `list_discoverable_ideas` refuses it outright - an empty page -
-unless the caller holds an active membership. An organization the caller does
-not belong to and an organization that does not exist produce the *same* empty
-page, so the argument cannot be used to probe which ids are real.
+`organization_id` and `team_id` look like the same problem and are not: each
+can only ever narrow, and both are checked against the caller's own membership
+before they filter anything. An organization or team the caller does not belong
+to and one that does not exist produce the *same* empty page, so neither
+argument can be used to probe which ids are real.
 
 An unusable filter value (a category that is not an id, a status that is not
 in the enum) yields an empty page rather than being ignored. A client that
@@ -953,22 +1302,38 @@ The dependency direction stays as it is today - domain → GraphQL adapter,
 never the reverse - so `ideas/schema.py` imports `ideas/selectors.py` and
 `ideas/services.py` and imports nothing from `graphql_api`.
 
-Intended operations:
+As built:
 
 | Queries | Mutations |
 | ------- | --------- |
-| `idea(id)` | `createIdea(input)` |
+| `idea(id)` | `createIdea(input)` — `CreateIdeaInput` carries `submissionContext` and the matching tenant id |
 | `ideas(filters)` | `updateIdea(input)` |
 | `organizationIdeas(organizationId, filters)` | `submitIdea(id)` |
-| `categories` | `addComment(input)` — `parentId` makes it a reply |
-| `comments(ideaId)` | `updateComment(input)` / `deleteComment(id)` |
+| `teamIdeas(teamId, filters)` | `submitToPlatform(id)` — the owner's handoff of a confirmed idea |
+| `categories` | `giveGoAhead(id)` — the owner's confirmation (`ideas.go_ahead`) |
+| `comments(ideaId)` | `addComment(input)` — `parentId` makes it a reply |
+| `ideaTransitions(ideaId)` — the read-only lifecycle history | `updateComment(input)` / `deleteComment(id)` |
 | `attachments(ideaId)` / `attachment(id)` — implemented in S2-007 | `voteIdea(id)` / `removeVote(id)` — implemented in S2-006 |
 | | `deleteAttachment(id)` — implemented in S2-007 |
+| | `transitionIdea(id, toStatus)` — author moves and the hand-off; refuses the review-owned pairs |
 
-The frontend will need `submittedAt` and `status` on the idea type to render
-a draft, so both are exposed; the three review-only statuses are exposed as
-enum values from the start so the frontend's union type is not wrong by
-omission.
+`IdeaType` gained, with the platform track: `submissionContext`,
+`organizationId` (**nullable**), `teamId`, `tenantName` (derived, so it cannot
+disagree with the row), `platformLockedAt`, `platformVersion`,
+`platformApprovedAt`, `ownerGoAheadAt`, `state` (the whole
+`ideas.states` summary, resolved per viewer), and the per-viewer capability
+fields `viewerCanEdit`, `viewerCanStartReview`,
+`viewerCanStartOrganizationReview` and `viewerActiveReviewId`.
+
+**No author name on the idea type.** `authorId` is an id, never a nested user:
+a `PUBLIC` idea is readable platform-wide, so a nested user would publish a
+member's email address with it. The cost is honest and visible — an individual
+idea's card says "you" or "the person who filed it" rather than naming its
+author.
+
+`organizationId` being nullable is the client-visible half of the context work:
+a client that assumes it is always present is a client that will show an empty
+organization to somebody who filed an idea entirely on their own.
 
 There is deliberately no `addAttachment`/`createAttachment` mutation, in
 S2-007 or ever: binary content does not fit a JSON-in/JSON-out GraphQL
@@ -982,9 +1347,12 @@ and `ideas/views.py`.
 frontend/src/features/ideas/
     api/          ideasApi.ts - the documents and typed request functions
     components/   IdeaForm, IdeaList, IdeaFiltersBar, IdeaPagination,
-                  IdeaDiscussion, IdeaVoteButton, IdeaAttachments, IdeasWorkspace
+                  IdeaDiscussion, IdeaVoteButton, IdeaAttachments,
+                  IdeasWorkspace, IdeaContextDialog, IdeaOwnership,
+                  IdeaDetailPage, IdeaStory
     hooks/        useIdeaDiscovery, useCategories, useComments, useIdeaVotes,
                   useAttachments
+    utils/        lifecycle.ts (labels), ownership.ts, savedIdeaNotice.ts
 ```
 
 The data loading moved into `hooks/` in S2-004, and for a specific reason
@@ -1051,18 +1419,46 @@ This mirrors `features/organizations/` exactly: `api/` holds the documents and
 the typed request functions, `context/`-free hooks read them, and
 `components/` are presentational.
 
-- **Routes** live in `src/app/routes.tsx`, which already reserves `/app` for
-  authenticated routes and its docstring names `ideas` as a coming feature.
-  Ideas routes are `/app` children so they inherit `RequireAuth`; they mount
-  inside the existing `OrganizationProvider`.
+- **Routes** live in `src/app/routes.tsx`, which reserves `/app` for
+  authenticated routes. Ideas routes are `/app` children so they inherit
+  `RequireAuth`; they mount inside the existing `OrganizationProvider`:
+  `/app/ideas`, `/app/ideas/:ideaId`, `/app/ideas/new`,
+  `/app/ideas/:ideaId/edit`, plus `/app/ideas/:ideaId/report` for the platform
+  review report and `/app/organizations/:organizationId` and
+  `/app/teams/:teamId` for the tenant-scoped idea panels.
+- **The context is chosen before the form opens, and it is never changed
+  afterwards.** "File a New Idea" from the ideas list opens
+  `IdeaContextDialog` first: *where does this idea belong?* - individual, team
+  or organization - and choosing team or organization offers **only the
+  tenants the caller may file for**, which the server supplied rather than the
+  client filtering a list it does not have. From a team page or an organization
+  page, "Create Idea" is a plain link to `/app/ideas/new?context=…&team=…`
+  because the owner is already decided. The page then carries a locked context
+  banner above the form, so it stays put on every one of the eight steps: it is
+  not a field the author can change halfway through, because an idea whose
+  owner moves under it is an idea whose reviewers change too. **The URL carries
+  the ownership decision, not React state** - `?context=team&team=9` - so a
+  reload does not raise a "which context is it again?" question, and a URL
+  naming a team the reader is not on cannot put an idea into it.
+- **Ownership and audience are two badges, never one.** `IdeaOwnership` renders
+  the context ("Your idea", "Team · Payments", "Organization · …") and the
+  audience ("Public", "Team only", "Only you") side by side on cards, in both
+  lists and in the detail header, because after the `TEAM` split they are
+  genuinely different facts and a reader of a list cannot be allowed to
+  confuse them.
 - **Organization context** comes from `useOrganization()`
-  (`features/organizations/context`): the active organization supplies the
-  `organizationId` argument, so an ideas screen has no organization picker
-  of its own and cannot be pointed at an organization the user is not in.
+  (`features/organizations/context`) for the organization's own screens. It is
+  no longer the source of the `organizationId` argument everywhere, because an
+  ideas screen is no longer necessarily about one organization.
 - **Authorization information** comes from the same context's
   `hasPermission(code)` and `activeMembership`. The frontend uses it to decide
   what to *offer* (hide "submit" on an idea you did not author). It is never
   what decides what is *visible* - the server has already filtered.
+- **The detail page exists and is linked from three places.** `/app/ideas/:id`
+  used to 404 from every card action; it now renders the ownership header, the
+  state summary the server resolved (`state.primaryActionLabel` is the button
+  text, and it is empty when there is nothing for this viewer to do), the
+  review history and the go-ahead confirmation.
 - **Visibility** is represented in the UI as a badge plus a muted card style,
   not as a client-side filter. `visibility` travels on the idea type so a
   reader can see who an idea is shared with, which is information people need
@@ -1080,12 +1476,15 @@ the typed request functions, `context/`-free hooks read them, and
 | S2-006 | `vote_for_idea`/`remove_vote`, `IdeaVoteState`, `voteIdea`/`removeVote`, `IdeaType.voteCount`/`viewerHasVoted` (annotated, no N+1), the vote control — implemented |
 | S2-007 | `upload_attachment`/`delete_attachment`, `ideas/storage.py`, `ideas/attachments.py` (file validation), `attachments`/`attachment`/`deleteAttachment`, the HTTP upload/download endpoints (`ideas/views.py`), the evidence UI — implemented |
 | S2-008 | Integration and security hardening: cross-feature/two-tenant security tests, upload authenticates before reading the body, storage failures reported as 502, frontend stale-response and vote-state fixes — implemented |
-| S3 | Review workflow beyond the S2-003 transitions: review queue/dashboard, reviewer assignment, reasons on a review decision, editing content while changes are requested |
+| S3 | The review workflow beyond the S2-003 transitions: review queue, reviewer eligibility on `idea.review`, reasons on a review decision, editing while changes are requested, the append-only `IdeaTransition` trail — implemented; see [`reviews-domain.md`](reviews-domain.md) |
+| platform track | Three submission contexts and their database constraint, the organization stage, `TEAM` visibility, frozen `IdeaSubmissionVersion`s, `ideas/states.py`, `ideas/go_ahead.py`, the platform review permission, `submitToPlatform`/`giveGoAhead`, `IdeaContextDialog`, `IdeaDetailPage` — implemented |
 | later | Validation, automation opportunities, requirements, proposals, developers, projects, tasks, milestones, deployment, impact, payments, AI analysis |
 
-Not modelled here, and not to be added under this domain: review dashboards,
-reviewer assignment, approval UI, automation proposals, a developer
-marketplace or matching, project management, tasks, milestones, deployment,
-impact analytics, payments, AI analysis, recommendation engines, or
-subscriptions. `ideas/tests/test_models.py::TestAppBoundary` asserts the app's
-model set, so crossing a sprint boundary here fails a test.
+Not modelled here, and not to be added under this domain: automation
+opportunity entities, a developer marketplace or matching, project management,
+tasks, milestones, deployment, impact analytics, payments, AI analysis,
+recommendation engines, or subscriptions - and, deliberately, **any transfer of
+ownership**: no write input anywhere names a new owner, so "whose idea is this"
+cannot be reassigned by an API that was never designed to answer the question.
+`ideas/tests/test_models.py::TestAppBoundary` asserts the app's model set, so
+crossing a sprint boundary here fails a test.

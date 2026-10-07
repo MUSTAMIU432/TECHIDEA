@@ -95,6 +95,14 @@ piece: every mail and every notification is written synchronously inside
 cannot fail the decision. A queue is what makes retry and digesting possible, and
 neither is needed at this volume - see [Email](#email-target--implemented).
 
+**There is no push notification subsystem**, and that is a fact about this
+codebase rather than an oversight: no VAPID keys or settings, no subscription
+model, no delivery library in `requirements.txt`, no service worker and no
+`requestPermission` call anywhere. Web push needs all of those plus a worker to
+retry through, so it is downstream of the queue decision above rather than beside
+it. What the notification surface does provide is the substrate any channel needs:
+one server-derived destination per notification.
+
 Redis (or Memcached, or a database) *is* nevertheless required today for
 cache: the Google ID-token replay check and the authentication rate limits
 both record state that every process has to agree on, so a per-process cache
@@ -465,10 +473,12 @@ one of `INDIVIDUAL`, `TEAM` or `ORGANIZATION`, and only the `ORGANIZATION`
 context names an organization: an individual or team idea has no tenant to
 validate it and goes straight to the platform, which is the whole point of
 letting somebody with no organization put an idea forward. A `TEAM` idea names
-a `teams.Team`, which is a **collaboration boundary and not a tenant** - it
-validates nothing and cannot approve anything, and its roles are separate tables
-over the same `organizations.Permission` records for exactly that reason (see
-[`collaboration.md`](collaboration.md)). The two nullable tenant columns are
+a `teams.Team`, which is a **collaboration boundary and not a tenant**: its
+reviewers can verify a team idea or send it back before the platform sees it, but
+a team cannot approve anything, and its roles are separate tables over the same
+`organizations.Permission` records for exactly that reason (see
+[`collaboration.md`](collaboration.md) section 0, which also records that ideas
+have no public audience). The two nullable tenant columns are
 constrained so that exactly the one the context names is set.
 
 A Department tier is still absent: `Idea.visibility` reserves a `department`
@@ -516,6 +526,13 @@ the caller may see it. `IdeaType` carries `authorId` and `organizationId` as
 ids and deliberately does not embed a user object: a `PUBLIC` idea is readable
 platform-wide, so a nested user would publish a member's email address with
 it.
+
+**`TEAM` is a visibility of its own.** An idea's owner and its audience are
+stored in separate columns and no write path sets one from the other, so a team
+idea made `PUBLIC` is still that team's. `TEAM` was added as a fifth visibility
+value because `visibility=ORGANIZATION` on a team idea used to mean "my team" —
+the same word for two different facts — and a reader of a list cannot be allowed
+to confuse them. Each value is scoped to the tenant it names.
 
 **`DEPARTMENT` fails closed.** It is reserved vocabulary with no Department
 model behind it, so the service refuses it as a choice and the selectors
@@ -647,9 +664,9 @@ above and the code are authoritative for those.
 | Area | What exists |
 | ---- | ----------- |
 | Teams | `teams` app: `Team`, `TeamMembership`, and per-team roles over the **same** `organizations.Permission` codes; `createTeam`/`addTeamMember`/`leaveTeam`, `teams`/`team`/`teamMembers`. A team needs no organization, holds no review or approval permission, and its roles are separate tables because `organizations.Role` requires a tenant |
-| Invitations | `invitations.Invitation` for both scopes: address-bound, single-use via a conditional `UPDATE`, expiring, revocable, token stored as a SHA-256 digest; `sendOrganizationInvitation`/`sendTeamInvitation`/`revokeInvitation`/`acceptInvitation`, `invitationDetails` usable while signed out. **The only writer of a membership** |
+| Invitations | `invitations.Invitation` for both scopes: address-bound, single-use via a conditional `UPDATE`, expiring, revocable, **declinable by the recipient only**, token stored as a SHA-256 digest; `sendOrganizationInvitation`/`sendTeamInvitation`/`revokeInvitation`/`acceptInvitation`/**`declineInvitation`**, `invitationDetails` usable while signed out. **The only writer of a membership** - and a decline writes none, because there is nothing to undo |
 | Messaging | `messaging` app: `MessageThread`/`MessageParticipant`/`Message`; `messageThreads`/`messageThread`/`threadMessages`/`unreadThreadCount`, `startMessageThread`/`postMessage`/`markThreadRead`. Access is the participant list, so there is no "messages for idea X" query and no `message(id)` |
-| Notifications | `notifications.Notification` with 13 fixed kinds and a `DECISION_KINDS` subset that alone may link a report; `notifications`/`unreadNotificationCount`/`hasUnreadNotifications`, `markNotificationRead`/`markAllNotificationsRead`. One business event, two channels, both on commit, neither able to fail the decision |
+| Notifications | `notifications.Notification` with 14 fixed kinds and a `DECISION_KINDS` subset that alone may link a report; `notifications`/`unreadNotificationCount`/`hasUnreadNotifications`, `markNotificationRead`/`markAllNotificationsRead`. One business event, two channels, both on commit, neither able to fail the decision. **`actionPath` is derived server-side** from the kind and the row's ids - so the in-app link and any future payload are one mapping, and a link to an idea the recipient may no longer read is not offered |
 | Email | Four senders, one contract: `identity` (reset, activation), `reviews` (author's decision), `invitations`, `notifications`. Plain text, stored address, after commit, never raising, full content always behind authentication |
 | Frontend | `/app/teams`, `/app/teams/:teamId`, `/app/messages`, `/app/messages/:threadId`, `/app/notifications`, `/invitations/accept`; Teams and Messages in the app header, Messages with an unread badge from its own one-field query |
 | Not in the UI | An organization invitation panel, and a compose screen for a new private message. Both are implemented and authorized on the server; no component calls them |
@@ -663,7 +680,8 @@ above and the code are authoritative for those.
 | Console operations | `adminSetUserActive`, `adminAssignMembershipRole`/`adminRemoveMembershipRole` (through the organization domain's own rules), `adminCreateCategory`/`adminUpdateCategory`/`adminSetCategoryActive` |
 | Audit | Append-only `administration.AdminAuditEntry` for every console operation, rule refusal of account/role changes, evidence download and admin grant |
 | Evidence | `GET /administration/attachments/<id>/download/`, permission-gated and audited, sharing the safe-download response with the ideas endpoint |
-| Frontend | `/app/admin` (lazy-loaded), "Admin" nav link offered from `adminCapabilities` |
+| Collaboration reads | `adminTeams`/`adminTeam`/`adminTeamInvitations`, `adminInvitations`, `adminMessageThreads`/`adminMessageThread`/`adminThreadMessages`, `adminNotifications`. **Read-only**: a membership is only created by accepting an invitation and a message belongs to its participants, so the console has nothing to write. A message **body** is behind `inspect_idea_content`, and a thread subject is withheld with the idea it is anchored to (a subject is sometimes an idea title) |
+| Frontend | `/app/admin` (lazy-loaded), "Admin" nav link offered from `adminCapabilities`; sections Dashboard, Users, Organizations, **Teams**, Ideas, Reviews, Approvals, **Invitations**, **Messages**, **Notifications**, Categories |
 
 ### Implemented (Sprint 2)
 

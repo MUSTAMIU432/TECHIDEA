@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Documentation: the platform track, written down against the code
+
+The submission-context work left two domain documents describing a codebase
+that no longer exists: eleven lifecycle statuses written as seven, one tenant
+written as a required column, one reviewer kind written as two. Both have been
+corrected against `backend/ideas/` and `backend/reviews/` on `feature/reviews`.
+
+- **[`docs/ideas-domain.md`](docs/ideas-domain.md)** — the entity list gains
+  `IdeaTransition` and `IdeaSubmissionVersion`; a new **Submission context**
+  section states the three contexts, which tenant column each one names and why
+  one model rather than three; the lifecycle carries all eleven statuses, the
+  full transition matrix with its three actor kinds, the context rule that
+  decides which door "submit" opens, and the two statuses that are deliberately
+  *not* statuses (`organization_review`, and a split `approved`); new sections
+  for `ideas/states.py`, the frozen submission version and the owner's
+  go-ahead. Corrected along the way: the submission visibility rule, which is
+  now **context-dependent** (`PUBLIC` only for an individual or team idea,
+  because its platform reviewer holds no membership of the author's tenant); the
+  claim that `Idea.organization` is required on every row; the constraint and
+  index tables; the selector list and `IdeaFilters`; and the GraphQL and
+  frontend boundaries, including `IdeaContextDialog`, the two ownership badges
+  and the detail page that used to 404 from three links.
+- **[`docs/reviews-domain.md`](docs/reviews-domain.md)** — a new section
+  records what the platform track changed, and `§5.4` states the two tracks in
+  one table: an **organization** reviewer is a member of the idea's own
+  organization holding `idea.review`, a **platform** reviewer is an account
+  holding a platform-scoped Django permission and nothing else, so no code path
+  exists in which holding `idea.review` somewhere also confers platform review.
+  `Review.scope`, `ReviewAssignment` and `PlatformReviewReport` are documented
+  as entities; rounds and the one-open-review rule are corrected to **per
+  scope**; `§11` becomes approval as three separate facts (the report is written
+  in the approval's transaction, only the author may give the go-ahead, and the
+  hand-off follows it rather than replacing it); the GraphQL section gains the
+  platform track's own seam; and `D-1` is marked delivered — the `invitations`
+  app is the only writer of a `Membership`, which is what finally makes an
+  organization reviewer somebody other than its single Owner.
+- **What was deliberately left alone.** `reviews-domain.md` §1 is the code as it
+  stood before S3-002 and now says so at the top, pointing at the later sections
+  where it disagrees. The S2 and S3 narratives in both files are unchanged: a
+  record of what each sprint decided is worth more than a document that was
+  always current, and the corrections above are the ones that would otherwise
+  have been read as descriptions of the system rather than of its history.
+
 ### Added — Collaboration: teams, invitations, private messages and notifications
 
 Four small apps that answer four questions about the same thing - who works with
@@ -140,6 +183,201 @@ you. New [`docs/collaboration.md`](docs/collaboration.md).
   implementation-status table extended. `ideas-domain.md` and `reviews-domain.md`
   predate the platform track and are marked as such rather than left to disagree
   with it silently.
+
+### Added — Teams, invitations, messages and notifications in the console
+
+The console could see users, tenants, ideas, reviews and categories, and nothing
+else - so a team, an invitation, a conversation or a notification was invisible
+to the one person whose job is to know they exist. Four read-only sections, in
+the shape the console already uses.
+
+- **Teams** (`/app/admin/teams`, `/teams/:id`). `adminTeams`, `adminTeam`,
+  `adminTeamInvitations`. Both membership numbers are shown, because a team keeps
+  the row of somebody who left so it does not re-invite them: "one member, one
+  former" is the honest summary. The detail lists each role's **permission
+  codes** rather than a count, since a team role holding a review or approval
+  code would be the platform's own boundary failing and this is where somebody
+  would notice. Teams sits beside Organizations in the nav, not inside it: a
+  team is a collaboration boundary, not a kind of organization.
+- **Invitations** (`/app/admin/invitations`). `adminInvitations`, filterable by
+  scope and status, across both tenants. The state shown is `isOpen` rather than
+  `status`, because a pending invitation past its expiry is still "pending" in
+  the database and cannot be accepted - the distinction is the operational
+  question. **No token is exposed anywhere**, so there is nothing to redact: only
+  the SHA-256 digest is stored and the plaintext exists solely in the email.
+  That is asserted against the schema itself, not left as a reviewer's habit.
+- **Messages** (`/app/admin/messages`, `/messages/:id`). `adminMessageThreads`,
+  `adminMessageThread`, `adminThreadMessages`. The list is metadata -
+  participants, counts, last activity - and a **body needs
+  `inspect_idea_content`**, because a message is the one place on the platform
+  where somebody wrote something for named people rather than for the platform.
+  Without it every body is `null` and the page says "restricted" instead of
+  drawing an empty message that would read as an empty conversation.
+- **Notifications** (`/app/admin/notifications`). `adminNotifications`,
+  filterable by kind and unread, with the recipient. These are the platform's own
+  words - a notification row only holds what a domain decided, and its body is
+  length-bounded precisely so it never carries a review report - so the text is
+  metadata under the console gate, unlike a message body. The idea a
+  notification points at is still gated like everywhere else.
+- **Two rules the redaction inherited rather than invented.** A **thread subject
+  is withheld with the idea it is anchored to**, because `start_thread` defaults
+  an anchored thread's subject to that idea's title: redacting the title and
+  leaving the subject would have left the answer in the subject. And **search
+  follows suit** - the subject of an anchored thread is only searchable by a
+  caller who may read that idea, so a search cannot confirm a private title.
+- **`staleParticipantCount` is not an unread count.** Unread is a position per
+  reader and the console has no reader, so the column says how many
+  *participants* have not opened the thread - a fact about the platform rather
+  than a fictional reader's state.
+- **Read-only on purpose.** There is no console operation over any of the four: a
+  membership is only ever created by accepting an invitation, and a message
+  belongs to its participants. An administrator who could write either would be
+  recording an acceptance or a conversation that did not happen.
+- **Tests.** `administration/tests/test_collaboration_reads.py` (28 cases):
+  the four surfaces, both redaction rules, the search rule, the "no token"
+  schema assertion, that an ordinary member gets nothing from all four, and
+  pinned query counts for all five lists.
+- **Docs.** `docs/administration.md` gains §3.1 and the four read rows;
+  `docs/architecture.md` and `docs/collaboration.md` updated to match.
+
+### Changed — One idea, one owner, and never a guess about it
+
+The ownership question was answerable by the API and invisible in the product.
+It is now asked before anything is written, answered on every card and detail
+page, and enforced by the database as well as the services.
+
+- **`TEAM` becomes a visibility of its own** (migration `ideas/0009`). A team
+  idea whose audience is its own members used to say so with the word
+  "organization", which is exactly the ambiguity that made an idea's owner and
+  its audience impossible to tell apart on a card. `Idea.Visibility` is now
+  `public / organization / team / department / private`, each value scoped to the
+  tenant it actually names — a team idea cannot be read through an organization
+  membership, nor an organization idea through a team one. No existing row moves:
+  the migration only widens the CHECK constraint.
+- **The audience must belong to the owner's kind.** `private` and `public` are
+  offered in every context; `team` only on a team idea, `organization` only on an
+  organization one, with a sentence explaining why rather than a generic
+  "choose who can see this".
+- **Fixed: a team or individual idea could not be edited at all.**
+  `ideas.services._load_editable_idea` asked for an *organization* membership
+  unconditionally, and those two contexts have no organization — so the refusal
+  reached the author of their own idea. The check now branches per context, the
+  way `ideas.lifecycle._require_tenant_standing` already did, because the two
+  must agree or one refuses an operation the other allows.
+- **`can_edit_idea` and `IdeaType.viewerCanEdit`** ask the same questions in the
+  same order as `updateIdea`, so a client cannot offer a save the server would
+  refuse — and `UpdateIdeaInput` still has no context, tenant or author field, so
+  ownership cannot be changed by a write.
+- **`teamIdeas(teamId, filters)`** is wired to the selector that already existed
+  and was never called, and `IdeaFilters` gained `submissionContext`,
+  `visibility` and `mine`. All three are **narrowing**: `visibility: PUBLIC`
+  returns only ideas the caller could already see that are also public, and `mine`
+  is the caller's own id rather than one they supply. `authorId` is still
+  refused outright.
+- **`can_submit_for`'s docstring corrected.** It claimed "any active member may
+  submit that team's idea, which is the point of authorized team submission"; the
+  lifecycle refused that, because `DRAFT → SUBMITTED` is the author's move in
+  every context. The claim was wrong rather than the code, and is now described
+  as what it is: the tenant-standing half of an answer the lifecycle completes.
+- **Tests.** `ideas/tests/test_ownership.py` (33 cases): one owner always, the
+  database refusing a row the service would never write, unauthorized filing,
+  ownership surviving a widened audience, who may manage, what each audience
+  means, and the filter never widening the read.
+
+### Added — "Where does this idea belong?", asked before the form
+
+- **The global create button opens a dialog, not the form.** Three whole
+  options — Individual, Team, Organization — each carrying its own explanation,
+  then the tenant picker when one is needed, then a confirmation with
+  **Continue / Change** before a single word is written. Filing for the wrong
+  owner is the expensive mistake here: an idea filed for yourself when you meant
+  your organization will never be confirmed by it, and it will sit in a queue
+  nobody else can see.
+- **Only tenants the reader may file for are listed**, and a reader with none is
+  told that in those words rather than shown an empty picker — the backend
+  refuses the others, so offering them would teach the reader the list is
+  arbitrary.
+- **The choice travels in the URL**, not in React state: `?context=team&team=9`.
+  That makes the form's page bookmarkable and reloadable, and it is what lets a
+  Team or Organization page link straight into a form already decided. The
+  context controls are then closed, and the banner "Creating a Team Idea for
+  Automation Team" sits above **every** step of the eight-step form.
+- **Team and Organization pages go straight to the form.** `/app/teams/:id` and
+  `/app/organizations/:id` each carry a **Create Idea** button with the context
+  already decided, and the dialog is the global button's job alone.
+- **Re-resolved against the reader's own memberships**, so a pasted or
+  hand-edited `?context=team&team=999` opens the form's own step rather than a
+  context the server would refuse.
+- **`/app/ideas/:ideaId` exists.** Three places already linked to it — two in the
+  review report page and one in the notifications list — and all three were a 404,
+  because ideas existed only as rows in a list. Its header answers the four
+  questions in order: what it is, **who owns it**, who created it, where it is in
+  the lifecycle, with **Owned by** and the audience badge as two separate lines.
+- **`/app/organizations/:organizationId`** is a new page: the organization's
+  members, its ideas and its own create button, reachable from the workspace
+  list.
+- **Ownership and audience are drawn as two badges and never merged**, on cards,
+  on both lists and in the detail header — including the case that must not
+  collapse, a *public* organization idea that is still MUNA's. `utils/ownership`
+  owns the wording for both, because two label maps for one enum is how a card
+  ends up contradicting itself.
+- **Filters**: owner (individual/team/organization), audience (public/team only/
+  organization only/private), "Only my ideas", and the status list completed
+  from seven of eleven values to all of them.
+- **Tests**: `IdeaContextDialog.test.tsx` (10), `IdeaDetailPage.test.tsx` (10),
+  `TeamIdeasPanel.test.tsx` (9, covering the organization page too).
+
+### Added — Declining an invitation, and knowing where a notification goes
+
+The invitation flow had three exits and could only produce one by mail. It now
+has a fourth and a recipient-side notification, and the destinations a
+notification offers are the server's rather than the client's.
+
+- **`declineInvitation`.** A recipient may decline an invitation, under the same
+  address rule as accepting and refused **before** the claim, so a link cannot be
+  burned for somebody else. `DECLINED` is a new status with `declined_by` /
+  `declined_at` (migration `invitations/0002`), paired by a CHECK constraint the
+  way acceptance's are, and it is single-use under concurrency like acceptance.
+  **Nothing is created and nothing is removed** — acceptance is the only writer
+  of a membership, so a decline writes the invitation's own terminal state and
+  that is the whole record. The inviter is notified, and can invite again.
+- **`invitation.received` is now delivered.** It was declared in the vocabulary
+  and emitted by nothing: an address with an account was told by email alone.
+  There is **no accept link** in it, and that is deliberate — acceptance needs the
+  plaintext token, only its digest is stored, and the email is the only place the
+  token exists. The notification says what happened and where to look.
+- **`Notification.actionPath`, derived server-side.** The client used to compose
+  destinations out of `ideaId` and the kind, which is how three links came to
+  point at a route that did not exist and an invitation notification came to have
+  no way to act at all. One mapping — from the kind and the ids the row already
+  holds — now serves the in-app link and any payload built from the same row, so
+  the two cannot disagree and a renamed route is one edit. A link to an idea this
+  recipient may no longer read is not offered at all, because a notification
+  outlives the access it was written under. `NotificationType.label` likewise
+  ends the client's habit of splitting a dotted string to guess the wording.
+- **Frontend**: a **Decline** button beside **Join**, each disabled while the
+  other runs; a declined outcome that says plainly that nothing about the account
+  or the work changed; and a declined *preview* state that says the invitation was
+  declined rather than calling the link invalid, because an expired one, a revoked
+  one and a declined one are three different facts for the person looking at it.
+
+### Fixed — Push notifications
+
+**There is no push notification subsystem.** Not a partial one: no VAPID keys or
+settings, no subscription model, no delivery library (`pywebpush` is not a
+dependency), no service worker, no `requestPermission` call anywhere in the
+repository. The delivery the platform has is in-app plus email, both synchronously
+on `transaction.on_commit` — `docs/architecture.md` records Redis + Celery as
+planned and absent, which is also why there is no worker to retry a failed send.
+
+Nothing fake was added in its place: a delivery function that reported success
+without a transport would be worse than none, and a push notification that never
+arrives is a silent failure a user cannot see. What real web push needs is
+recorded in the report — a VAPID-signed transport dependency, subscription storage,
+a background worker for retries, and a browser service worker with a permission
+flow — and none of it can be built on a queue the project has decided not to run
+yet. The notification work here is the part that is genuinely substrate for it:
+one server-derived destination, usable by any channel.
 
 ### Added — Replies, and one open card section at a time
 
