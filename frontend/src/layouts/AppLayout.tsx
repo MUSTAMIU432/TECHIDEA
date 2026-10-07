@@ -13,7 +13,6 @@ import { AdminCapabilitiesProvider } from '../features/administration/context/Ad
 import { useAdminCapabilities } from '../features/administration/context/useAdminCapabilities'
 import { useAuth } from '../features/identity/auth/AuthContext'
 import { UserMenu } from '../features/identity/components/UserMenu'
-import { OrganizationSwitcher } from '../features/organizations/components/OrganizationSwitcher'
 import { OrganizationProvider } from '../features/organizations/context/OrganizationProvider'
 import { useOrganization } from '../features/organizations/context/useOrganization'
 import { useUnreadMessageThreads } from '../features/messaging/hooks/useMessages'
@@ -71,9 +70,27 @@ const SECTION_TRAILS: Array<[RegExp, Crumb[]]> = [
     /^\/app\/ideas\/[^/]+\/report$/,
     [{ label: 'Ideas', to: '/app/ideas' }, { label: 'Review report' }],
   ],
+  [
+    /^\/app\/ideas\/[^/]+\/proposal$/,
+    [{ label: 'Ideas', to: '/app/ideas' }, { label: 'Proposal' }],
+  ],
   [/^\/app\/ideas\/[^/]+$/, [{ label: 'Ideas', to: '/app/ideas' }, { label: 'Idea' }]],
   [/^\/app\/ideas$/, [{ label: 'Ideas' }]],
   [/^\/app\/reviews$/, [{ label: 'Reviews' }]],
+  [
+    /^\/app\/automation\/opportunities\/[^/]+$/,
+    [{ label: 'Automation', to: '/app/automation' }, { label: 'Opportunity' }],
+  ],
+  [
+    /^\/app\/automation\/projects\/[^/]+$/,
+    [{ label: 'Automation', to: '/app/automation' }, { label: 'Project' }],
+  ],
+  [/^\/app\/automation(\/.*)?$/, [{ label: 'Automation' }]],
+  [
+    /^\/app\/organizations\/[^/]+$/,
+    [{ label: 'Organizations', to: '/app/organizations' }, { label: 'Organization' }],
+  ],
+  [/^\/app\/organizations$/, [{ label: 'Organizations' }]],
   [/^\/app\/teams\/[^/]+$/, [{ label: 'Teams', to: '/app/teams' }, { label: 'Team' }]],
   [/^\/app\/teams$/, [{ label: 'Teams' }]],
   [
@@ -98,7 +115,7 @@ function WorkspaceBreadcrumb() {
   if (!trail) return null
 
   return (
-    <nav aria-label="Breadcrumb" className="mx-auto max-w-7xl pt-6 pb-2">
+    <nav aria-label="Breadcrumb" className="mx-auto max-w-[96rem] pt-6 pb-2">
       <ol className="flex items-center gap-2 text-sm">
         <li>
           <Link
@@ -117,7 +134,7 @@ function WorkspaceBreadcrumb() {
             >
               <path d="M12.5 15 7.5 10l5-5" />
             </svg>
-            Workspace
+            Home
           </Link>
         </li>
         {trail.map((crumb) => (
@@ -242,13 +259,13 @@ function AppShell() {
       style={{ '--app-chrome-height': `${chromeHeight}px` } as CSSProperties}
     >
       {/*
-       * The bar and <main> share one centered width (`max-w-7xl`) and the same
+       * The bar and <main> share one centered width (`max-w-[96rem]`) and the same
        * gutters, so the bar's edges line up with the page content at any
        * screen size. The breadcrumb is pinned with the bar: the way back stays
        * in reach however far down the page the reader is.
        */}
       <div ref={chromeRef} className="sticky top-0 z-30 bg-slate-50 px-4 pt-3 sm:px-6 lg:px-8">
-        <header className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-gradient-to-r from-brand-800 via-brand-700 to-brand-600 px-4 py-3 shadow-lg shadow-brand-900/20 ring-1 ring-white/10 sm:px-5">
+        <header className="mx-auto flex max-w-[96rem] flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-gradient-to-r from-brand-800 via-brand-700 to-brand-600 px-4 py-3 shadow-lg shadow-brand-900/20 ring-1 ring-white/10 sm:px-5">
           {/* Brand alone on the left; navigation, organization and account grouped on the right. */}
           <Link
             to="/app"
@@ -260,7 +277,7 @@ function AppShell() {
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-3 sm:gap-x-6">
             <nav aria-label="Main" className="flex min-w-0 items-center gap-1 overflow-x-auto">
               <NavLink to="/app" end className={navLinkClass}>
-                Workspace
+                Home
               </NavLink>
               <NavLink to="/app/ideas" className={navLinkClass}>
                 Ideas
@@ -279,6 +296,12 @@ function AppShell() {
                 and a reader with no organization at all is exactly the reader
                 the Teams link exists for.
               */}
+              <NavLink to="/app/automation" className={navLinkClass}>
+                Automation
+              </NavLink>
+              <NavLink to="/app/organizations" className={navLinkClass}>
+                Organizations
+              </NavLink>
               <NavLink to="/app/teams" className={navLinkClass}>
                 Teams
               </NavLink>
@@ -306,7 +329,6 @@ function AppShell() {
               )}
             </nav>
             <div className="flex min-w-0 items-center gap-3 sm:border-l sm:border-white/20 sm:pl-6">
-              <OrganizationSwitcher />
               <NotificationBell />
               <UserMenu user={user} onSignOut={handleLogout} />
             </div>
@@ -316,7 +338,7 @@ function AppShell() {
       </div>
 
       <main className="px-4 pt-8 pb-10 sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-7xl">
+        <div className="mx-auto max-w-[96rem]">
           <Outlet />
         </div>
       </main>

@@ -12,19 +12,29 @@ import type { Idea } from '../api/ideasApi'
 vi.mock('../api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
   categoriesRequest: vi.fn(async () => [
-    { id: '4', name: 'Customer support', slug: 'customer-support', description: '' },
+    {
+      id: '4',
+      name: 'Customer support',
+      slug: 'customer-support',
+      description: '',
+    },
   ]),
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
   organizationIdeasRequest: vi.fn(),
-  commentsRequest: vi.fn(async () => ({ items: [], pageInfo: page([]).pageInfo })),
+  commentsRequest: vi.fn(async () => ({
+    items: [],
+    pageInfo: page([]).pageInfo,
+  })),
   voteIdeaRequest: vi.fn(),
   removeVoteRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { organizationIdeasRequest, voteIdeaRequest, removeVoteRequest } =
   await import('../api/ideasApi')
@@ -76,7 +86,9 @@ async function voteToggle(title = 'Automate the invoice run') {
   await act(async () => {})
 
   const card = screen.getByText(title).closest('li') as HTMLElement
-  return within(card).getByRole('button', { name: /vote for this idea|remove your vote/i })
+  return within(card).getByRole('button', {
+    name: /vote for this idea|remove your vote/i,
+  })
 }
 
 /**
@@ -139,8 +151,18 @@ describe('Idea voting (S2-006)', () => {
 
   it('gives every idea on the page its own control', async () => {
     mockContext([
-      makeIdea({ id: '1', title: 'First idea', voteCount: 2, viewerHasVoted: true }),
-      makeIdea({ id: '2', title: 'Second idea', voteCount: 5, viewerHasVoted: false }),
+      makeIdea({
+        id: '1',
+        title: 'First idea',
+        voteCount: 2,
+        viewerHasVoted: true,
+      }),
+      makeIdea({
+        id: '2',
+        title: 'Second idea',
+        voteCount: 5,
+        viewerHasVoted: false,
+      }),
     ])
     renderWithRouter(<IdeasWorkspace />)
 
@@ -422,8 +444,18 @@ describe('Idea voting (S2-006)', () => {
 
   it('an idea keeps its own state when another is voted on', async () => {
     mockContext([
-      makeIdea({ id: '1', title: 'First idea', voteCount: 1, viewerHasVoted: true }),
-      makeIdea({ id: '2', title: 'Second idea', voteCount: 0, viewerHasVoted: false }),
+      makeIdea({
+        id: '1',
+        title: 'First idea',
+        voteCount: 1,
+        viewerHasVoted: true,
+      }),
+      makeIdea({
+        id: '2',
+        title: 'Second idea',
+        voteCount: 0,
+        viewerHasVoted: false,
+      }),
     ])
     renderWithRouter(<IdeasWorkspace />)
     const secondToggle = within(

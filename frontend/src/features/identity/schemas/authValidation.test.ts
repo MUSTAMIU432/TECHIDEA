@@ -23,13 +23,19 @@ describe('validateSignIn', () => {
   })
 
   it('rejects a malformed email', () => {
-    const values: SignInFormValues = { email: 'not-an-email', password: 'secret123' }
+    const values: SignInFormValues = {
+      email: 'not-an-email',
+      password: 'secret123',
+    }
 
     expect(validateSignIn(values).email).toBe('Enter a valid email address.')
   })
 
   it('passes for valid values', () => {
-    const errors = validateSignIn({ email: 'ada@example.com', password: 'secret123' })
+    const errors = validateSignIn({
+      email: 'ada@example.com',
+      password: 'secret123',
+    })
 
     expect(hasErrors(errors)).toBe(false)
   })
@@ -60,13 +66,20 @@ describe('validateSignUp', () => {
   })
 
   it('rejects a password below the minimum length', () => {
-    const errors = validateSignUp({ ...validSignUp, password: 'short', confirmPassword: 'short' })
+    const errors = validateSignUp({
+      ...validSignUp,
+      password: 'short',
+      confirmPassword: 'short',
+    })
 
     expect(errors.password).toBe('Password must be at least 8 characters.')
   })
 
   it('detects a confirm-password mismatch', () => {
-    const errors = validateSignUp({ ...validSignUp, confirmPassword: 'different-password' })
+    const errors = validateSignUp({
+      ...validSignUp,
+      confirmPassword: 'different-password',
+    })
 
     expect(errors.confirmPassword).toBe('Passwords do not match.')
   })

@@ -6,6 +6,7 @@ import { SpinnerIcon } from '../../identity/components/icons'
 import { useAuth } from '../../identity/auth/AuthContext'
 import {
   acceptInvitationRequest,
+  declineInvitationRequest,
   invitationDetailsRequest,
   type InvitationPreview,
 } from '../api/invitationsApi'
@@ -16,7 +17,11 @@ type Load =
   | { state: 'unknown' }
   | { state: 'error' }
 
-type Outcome = { kind: 'none' } | { kind: 'accepted' } | { kind: 'refused'; message: string }
+type Outcome =
+  | { kind: 'none' }
+  | { kind: 'accepted' }
+  | { kind: 'declined' }
+  | { kind: 'refused'; message: string }
 
 /**
  * `/invitations/accept?token=…` — what an emailed invitation link points at.
@@ -56,6 +61,7 @@ export function AcceptInvitationPage() {
   const [answer, setAnswer] = useState<{ token: string; load: Load } | null>(null)
   const [outcome, setOutcome] = useState<Outcome>({ kind: 'none' })
   const [accepting, setAccepting] = useState(false)
+  const [declining, setDeclining] = useState(false)
 
   useEffect(() => {
     // No token is not a request that can be made; it is a link that was copied
@@ -104,6 +110,34 @@ export function AcceptInvitationPage() {
     }
   }
 
+  /**
+   * Decline, behind a confirmation.
+   *
+   * Declining is the reader's own decision and there is nothing to undo, so it is
+   * not destructive - but it is *final for this invitation*: the link stops
+   * working, and the inviter has to send another. So it asks once, in plain
+   * words, and the answer it gives is that nothing about the reader's account or
+   * their work changed.
+   */
+  async function handleDecline() {
+    if (!token) return
+    setDeclining(true)
+    setOutcome({ kind: 'none' })
+    try {
+      const result = await declineInvitationRequest(token)
+      setOutcome(
+        result.success ? { kind: 'declined' } : { kind: 'refused', message: result.message },
+      )
+    } catch {
+      setOutcome({
+        kind: 'refused',
+        message: 'We could not reach the server, so nothing has changed. Please try again.',
+      })
+    } finally {
+      setDeclining(false)
+    }
+  }
+
   return (
     <AuthShell>
       <div>
@@ -140,7 +174,9 @@ export function AcceptInvitationPage() {
             signedInEmail={user?.email ?? null}
             outcome={outcome}
             accepting={accepting}
+            declining={declining}
             onAccept={() => void handleAccept()}
+            onDecline={() => void handleDecline()}
           />
         )}
       </div>
@@ -153,13 +189,17 @@ function AcceptBody({
   signedInEmail,
   outcome,
   accepting,
+  declining,
   onAccept,
+  onDecline,
 }: {
   preview: InvitationPreview
   signedInEmail: string | null
   outcome: Outcome
   accepting: boolean
+  declining: boolean
   onAccept: () => void
+  onDecline: () => void
 }) {
   /*
     The three dead states are kept apart because the reader can act on each
@@ -167,6 +207,26 @@ function AcceptBody({
     says somebody withdrew it, and an accepted one is already done. One
     "invalid invitation" would waste their time on all three.
   */
+  if (outcome.kind === 'declined') {
+    return (
+      <div className="mt-4">
+        <output className="block text-sm font-semibold text-gray-700">
+          You have declined the invitation to {preview.tenantName}.
+        </output>
+        <p className="mt-2 text-sm text-gray-600">
+          Nothing about your account or your work changed, and this link will not work again. If
+          somebody invites you again, that will be a new invitation.
+        </p>
+        <Link
+          to="/app"
+          className="mt-4 inline-block text-sm font-semibold text-brand-700 hover:text-brand-800"
+        >
+          Go to your workspace
+        </Link>
+      </div>
+    )
+  }
+
   if (outcome.kind === 'accepted') {
     return (
       <div className="mt-4">
@@ -188,6 +248,26 @@ function AcceptBody({
       <output className="mt-4 block text-sm text-gray-600">
         This invitation has already been accepted. If that was not you, tell whoever invited you.
       </output>
+    )
+  }
+
+  if (preview.declined) {
+    /*
+      Somebody declined this - and it is worth being precise about the tense: the
+      reader looking at this page *is* the person who declined it, on an earlier
+      visit, or somebody acting with their session. So this says what happened
+      rather than pretending the link is merely invalid.
+    */
+    return (
+      <div className="mt-4">
+        <output className="block text-sm font-semibold text-gray-700">
+          This invitation was declined.
+        </output>
+        <p className="mt-2 text-sm text-gray-600">
+          Nothing about your account or your work changed. If you would like to join{' '}
+          {preview.tenantName}, ask {preview.invitedByFirstName} to send another invitation.
+        </p>
+      </div>
     )
   }
 
@@ -249,15 +329,32 @@ function AcceptBody({
           </Link>
         </div>
       ) : (
-        <button
-          type="button"
-          onClick={onAccept}
-          disabled={accepting || wrongAccount}
-          className="mt-6 inline-flex h-11 items-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {accepting && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
-          {accepting ? 'Joining…' : `Join ${preview.tenantName}`}
-        </button>
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={onAccept}
+            disabled={accepting || declining || wrongAccount}
+            className="inline-flex h-11 items-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {accepting && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
+            {accepting ? 'Joining…' : `Join ${preview.tenantName}`}
+          </button>
+          {/*
+            Two controls, because a reader who does not want this needs a way to
+            say so that is not "close the tab". Both are offered for the same
+            reader and neither is greyed out on the other's account: accepting and
+            declining are both final answers to the same question.
+          */}
+          <button
+            type="button"
+            onClick={onDecline}
+            disabled={accepting || declining || wrongAccount}
+            className="inline-flex h-11 items-center gap-2 rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {declining && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
+            {declining ? 'Declining…' : 'Decline'}
+          </button>
+        </div>
       )}
     </div>
   )

@@ -27,7 +27,9 @@ function renderForm(onBackToSignIn = () => {}) {
 }
 
 function submit(email: string) {
-  fireEvent.change(screen.getByLabelText('Email'), { target: { value: email } })
+  fireEvent.change(screen.getByLabelText('Email'), {
+    target: { value: email },
+  })
   fireEvent.click(screen.getByRole('button', { name: 'Send reset link' }))
 }
 
@@ -90,7 +92,12 @@ describe('ForgotPasswordForm', () => {
     submit('ada@example.com')
 
     expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled()
-    release({ success: true, message: GENERIC_MESSAGE, field: null, user: null })
+    release({
+      success: true,
+      message: GENERIC_MESSAGE,
+      field: null,
+      user: null,
+    })
     await screen.findByRole('heading', { name: 'Check your email' })
   })
 

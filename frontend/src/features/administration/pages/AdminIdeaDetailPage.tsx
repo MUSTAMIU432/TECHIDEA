@@ -19,6 +19,7 @@ import {
   Restricted,
   secondaryButtonClasses,
 } from '../components/AdminUi'
+import { AssignReviewTeam } from '../components/AssignReviewTeam'
 import { BackLink } from '../components/BackLink'
 import { ReviewRoundCard } from '../components/ReviewRoundCard'
 import { useAdminQuery } from '../hooks/useAdminQuery'
@@ -140,6 +141,8 @@ export function AdminIdeaDetailPage() {
             </>
           )}
         </AdminCard>
+
+        <AssignReviewTeam ideaId={idea.id} status={idea.status} />
 
         <AdminCard title="Review history">
           {idea.reviews.length === 0 ? (

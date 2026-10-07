@@ -49,7 +49,10 @@ describe('ideasApi', () => {
    * are all about the payload rather than about the three ways to file one.
    * The other two contexts have their own tests further down.
    */
-  const ORGANIZATION_TARGET = { context: 'ORGANIZATION', organizationId: '3' } as const
+  const ORGANIZATION_TARGET = {
+    context: 'ORGANIZATION',
+    organizationId: '3',
+  } as const
 
   const IDEA = {
     id: '1',
@@ -114,7 +117,12 @@ describe('ideasApi', () => {
 
   it('sends createIdea with the organization and the content', async () => {
     const fetchMock = stubFetch({
-      createIdea: { success: true, message: 'Idea saved as a draft.', field: null, idea: IDEA },
+      createIdea: {
+        success: true,
+        message: 'Idea saved as a draft.',
+        field: null,
+        idea: IDEA,
+      },
     })
 
     await createIdeaRequest(ORGANIZATION_TARGET, {
@@ -228,7 +236,10 @@ describe('ideasApi', () => {
       createIdea: { success: true, message: 'ok', field: null, idea: IDEA },
     })
 
-    await createIdeaRequest(ORGANIZATION_TARGET, { title: 'T', description: 'D' })
+    await createIdeaRequest(ORGANIZATION_TARGET, {
+      title: 'T',
+      description: 'D',
+    })
 
     const [request] = sentRequests(fetchMock)
     const serialized = JSON.stringify(request.variables)
@@ -244,7 +255,10 @@ describe('ideasApi', () => {
       createIdea: { success: true, message: 'ok', field: null, idea: IDEA },
     })
 
-    const result = await createIdeaRequest(ORGANIZATION_TARGET, { title: 'T', description: 'D' })
+    const result = await createIdeaRequest(ORGANIZATION_TARGET, {
+      title: 'T',
+      description: 'D',
+    })
 
     expect(result.success).toBe(true)
     expect(result.idea?.id).toBe('1')
@@ -261,7 +275,10 @@ describe('ideasApi', () => {
       },
     })
 
-    const result = await createIdeaRequest(ORGANIZATION_TARGET, { title: '', description: 'D' })
+    const result = await createIdeaRequest(ORGANIZATION_TARGET, {
+      title: '',
+      description: 'D',
+    })
 
     expect(result).toMatchObject({ success: false, field: 'title' })
   })
@@ -270,10 +287,19 @@ describe('ideasApi', () => {
 
   it('sends updateIdea with the id and the content', async () => {
     const fetchMock = stubFetch({
-      updateIdea: { success: true, message: 'Draft updated.', field: null, idea: IDEA },
+      updateIdea: {
+        success: true,
+        message: 'Draft updated.',
+        field: null,
+        idea: IDEA,
+      },
     })
 
-    await updateIdeaRequest('1', { title: 'Sharper', description: 'Because.', categoryId: '9' })
+    await updateIdeaRequest('1', {
+      title: 'Sharper',
+      description: 'Because.',
+      categoryId: '9',
+    })
 
     const [request] = sentRequests(fetchMock)
     expect(request.operationName).toBe('UpdateIdea')
@@ -430,7 +456,9 @@ describe('ideasApi', () => {
   })
 
   it('reads every visible idea with no filter that could widen the result', async () => {
-    const fetchMock = stubFetch({ ideas: { items: [IDEA], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      ideas: { items: [IDEA], pageInfo: PAGE_INFO },
+    })
 
     const result = await ideasRequest()
 
@@ -447,7 +475,9 @@ describe('ideasApi', () => {
   })
 
   it('reads one organization feed, passing the organization explicitly', async () => {
-    const fetchMock = stubFetch({ organizationIdeas: { items: [IDEA], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      organizationIdeas: { items: [IDEA], pageInfo: PAGE_INFO },
+    })
 
     const result = await organizationIdeasRequest('3')
 
@@ -458,7 +488,9 @@ describe('ideasApi', () => {
   })
 
   it('sends the filters it was given, and only the ones that were set', async () => {
-    const fetchMock = stubFetch({ organizationIdeas: { items: [], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      organizationIdeas: { items: [], pageInfo: PAGE_INFO },
+    })
 
     await organizationIdeasRequest('3', {
       categoryId: '4',
@@ -494,7 +526,12 @@ describe('ideasApi', () => {
     } as unknown as Parameters<typeof ideasRequest>[0])
 
     const [request] = sentRequests(fetchMock)
-    expect(sentFilter(request)).toEqual({})
+    // `visibility` is now a real filter and is passed through, because it can
+    // only remove rows the server already allowed this reader to see.
+    // `authorId` is still dropped: it is a caller-chosen id, which is the
+    // difference between "public ideas" and a way of asking for somebody
+    // else's rows.
+    expect(sentFilter(request)).toEqual({ visibility: 'PUBLIC' })
   })
 
   it('reads the category list for the picker', async () => {
@@ -533,7 +570,9 @@ describe('ideasApi', () => {
   // --- comments (S2-005) ---------------------------------------------------
 
   it('reads one page of a discussion, naming the idea', async () => {
-    const fetchMock = stubFetch({ comments: { items: [COMMENT], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      comments: { items: [COMMENT], pageInfo: PAGE_INFO },
+    })
 
     const result = await commentsRequest('1')
 
@@ -545,7 +584,9 @@ describe('ideasApi', () => {
   })
 
   it('sends paging arguments only when they were set', async () => {
-    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      comments: { items: [], pageInfo: PAGE_INFO },
+    })
 
     await commentsRequest('1', { offset: 20, limit: 10 })
 
@@ -558,7 +599,12 @@ describe('ideasApi', () => {
 
   it('posts a comment with the idea and the content, and no author', async () => {
     const fetchMock = stubFetch({
-      createComment: { success: true, message: 'Comment posted.', field: null, comment: COMMENT },
+      createComment: {
+        success: true,
+        message: 'Comment posted.',
+        field: null,
+        comment: COMMENT,
+      },
     })
 
     const result = await createCommentRequest('1', 'A comment.')
@@ -584,7 +630,12 @@ describe('ideasApi', () => {
       field, and this client has no business asserting a server default.
     */
     const fetchMock = stubFetch({
-      createComment: { success: true, message: 'Comment posted.', field: null, comment: COMMENT },
+      createComment: {
+        success: true,
+        message: 'Comment posted.',
+        field: null,
+        comment: COMMENT,
+      },
     })
 
     await createCommentRequest('1', 'A comment.')
@@ -609,7 +660,11 @@ describe('ideasApi', () => {
 
     const [request] = sentRequests(fetchMock)
     expect(request.variables).toEqual({
-      input: { ideaId: '1', comment: { content: 'An answer.' }, parentId: 'c1' },
+      input: {
+        ideaId: '1',
+        comment: { content: 'An answer.' },
+        parentId: 'c1',
+      },
     })
     // The parent comes back on the comment, which is what lets a client group
     // a page it already has rather than asking for the replies again.
@@ -638,7 +693,12 @@ describe('ideasApi', () => {
 
   it('deletes a comment by id, and asks for no entity back', async () => {
     const fetchMock = stubFetch({
-      deleteComment: { success: true, message: 'Comment deleted.', field: null, comment: null },
+      deleteComment: {
+        success: true,
+        message: 'Comment deleted.',
+        field: null,
+        comment: null,
+      },
     })
 
     const result = await deleteCommentRequest('c1')
@@ -672,7 +732,9 @@ describe('ideasApi', () => {
   })
 
   it('selects the fields the discussion renders and no user object', async () => {
-    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      comments: { items: [], pageInfo: PAGE_INFO },
+    })
 
     await commentsRequest('1')
 
@@ -688,7 +750,9 @@ describe('ideasApi', () => {
   })
 
   it('sends no voting or attachment argument', async () => {
-    const fetchMock = stubFetch({ comments: { items: [], pageInfo: PAGE_INFO } })
+    const fetchMock = stubFetch({
+      comments: { items: [], pageInfo: PAGE_INFO },
+    })
 
     await commentsRequest('1')
 
@@ -730,7 +794,11 @@ describe('ideasApi', () => {
     // The signed-in user is the voter and there is no argument that could say
     // otherwise, so this client cannot express voting for somebody else.
     expect(JSON.stringify(request.variables)).not.toMatch(/user/i)
-    expect(result.voteState).toEqual({ ideaId: '1', voteCount: 3, viewerHasVoted: true })
+    expect(result.voteState).toEqual({
+      ideaId: '1',
+      voteCount: 3,
+      viewerHasVoted: true,
+    })
   })
 
   it('withdraws a vote by id, sending no voter', async () => {
@@ -749,12 +817,21 @@ describe('ideasApi', () => {
     expect(request.operationName).toBe('RemoveVote')
     expect(request.variables).toEqual({ id: '1' })
     expect(JSON.stringify(request.variables)).not.toMatch(/user/i)
-    expect(result.voteState).toEqual({ ideaId: '1', voteCount: 2, viewerHasVoted: false })
+    expect(result.voteState).toEqual({
+      ideaId: '1',
+      voteCount: 2,
+      viewerHasVoted: false,
+    })
   })
 
   it('asks for the vote state back on both mutations', async () => {
     const fetchMock = stubFetch({
-      voteIdea: { success: true, message: 'Vote recorded.', field: null, voteState: null },
+      voteIdea: {
+        success: true,
+        message: 'Vote recorded.',
+        field: null,
+        voteState: null,
+      },
     })
 
     await voteIdeaRequest('1')
@@ -837,7 +914,11 @@ describe('ideasApi', () => {
 
   it('deletes an attachment by id', async () => {
     const fetchMock = stubFetch({
-      deleteAttachment: { success: true, message: 'Attachment deleted.', field: null },
+      deleteAttachment: {
+        success: true,
+        message: 'Attachment deleted.',
+        field: null,
+      },
     })
 
     const result = await deleteAttachmentRequest('a1')
@@ -905,7 +986,9 @@ describe('ideasApi', () => {
         field: null,
         attachment: ATTACHMENT,
       })
-      const file = new File(['%PDF-1.4'], 'evidence.pdf', { type: 'application/pdf' })
+      const file = new File(['%PDF-1.4'], 'evidence.pdf', {
+        type: 'application/pdf',
+      })
 
       const result = await uploadAttachmentRequest('1', file)
 
@@ -957,7 +1040,9 @@ describe('ideasApi', () => {
         message: 'That file type is not supported.',
         field: 'file',
       })
-      const file = new File(['x'], 'script.exe', { type: 'application/octet-stream' })
+      const file = new File(['x'], 'script.exe', {
+        type: 'application/octet-stream',
+      })
 
       const result = await uploadAttachmentRequest('1', file)
 
@@ -971,7 +1056,9 @@ describe('ideasApi', () => {
         message: 'That file type is not supported.',
         field: 'file',
       })
-      const file = new File(['x'], 'script.exe', { type: 'application/octet-stream' })
+      const file = new File(['x'], 'script.exe', {
+        type: 'application/octet-stream',
+      })
 
       // The reason the person uploading is shown, in the server's words. A
       // generic message here is the whole complaint this function exists to fix.

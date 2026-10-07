@@ -3,13 +3,33 @@ import { Link, NavLink, Outlet } from 'react-router-dom'
 import { useAdminCapabilities } from '../context/useAdminCapabilities'
 import { ErrorState, LoadingState } from './AdminUi'
 
+/*
+  The console's sections, in the order somebody investigating the platform reads
+  them: who exists, what tenants and collaborations exist, the work itself, and
+  finally the things the platform has done about it.
+
+  **Teams sit beside Organizations rather than inside it** because a team is a
+  collaboration boundary and not a tenant — it belongs to no organization and
+  validates nothing — so grouping it under Organizations would say it is a kind
+  of organization, which is the mistake the `teams` domain exists to prevent.
+  Invitations, Messages and Notifications follow Teams for the same reason: they
+  are the records of who was asked to join, who is talking, and what the platform
+  told them.
+*/
 const SECTIONS: Array<{ to: string; label: string; end?: boolean }> = [
   { to: '/app/admin', label: 'Dashboard', end: true },
   { to: '/app/admin/users', label: 'Users' },
   { to: '/app/admin/organizations', label: 'Organizations' },
+  { to: '/app/admin/teams', label: 'Teams' },
   { to: '/app/admin/ideas', label: 'Ideas' },
   { to: '/app/admin/reviews', label: 'Reviews' },
   { to: '/app/admin/approvals', label: 'Approvals' },
+  { to: '/app/admin/reviewers', label: 'Reviewers' },
+  { to: '/app/admin/proposals', label: 'Proposals' },
+  { to: '/app/admin/automation', label: 'Automation' },
+  { to: '/app/admin/invitations', label: 'Invitations' },
+  { to: '/app/admin/messages', label: 'Messages' },
+  { to: '/app/admin/notifications', label: 'Notifications' },
   { to: '/app/admin/categories', label: 'Categories' },
 ]
 

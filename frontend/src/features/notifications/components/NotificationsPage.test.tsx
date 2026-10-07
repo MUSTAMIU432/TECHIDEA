@@ -25,11 +25,15 @@ function notification(overrides: Partial<Notification> = {}): Notification {
   return {
     id: 'n1',
     kind: 'idea.platform_approved',
+    // The server spells the kind and builds the destination; a fixture that
+    // disagreed with it would be testing a client the product does not have.
+    label: 'Platform review completed',
     title: 'Your idea was approved by the platform',
     body: 'Read the report and decide whether to give the go-ahead.',
     ideaId: '1',
     reportId: '9',
     isRead: false,
+    actionPath: '/app/ideas/1',
     createdAt: '2026-02-01T00:00:00.000Z',
     ...overrides,
   }

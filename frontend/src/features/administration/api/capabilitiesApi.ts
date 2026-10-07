@@ -14,6 +14,9 @@ export interface AdminCapabilities {
   canManageUserAccounts: boolean
   canManageOrganizationRoles: boolean
   canManageCategories: boolean
+  canAssignPlatformReviewers: boolean
+  canManageReviewers: boolean
+  canReleaseProposals: boolean
 }
 
 export const NO_ADMIN_CAPABILITIES: AdminCapabilities = {
@@ -22,6 +25,9 @@ export const NO_ADMIN_CAPABILITIES: AdminCapabilities = {
   canManageUserAccounts: false,
   canManageOrganizationRoles: false,
   canManageCategories: false,
+  canAssignPlatformReviewers: false,
+  canManageReviewers: false,
+  canReleaseProposals: false,
 }
 
 const CAPABILITIES_QUERY = `
@@ -32,6 +38,9 @@ const CAPABILITIES_QUERY = `
       canManageUserAccounts
       canManageOrganizationRoles
       canManageCategories
+      canAssignPlatformReviewers
+      canManageReviewers
+      canReleaseProposals
     }
   }
 `

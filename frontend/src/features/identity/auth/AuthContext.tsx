@@ -45,6 +45,8 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<LoginOutcome>
   loginWithGoogle: (credential: string) => Promise<LoginOutcome>
   logout: () => Promise<void>
+  /** Replaces the signed-in user after the server confirmed a profile change. */
+  updateUser: (user: AuthUser) => void
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
@@ -284,7 +286,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, [status])
 
   const value = useMemo(
-    () => ({ status, user, login, loginWithGoogle, logout }),
+    () => ({
+      status,
+      user,
+      login,
+      loginWithGoogle,
+      logout,
+      updateUser: setUser,
+    }),
     [status, user, login, loginWithGoogle, logout],
   )
 

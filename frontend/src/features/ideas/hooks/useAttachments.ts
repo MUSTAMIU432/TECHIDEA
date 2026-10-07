@@ -4,6 +4,7 @@ import {
   attachmentsRequest,
   deleteAttachmentRequest,
   downloadAttachmentRequest,
+  previewAttachmentRequest,
   uploadAttachmentRequest,
   type IdeaAttachment,
   type IdeaPageInfo,
@@ -47,6 +48,7 @@ export interface AttachmentGallery {
   upload: (file: File) => Promise<boolean>
   remove: (attachmentId: string) => Promise<boolean>
   download: (attachment: IdeaAttachment) => Promise<void>
+  preview: (attachment: IdeaAttachment) => Promise<void>
   clearWriteError: () => void
   clearDownloadError: () => void
 }
@@ -63,9 +65,10 @@ interface Answer {
 export function useAttachments(ideaId: string | null): AttachmentGallery {
   const [answer, setAnswer] = useState<Answer | null>(null)
   const [errorKey, setErrorKey] = useState<string | null>(null)
-  const [writeError, setWriteError] = useState<{ message: string; field: string | null } | null>(
-    null,
-  )
+  const [writeError, setWriteError] = useState<{
+    message: string
+    field: string | null
+  } | null>(null)
   const [uploading, setUploading] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
@@ -141,7 +144,10 @@ export function useAttachments(ideaId: string | null): AttachmentGallery {
               : {
                   ...latest,
                   attachments: [...latest.attachments, created],
-                  pageInfo: { ...latest.pageInfo, totalCount: latest.pageInfo.totalCount + 1 },
+                  pageInfo: {
+                    ...latest.pageInfo,
+                    totalCount: latest.pageInfo.totalCount + 1,
+                  },
                 },
           )
         }
@@ -206,6 +212,21 @@ export function useAttachments(ideaId: string | null): AttachmentGallery {
     }
   }, [])
 
+  const preview = useCallback(async (attachment: IdeaAttachment) => {
+    if (downloadingRef.current !== null) return
+    downloadingRef.current = attachment.id
+    setDownloadingId(attachment.id)
+    setDownloadError(null)
+    try {
+      await previewAttachmentRequest(attachment)
+    } catch {
+      setDownloadError(TRANSPORT_FAILURE)
+    } finally {
+      downloadingRef.current = null
+      setDownloadingId(null)
+    }
+  }, [])
+
   return {
     attachments,
     pageInfo,
@@ -219,6 +240,7 @@ export function useAttachments(ideaId: string | null): AttachmentGallery {
     upload,
     remove,
     download,
+    preview,
     clearWriteError: () => setWriteError(null),
     clearDownloadError: () => setDownloadError(null),
   }

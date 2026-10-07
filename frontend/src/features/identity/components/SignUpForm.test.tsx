@@ -28,13 +28,21 @@ const mockedMe = vi.mocked(meRequest)
 const TERMS_LABEL = 'I agree to the Terms of Service and Privacy Policy.'
 
 function fillMinimumValidFields() {
-  fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Ada' } })
-  fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lovelace' } })
-  fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
+  fireEvent.change(screen.getByLabelText('First name'), {
+    target: { value: 'Ada' },
+  })
+  fireEvent.change(screen.getByLabelText('Last name'), {
+    target: { value: 'Lovelace' },
+  })
+  fireEvent.change(screen.getByLabelText('Email'), {
+    target: { value: 'ada@example.com' },
+  })
   fireEvent.change(screen.getByRole('textbox', { name: 'Phone number' }), {
     target: { value: '712345678' },
   })
-  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct-horse' } })
+  fireEvent.change(screen.getByLabelText('Password'), {
+    target: { value: 'correct-horse' },
+  })
   fireEvent.change(screen.getByLabelText('Confirm password'), {
     target: { value: 'correct-horse' },
   })
@@ -58,7 +66,11 @@ describe('SignUpForm', () => {
     mockedRegister.mockReset()
     // No pre-existing session: every test starts unauthenticated, not
     // redirected/pre-authenticated by the mount-time silent refresh.
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
   })
 
@@ -143,7 +155,11 @@ describe('SignUpForm', () => {
   // --- the real register mutation -------------------------------------------
 
   it('sends a real RegisterInput to the register mutation', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     await renderAndFill()
 
     submit()
@@ -161,17 +177,29 @@ describe('SignUpForm', () => {
   })
 
   it('trims surrounding whitespace before sending', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     renderWithProviders(<SignUpForm onSwitchToSignIn={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('First name'), { target: { value: '  Ada  ' } })
-    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: ' Lovelace ' } })
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: ' ada@example.com ' } })
+    fireEvent.change(screen.getByLabelText('First name'), {
+      target: { value: '  Ada  ' },
+    })
+    fireEvent.change(screen.getByLabelText('Last name'), {
+      target: { value: ' Lovelace ' },
+    })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: ' ada@example.com ' },
+    })
     fireEvent.change(screen.getByRole('textbox', { name: 'Phone number' }), {
       target: { value: '712 345 678' },
     })
-    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct-horse' } })
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'correct-horse' },
+    })
     fireEvent.change(screen.getByLabelText('Confirm password'), {
       target: { value: 'correct-horse' },
     })
@@ -191,7 +219,11 @@ describe('SignUpForm', () => {
   })
 
   it('never sends the confirm-password or terms values, which are not inputs', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     await renderAndFill()
 
     submit()
@@ -208,7 +240,11 @@ describe('SignUpForm', () => {
   })
 
   it('shows a success state once the account exists', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     await renderAndFill()
 
     submit()
@@ -220,7 +256,11 @@ describe('SignUpForm', () => {
   })
 
   it('mentions the confirmation email, and that confirming is optional', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     await renderAndFill()
 
     submit()
@@ -237,7 +277,11 @@ describe('SignUpForm', () => {
   })
 
   it('leads to sign-in from the success state, since registration does not authenticate', async () => {
-    mockedRegister.mockResolvedValue({ success: true, message: 'ok', field: null })
+    mockedRegister.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+    })
     const { onSwitchToSignIn } = await renderAndFill()
 
     submit()
@@ -293,7 +337,11 @@ describe('SignUpForm', () => {
     ['lastName', 'Last name'],
     ['email', 'Email'],
   ])('shows a backend %s validation error next to that field', async (field, label) => {
-    mockedRegister.mockResolvedValue({ success: false, message: 'Rejected by the server.', field })
+    mockedRegister.mockResolvedValue({
+      success: false,
+      message: 'Rejected by the server.',
+      field,
+    })
     await renderAndFill()
 
     submit()
@@ -400,7 +448,9 @@ describe('SignUpForm', () => {
     submit()
     await screen.findByText('An account with this email already exists.')
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'new@example.com' },
+    })
 
     // The client-side validation pass supersedes the server's message for
     // that field, so the two never contradict each other.

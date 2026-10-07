@@ -6,7 +6,7 @@ import type { IdeaCurrentTool, IdeaFrequency, IdeaImpact, IdeaProblemStory } fro
  *
  * The *values* are the backend's enums (`ideas.models.Idea.Frequency`,
  * `Impact`, `CurrentTool`) and the server refuses anything else; the *words*
- * are presentation and live here, the same split `SELECTABLE_VISIBILITIES`
+ * are presentation and live here, the same split the level labels
  * makes. Shared by the intake form, which asks the questions, and
  * `IdeaStory`, which shows a reader the answers - so a question is always
  * shown back in the words it was asked in.

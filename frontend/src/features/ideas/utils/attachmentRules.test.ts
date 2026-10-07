@@ -31,7 +31,7 @@ describe('attachmentProblem', () => {
     // The message is built from the constant, so the two cannot disagree - which
     // is the failure this guards: a reader told "larger than 10 MB" by a uploader
     // that stops at 50.
-    expect(MAX_UPLOAD_LABEL).toBe('50 MB')
+    expect(MAX_UPLOAD_LABEL).toBe('200 MB')
   })
 
   it('refuses an empty file', () => {

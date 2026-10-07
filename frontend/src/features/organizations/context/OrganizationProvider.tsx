@@ -113,7 +113,10 @@ export function OrganizationProvider({ children }: OrganizationProviderProps) {
     async (name: string, slug?: string): Promise<CreateOrganizationOutcome> => {
       const requestUserId = authUserId
       try {
-        const result = await createOrganizationRequest({ name, ...(slug ? { slug } : {}) })
+        const result = await createOrganizationRequest({
+          name,
+          ...(slug ? { slug } : {}),
+        })
         if (
           authSessionRef.current.status !== 'authenticated' ||
           authSessionRef.current.userId !== requestUserId

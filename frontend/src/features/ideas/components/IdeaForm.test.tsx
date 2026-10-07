@@ -40,7 +40,12 @@ const createMock = vi.mocked(createIdeaRequest)
 const updateMock = vi.mocked(updateIdeaRequest)
 
 const CATEGORIES = [
-  { id: '10', name: 'Customer support', slug: 'customer-support', description: '' },
+  {
+    id: '10',
+    name: 'Customer support',
+    slug: 'customer-support',
+    description: '',
+  },
   { id: '11', name: 'Finance', slug: 'finance', description: '' },
 ]
 
@@ -51,7 +56,12 @@ const DRAFT: Idea = makeIdea({
   availableTransitions: [],
 })
 
-const SAVED: IdeaMutationResult = { success: true, message: 'ok', field: null, idea: DRAFT }
+const SAVED: IdeaMutationResult = {
+  success: true,
+  message: 'ok',
+  field: null,
+  idea: DRAFT,
+}
 
 function renderForm(props: Partial<React.ComponentProps<typeof IdeaForm>> = {}) {
   const onSaved = props.onSaved ?? vi.fn()
@@ -123,7 +133,7 @@ describe('IdeaForm', () => {
       'Step 4: What would you like to improve?',
       'Step 5: How will you know the problem is solved?',
       'Step 6: Is there anything important we should know?',
-      'Step 7: Who is filing this, and who can see it',
+      'Step 7: At which level are you filing this?',
       'Step 8: Supporting documents',
     ])
     expect(steps[0]).toHaveAttribute('aria-current', 'step')
@@ -229,7 +239,9 @@ describe('IdeaForm', () => {
 
     expect(screen.getByLabelText('Who is usually responsible for doing this?')).toBeInTheDocument()
     expect(screen.getByLabelText('Who is affected when this problem happens?')).toBeInTheDocument()
-    const frequency = screen.getByRole('group', { name: 'How often does this happen?' })
+    const frequency = screen.getByRole('group', {
+      name: 'How often does this happen?',
+    })
     expect(
       within(frequency)
         .getAllByRole('radio')
@@ -243,7 +255,9 @@ describe('IdeaForm', () => {
       'Occasionally',
       'Other',
     ])
-    const impacts = screen.getByRole('group', { name: 'What happens because of the problem?' })
+    const impacts = screen.getByRole('group', {
+      name: 'What happens because of the problem?',
+    })
     expect(within(impacts).getByRole('checkbox', { name: 'Mistakes happen' })).toBeInTheDocument()
     expect(
       within(impacts).getByRole('checkbox', { name: 'It increases costs' }),
@@ -335,7 +349,6 @@ describe('IdeaForm', () => {
         title: 'A new idea',
         description: 'A description long enough.',
         categoryId: null,
-        visibility: 'PRIVATE',
         currentProcess: 'Forms, then Excel.',
         // In the options' own order, whatever order they were ticked in.
         currentTools: ['PAPER_FORMS', 'EXCEL', 'OTHER'],
@@ -448,7 +461,7 @@ describe('IdeaForm', () => {
     expect(screen.getByLabelText('Category')).toHaveValue('10')
   })
 
-  // --- context, category and visibility ------------------------------------------
+  // --- level and category ------------------------------------------
 
   it('offers the three ways to file, and marks the two this author cannot use', async () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
@@ -458,9 +471,9 @@ describe('IdeaForm', () => {
     expect(screen.getByRole('group', { name: 'Who is putting this forward?' })).toBeInTheDocument()
     // This form was rendered with no organization, so "my organization" is
     // drawn disabled rather than offered and then refused by the server.
-    expect(contextChoice('Just me')).toBeEnabled()
-    expect(contextChoice('My team')).toBeDisabled()
-    expect(contextChoice('My organization')).toBeDisabled()
+    expect(contextChoice('Individual level')).toBeEnabled()
+    expect(contextChoice('Team level')).toBeDisabled()
+    expect(contextChoice('Organization level')).toBeDisabled()
     expect(screen.getByText('You are not in an organization yet.')).toBeInTheDocument()
     await screen.findByRole('option', { name: 'Finance' })
   })
@@ -470,7 +483,7 @@ describe('IdeaForm', () => {
     renderForm()
     goToStep(CLASSIFY_STEP)
 
-    expect(contextChoice('My organization')).toBeEnabled()
+    expect(contextChoice('Organization level')).toBeEnabled()
     await screen.findByRole('option', { name: 'Finance' })
   })
 
@@ -495,7 +508,7 @@ describe('IdeaForm', () => {
     goToStep(CLASSIFY_STEP)
     await screen.findByRole('option', { name: 'Finance' })
 
-    fireEvent.click(contextChoice('My organization'))
+    fireEvent.click(contextChoice('Organization level'))
     saveDraft()
 
     await waitFor(() =>
@@ -511,7 +524,7 @@ describe('IdeaForm', () => {
     // Drawn with its reason rather than omitted: "my team" is one of the three
     // ways to file, and a reader with no team should be told why it is closed
     // instead of finding it missing.
-    expect(contextChoice('My team')).toBeDisabled()
+    expect(contextChoice('Team level')).toBeDisabled()
     expect(screen.getByText('You are not in a team yet.')).toBeInTheDocument()
     await screen.findByRole('option', { name: 'Finance' })
   })
@@ -525,8 +538,10 @@ describe('IdeaForm', () => {
     goToStep(CLASSIFY_STEP)
     await screen.findByRole('option', { name: 'Finance' })
 
-    fireEvent.click(contextChoice('My team'))
-    fireEvent.change(screen.getByLabelText('Which team?'), { target: { value: '9' } })
+    fireEvent.click(contextChoice('Team level'))
+    fireEvent.change(screen.getByLabelText('Which team?'), {
+      target: { value: '9' },
+    })
     saveDraft()
 
     await waitFor(() =>
@@ -542,9 +557,10 @@ describe('IdeaForm', () => {
     goToStep(CLASSIFY_STEP)
     await screen.findByRole('option', { name: 'Finance' })
 
-    fireEvent.click(contextChoice('My team'))
-    fireEvent.change(screen.getByLabelText('Category'), { target: { value: '11' } })
-    fireEvent.click(screen.getByRole('radio', { name: /Everyone/ }))
+    fireEvent.click(contextChoice('Team level'))
+    fireEvent.change(screen.getByLabelText('Category'), {
+      target: { value: '11' },
+    })
     goToStep(EVIDENCE_STEP)
     fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
 
@@ -552,85 +568,35 @@ describe('IdeaForm', () => {
     expect(createMock).not.toHaveBeenCalled()
   })
 
-  it('offers the visibilities that context can actually be reviewed under', async () => {
+  it('does not ask who can see the idea, and never offers a public audience', async () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
     renderForm()
     goToStep(CLASSIFY_STEP)
     await screen.findByRole('option', { name: 'Finance' })
 
-    // Filing alone, which is the default: there is no organization to widen to,
-    // and platform reviewers are in none of the author's.
-    expect(
-      screen.queryByRole('radio', { name: /People in your organization/ }),
-    ).not.toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: /Everyone/ })).toBeInTheDocument()
-
-    // Organization context: a reviewer is in the organization, so the
-    // organization's own visibility reaches one.
-    fireEvent.click(contextChoice('My organization'))
-    expect(
-      screen.getByRole('radio', {
-        name: /My organization.*People in your organization who have permission can see it/,
-      }),
-    ).toBeInTheDocument()
+    // The audience follows the level; there is nothing to pick.
+    expect(screen.queryByRole('radio', { name: /Everyone/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /Only me/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: /who should be able to see/i })).toBeNull()
   })
 
-  it('offers the three visibilities a person may choose, and not department', async () => {
+  it('says who will see the idea at each level', async () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
+    teamsMock.mockResolvedValue([makeTeam()])
     renderForm()
     goToStep(CLASSIFY_STEP)
-    fireEvent.click(contextChoice('My organization'))
-
-    // `DEPARTMENT` is reserved vocabulary with no tier behind it: the backend
-    // would refuse it, so the picker does not offer it. Matched by role and a
-    // partial name because each radio's accessible name is its label *and* its
-    // hint, which is the point of the hint.
-    expect(
-      screen.getByRole('group', { name: 'Who should be able to see this?' }),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('radio', { name: /Only me.*Only you can see this idea/ }),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('radio', {
-        name: /My organization.*People in your organization who have permission can see it/,
-      }),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('radio', { name: /Everyone.*Other users can discover this idea/ }),
-    ).toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: /department/i })).not.toBeInTheDocument()
     await screen.findByRole('option', { name: 'Finance' })
+    const note = () => screen.getByRole('region', { name: 'Who will see this idea' })
+
+    expect(note()).toHaveTextContent('Only you can see it')
+    fireEvent.click(contextChoice('Team level'))
+    expect(note()).toHaveTextContent('Everyone in your team can see it')
+    fireEvent.click(contextChoice('Organization level'))
+    expect(note()).toHaveTextContent('Everyone in your organization can see it')
+    expect(note()).toHaveTextContent('While it is a draft, only you can see it.')
   })
 
-  it('defaults a new idea to private, matching the server default', async () => {
-    categoriesMock.mockResolvedValue(CATEGORIES)
-    renderForm()
-    goToStep(CLASSIFY_STEP)
-    fireEvent.click(contextChoice('My organization'))
-
-    expect(screen.getByRole('radio', { name: /Only me/ })).toBeChecked()
-    // ...and says, before anybody clicks Submit, that private cannot be reviewed.
-    expect(screen.getByText(/reviewers can only review what they can see/)).toBeInTheDocument()
-    await screen.findByRole('option', { name: 'Finance' })
-  })
-
-  it('says why a private idea cannot be reviewed when filing alone', async () => {
-    categoriesMock.mockResolvedValue(CATEGORIES)
-    renderForm()
-    goToStep(CLASSIFY_STEP)
-
-    // The default context. There is no organization to widen to, so the
-    // message must not tell this author to share with one they do not have.
-    expect(contextChoice('Just me')).toBeChecked()
-    expect(screen.getByText(/the platform reviews this idea directly/)).toBeInTheDocument()
-    expect(
-      screen.queryByText(/reviewers can only review what they can see/),
-    ).not.toBeInTheDocument()
-    await screen.findByRole('option', { name: 'Finance' })
-  })
-
-  it('keeps category and visibility together on one step', async () => {
+  it('keeps the level and the category together on one step', async () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
     renderForm()
     goToStep(CLASSIFY_STEP)
@@ -638,7 +604,7 @@ describe('IdeaForm', () => {
     const step = screen.getByRole('region', { name: CLASSIFY_STEP })
     expect(within(step).getByLabelText('Category')).toBeInTheDocument()
     expect(
-      within(step).getByRole('group', { name: 'Who should be able to see this?' }),
+      within(step).getByRole('group', { name: /Who is putting this forward/ }),
     ).toBeInTheDocument()
     await screen.findByRole('option', { name: 'Finance' })
   })
@@ -651,7 +617,9 @@ describe('IdeaForm', () => {
     goToStep(CLASSIFY_STEP)
     await waitFor(() => expect(screen.getByRole('option', { name: 'Finance' })).toBeInTheDocument())
 
-    fireEvent.change(screen.getByLabelText('Category'), { target: { value: '11' } })
+    fireEvent.change(screen.getByLabelText('Category'), {
+      target: { value: '11' },
+    })
     saveDraft()
 
     await waitFor(() =>
@@ -678,22 +646,18 @@ describe('IdeaForm', () => {
     )
   })
 
-  it('sends the chosen visibility', async () => {
+  it('sends no audience: the server derives it from the level', async () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
     createMock.mockResolvedValue(SAVED)
     renderForm()
     fillProblem()
     goToStep(CLASSIFY_STEP)
 
-    fireEvent.click(screen.getByRole('radio', { name: /Everyone/ }))
     saveDraft()
 
-    await waitFor(() =>
-      expect(createMock).toHaveBeenCalledWith(
-        INDIVIDUAL_TARGET,
-        expect.objectContaining({ visibility: 'PUBLIC' }),
-      ),
-    )
+    await waitFor(() => expect(createMock).toHaveBeenCalled())
+    const input = createMock.mock.calls[0][1] as unknown as Record<string, unknown>
+    expect(input).not.toHaveProperty('visibility')
   })
 
   it('stays usable when the category list cannot be loaded', async () => {
@@ -827,14 +791,20 @@ describe('IdeaForm', () => {
     categoriesMock.mockResolvedValue(CATEGORIES)
     createMock.mockResolvedValue(SAVED)
     renderForm()
-    fillProblem({ title: '  Padded  ', description: '  Because it costs us real time.  ' })
+    fillProblem({
+      title: '  Padded  ',
+      description: '  Because it costs us real time.  ',
+    })
 
     saveDraft()
 
     await waitFor(() =>
       expect(createMock).toHaveBeenCalledWith(
         INDIVIDUAL_TARGET,
-        expect.objectContaining({ title: 'Padded', description: 'Because it costs us real time.' }),
+        expect.objectContaining({
+          title: 'Padded',
+          description: 'Because it costs us real time.',
+        }),
       ),
     )
   })

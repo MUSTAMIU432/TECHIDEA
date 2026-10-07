@@ -33,6 +33,7 @@ export type NotificationKind =
   // Invitations and messages.
   | 'invitation.received'
   | 'invitation.accepted'
+  | 'invitation.declined'
   | 'message.received'
 
 /**
@@ -59,11 +60,28 @@ export function hasReportLink(kind: NotificationKind): boolean {
 export interface Notification {
   id: string
   kind: NotificationKind
+  /** The kind in the server's own words, so a client never re-spells it. */
+  label: string
   title: string
   body: string
   ideaId: string | null
   reportId: string | null
   isRead: boolean
+  /**
+   * Where this takes you, decided by the server, or `null` when there is
+   * nowhere specific to go.
+   *
+   * **The server's answer, not a guess.** This client used to build its own
+   * destination out of `ideaId` and the kind, which is how three links ended up
+   * pointing at a route that did not exist and an invitation notification ended
+   * up with no way to act at all. One mapping - `Notification.action_path` -
+   * serves the in-app link here and any payload built from the same row, so the
+   * two cannot disagree and a rename is one edit on the server.
+   *
+   * `null` is a real answer, not a gap: an invitation cannot carry an accept
+   * link, because acceptance needs a token the server stores only as a digest.
+   */
+  actionPath: string | null
   createdAt: string
 }
 
@@ -95,11 +113,13 @@ export interface NotificationPageRequest {
 const NOTIFICATION_FIELDS = `
   id
   kind
+  label
   title
   body
   ideaId
   reportId
   isRead
+  actionPath
   createdAt
 `
 

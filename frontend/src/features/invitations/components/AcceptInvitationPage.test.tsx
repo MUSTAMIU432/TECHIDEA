@@ -8,12 +8,16 @@ import { AcceptInvitationPage } from './AcceptInvitationPage'
 vi.mock('../api/invitationsApi', () => ({
   invitationDetailsRequest: vi.fn(),
   acceptInvitationRequest: vi.fn(),
+  declineInvitationRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 
-const { invitationDetailsRequest: detailsMock, acceptInvitationRequest: acceptMock } =
-  await import('../api/invitationsApi')
+const {
+  invitationDetailsRequest: detailsMock,
+  acceptInvitationRequest: acceptMock,
+  declineInvitationRequest: declineMock,
+} = await import('../api/invitationsApi')
 
 const TOKEN = 'raw-token-in-the-url'
 const PREVIEW = {
@@ -26,6 +30,12 @@ const PREVIEW = {
   expired: false,
   accepted: false,
   revoked: false,
+  declined: false,
+}
+
+/** One dead state at a time: the page keeps expired, revoked and declined apart. */
+function deadState(field: 'expired' | 'revoked' | 'declined') {
+  return { ...PREVIEW, isOpen: false, [field]: true } as typeof PREVIEW
 }
 
 /**
@@ -181,5 +191,83 @@ describe('AcceptInvitationPage', () => {
 
     expect(await screen.findByText(/already been accepted/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Join Acme Labs/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('declining an invitation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    signedInAs('ada@example.com')
+    vi.mocked(detailsMock).mockResolvedValue(PREVIEW)
+    vi.mocked(declineMock).mockResolvedValue({
+      success: true,
+      message: 'You have declined the invitation to Acme Labs.',
+      field: null,
+      invitation: null,
+    })
+  })
+
+  it('offers declining next to joining, not instead of it', async () => {
+    renderAt()
+
+    expect(await screen.findByRole('button', { name: /Join Acme Labs/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
+  })
+
+  it('says what declining does, and that it does nothing to the account', async () => {
+    renderAt()
+    await screen.findByRole('button', { name: 'Decline' })
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }))
+
+    expect(
+      await screen.findByText(/Nothing about your account or your work changed/),
+    ).toBeInTheDocument()
+    expect(declineMock).toHaveBeenCalledWith(TOKEN)
+    // And nothing was accepted on the way.
+    expect(acceptMock).not.toHaveBeenCalled()
+  })
+
+  it('offers neither button to somebody signed in as somebody else', async () => {
+    // Same rule as accepting, and for the same reason: a decline is a statement
+    // about the invitation, so only the person it was sent to may make one.
+    signedInAs('someone.else@example.com')
+    renderAt()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('sent to ada@example.com')
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled()
+  })
+
+  it('shows the server’s refusal rather than claiming it worked', async () => {
+    vi.mocked(declineMock).mockResolvedValue({
+      success: false,
+      message: 'This invitation was sent to a different email address.',
+      field: null,
+      invitation: null,
+    })
+    renderAt()
+    await screen.findByRole('button', { name: 'Decline' })
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('different email address')
+  })
+
+  it('reports a transport failure without changing anything', async () => {
+    vi.mocked(declineMock).mockRejectedValue(new Error('offline'))
+    renderAt()
+    await screen.findByRole('button', { name: 'Decline' })
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('nothing has changed')
+  })
+
+  it('explains a declined invitation rather than calling it invalid', async () => {
+    vi.mocked(detailsMock).mockResolvedValue(deadState('declined'))
+    renderAt()
+
+    expect(await screen.findByText('This invitation was declined.')).toBeInTheDocument()
+    expect(screen.getByText(/ask Rae to send another invitation/)).toBeInTheDocument()
+    // No buttons: the decision is made, and offering another would be a lie.
+    expect(screen.queryByRole('button', { name: /Join/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
   })
 })

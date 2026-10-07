@@ -86,11 +86,16 @@ describe('TeamsPage', () => {
     renderAt()
     await screen.findByRole('list', { name: 'Your teams' })
 
-    fireEvent.change(screen.getByLabelText('Team name'), { target: { value: 'Registrar' } })
+    fireEvent.change(screen.getByLabelText('Team name'), {
+      target: { value: 'Registrar' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Create team' }))
 
     expect(await screen.findByText('Team created.')).toBeInTheDocument()
-    expect(createMock).toHaveBeenCalledWith({ name: 'Registrar', description: '' })
+    expect(createMock).toHaveBeenCalledWith({
+      name: 'Registrar',
+      description: '',
+    })
     await waitFor(() => expect(teamsMock).toHaveBeenCalledTimes(2))
   })
 

@@ -20,7 +20,9 @@ vi.mock('../features/ideas/api/ideasApi', async (importOriginal) => ({
   submitIdeaRequest: vi.fn(),
   uploadAttachmentRequest: vi.fn(),
 }))
-vi.mock('../features/organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../features/organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { categoriesRequest, createIdeaRequest, submitIdeaRequest, uploadAttachmentRequest } =
   await import('../features/ideas/api/ideasApi')
@@ -36,7 +38,11 @@ const CREATED = makeIdea({
 
 /** Stands in for the ideas list: shows what the redirect handed it. */
 function IdeasStub() {
-  const state = useLocation().state as { notice?: string; tone?: string; ideaId?: string } | null
+  const state = useLocation().state as {
+    notice?: string
+    tone?: string
+    ideaId?: string
+  } | null
   return (
     <>
       <p>Ideas list: {state?.notice ?? 'no notice'}</p>
@@ -76,14 +82,22 @@ describe('NewIdeaPage', () => {
     renderAt()
 
     expect(
-      screen.getByRole('heading', { level: 1, name: 'Tell us about a problem.' }),
+      screen.getByRole('heading', {
+        level: 1,
+        name: 'Tell us about a problem.',
+      }),
     ).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Share a problem' })).toBeInTheDocument()
     expect(screen.getByText('Step 1 of 8')).toBeInTheDocument()
   })
 
   it('redirects to the ideas list with a confirmation once saved', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: CREATED })
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: CREATED,
+    })
     const router = renderAt()
 
     fillProblem()
@@ -121,9 +135,10 @@ describe('NewIdeaPage', () => {
     fillProblem()
     goToStep(CLASSIFY_STEP)
     await screen.findByRole('option', { name: 'Finance' })
-    fireEvent.change(screen.getByLabelText('Category'), { target: { value: '10' } })
-    fireEvent.click(contextChoice('My organization'))
-    fireEvent.click(screen.getByRole('radio', { name: /My organization.*People in your/ }))
+    fireEvent.change(screen.getByLabelText('Category'), {
+      target: { value: '10' },
+    })
+    fireEvent.click(contextChoice('Organization level'))
     goToStep(EVIDENCE_STEP)
     fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
 
@@ -140,7 +155,12 @@ describe('NewIdeaPage', () => {
   })
 
   it('warns, naming the file, when a supporting document could not be attached', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: CREATED })
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: CREATED,
+    })
     vi.mocked(uploadAttachmentRequest).mockResolvedValue({
       success: false,
       message: 'That file type is not supported.',
@@ -152,7 +172,9 @@ describe('NewIdeaPage', () => {
     fillProblem()
     goToStep(EVIDENCE_STEP)
     fireEvent.change(screen.getByLabelText('Choose files'), {
-      target: { files: [new File(['%PDF'], 'form.pdf', { type: 'application/pdf' })] },
+      target: {
+        files: [new File(['%PDF'], 'form.pdf', { type: 'application/pdf' })],
+      },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
 
@@ -200,6 +222,6 @@ describe('NewIdeaPage', () => {
     expect(screen.getByRole('heading', { name: 'Share a problem' })).toBeInTheDocument()
     goToStep(CLASSIFY_STEP)
     expect(screen.getByText('You are not in an organization yet.')).toBeInTheDocument()
-    expect(contextChoice('Just me')).toBeChecked()
+    expect(contextChoice('Individual level')).toBeChecked()
   })
 })

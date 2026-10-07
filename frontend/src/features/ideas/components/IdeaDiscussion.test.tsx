@@ -23,7 +23,9 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const {
   organizationIdeasRequest,
@@ -80,7 +82,11 @@ async function openDiscussion(title = 'Automate the invoice run') {
  * reader does, rather than reaching past the disclosure.
  */
 function openCommentMenu(target: HTMLElement) {
-  fireEvent.click(within(target).getByRole('button', { name: 'More actions for your comment' }))
+  fireEvent.click(
+    within(target).getByRole('button', {
+      name: 'More actions for your comment',
+    }),
+  )
 }
 
 function composer(target: HTMLElement) {
@@ -113,7 +119,9 @@ async function replyBox(target: HTMLElement) {
  * rather than reaching past the component.
  */
 function seeMore(target: HTMLElement) {
-  const [button] = within(target).queryAllByRole('button', { name: /^See \d+ more/ })
+  const [button] = within(target).queryAllByRole('button', {
+    name: /^See \d+ more/,
+  })
   if (button === undefined) throw new Error('No "See more" disclosure on screen.')
   fireEvent.click(button)
   return button
@@ -273,7 +281,11 @@ describe('Idea discussion (S2-005)', () => {
     commentsMock.mockResolvedValue(
       commentPage([
         comment({ id: 'c1', content: 'First comment.' }),
-        comment({ id: 'c2', authorId: SOMEBODY_ELSE, content: 'Second comment.' }),
+        comment({
+          id: 'c2',
+          authorId: SOMEBODY_ELSE,
+          content: 'Second comment.',
+        }),
       ]),
     )
     renderWithRouter(<IdeasWorkspace />)
@@ -432,7 +444,9 @@ describe('Idea discussion (S2-005)', () => {
     renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
 
-    fireEvent.change(composer(target), { target: { value: 'One more thought' } })
+    fireEvent.change(composer(target), {
+      target: { value: 'One more thought' },
+    })
     fireEvent.click(within(target).getByRole('button', { name: 'Comment' }))
 
     expect(
@@ -522,7 +536,11 @@ describe('Idea discussion (S2-005)', () => {
     commentsMock.mockResolvedValue(
       commentPage([
         comment({ id: 'c1', authorId: SIGNED_IN.id }),
-        comment({ id: 'c2', authorId: SOMEBODY_ELSE, content: 'Somebody else.' }),
+        comment({
+          id: 'c2',
+          authorId: SOMEBODY_ELSE,
+          content: 'Somebody else.',
+        }),
       ]),
     )
     renderWithRouter(<IdeasWorkspace />)
@@ -762,7 +780,11 @@ describe('Idea discussion (S2-005)', () => {
       success: true,
       message: 'Reply posted.',
       field: null,
-      comment: comment({ id: 'c2', parentId: 'c1', content: 'We automate it in batches.' }),
+      comment: comment({
+        id: 'c2',
+        parentId: 'c1',
+        content: 'We automate it in batches.',
+      }),
     })
     renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
@@ -785,7 +807,11 @@ describe('Idea discussion (S2-005)', () => {
       success: true,
       message: 'Reply posted.',
       field: null,
-      comment: comment({ id: 'c2', parentId: 'c1', content: 'By hand, in a spreadsheet.' }),
+      comment: comment({
+        id: 'c2',
+        parentId: 'c1',
+        content: 'By hand, in a spreadsheet.',
+      }),
     })
     renderWithRouter(<IdeasWorkspace />)
     const target = await openDiscussion()
@@ -889,7 +915,10 @@ describe('Idea discussion (S2-005)', () => {
 
     const { box } = await replyBox(target)
     fireEvent.change(box, { target: { value: 'Yes, it is me.' } })
-    const notCancelled = fireEvent.keyDown(box, { key: 'Enter', shiftKey: true })
+    const notCancelled = fireEvent.keyDown(box, {
+      key: 'Enter',
+      shiftKey: true,
+    })
 
     // No post, and the key was left to the textarea - so the break lands where
     // the reader pressed it instead of the key looking broken.
@@ -938,7 +967,11 @@ describe('Idea discussion (S2-005)', () => {
               success: true,
               message: 'Reply posted.',
               field: null,
-              comment: comment({ id: 'c2', parentId: 'c1', content: 'Yes, it is me.' }),
+              comment: comment({
+                id: 'c2',
+                parentId: 'c1',
+                content: 'Yes, it is me.',
+              }),
             })
         }),
     )
@@ -1031,8 +1064,17 @@ describe('Idea discussion (S2-005)', () => {
   it('does not collapse a run while the reader is editing a comment inside it', async () => {
     commentsMock.mockResolvedValue(
       commentPage([
-        comment({ id: 'c1', authorId: SOMEBODY_ELSE, content: 'How is it done now?' }),
-        comment({ id: 'c2', parentId: 'c1', authorId: SIGNED_IN.id, content: 'First answer.' }),
+        comment({
+          id: 'c1',
+          authorId: SOMEBODY_ELSE,
+          content: 'How is it done now?',
+        }),
+        comment({
+          id: 'c2',
+          parentId: 'c1',
+          authorId: SIGNED_IN.id,
+          content: 'First answer.',
+        }),
         comment({ id: 'c3', parentId: 'c1', content: 'Second answer.' }),
       ]),
     )
@@ -1123,7 +1165,9 @@ describe('Idea discussion (S2-005)', () => {
     const reply = await within(target).findByText('By hand.')
 
     expect(
-      within(reply.closest('li') as HTMLElement).queryByRole('button', { name: 'Reply' }),
+      within(reply.closest('li') as HTMLElement).queryByRole('button', {
+        name: 'Reply',
+      }),
     ).toBe(null)
     const row = (await within(target).findByText('How is it done now?')).closest(
       'li',

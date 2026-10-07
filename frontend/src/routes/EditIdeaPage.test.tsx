@@ -16,7 +16,9 @@ vi.mock('../features/ideas/api/ideasApi', async (importOriginal) => ({
   updateIdeaRequest: vi.fn(),
   createIdeaRequest: vi.fn(),
 }))
-vi.mock('../features/reviews/api/reviewsApi', () => ({ ideaReviewsRequest: vi.fn() }))
+vi.mock('../features/reviews/api/reviewsApi', () => ({
+  ideaReviewsRequest: vi.fn(),
+}))
 vi.mock('../features/identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 
 const { ideaRequest, updateIdeaRequest, createIdeaRequest } =
@@ -62,9 +64,9 @@ function renderAt(path = '/app/ideas/1/edit') {
 describe('EditIdeaPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(useAuth).mockReturnValue({ user: { id: '7' } } as unknown as ReturnType<
-      typeof useAuth
-    >)
+    vi.mocked(useAuth).mockReturnValue({
+      user: { id: '7' },
+    } as unknown as ReturnType<typeof useAuth>)
   })
 
   it('loads the idea by its id and opens it in the guided form', async () => {
@@ -118,7 +120,10 @@ describe('EditIdeaPage', () => {
 
   it('revises a sent-back idea with the feedback above it and visibility fixed', async () => {
     loadMock.mockResolvedValue(
-      makeIdea({ status: 'CHANGES_REQUESTED', submittedAt: '2026-01-02T00:00:00.000Z' }),
+      makeIdea({
+        status: 'CHANGES_REQUESTED',
+        submittedAt: '2026-01-02T00:00:00.000Z',
+      }),
     )
     vi.mocked(ideaReviewsRequest).mockResolvedValue([
       {
@@ -135,21 +140,30 @@ describe('EditIdeaPage', () => {
         submissionSnapshot: null,
       },
     ])
-    updateMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: makeIdea() })
+    updateMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: makeIdea(),
+    })
     renderAt()
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'Revise your idea.' }),
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Revise your idea.',
+      }),
     ).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Revise this idea' })).toBeInTheDocument()
     const feedback = screen.getByRole('region', { name: 'Reviewer feedback' })
     expect(await within(feedback).findByText(FEEDBACK)).toBeInTheDocument()
     goToStep(CLASSIFY_STEP)
-    const visibility = screen.getByRole('group', { name: 'Who should be able to see this?' })
-    for (const radio of within(visibility).getAllByRole('radio')) {
+    // The level (and so the audience) is fixed once the idea exists.
+    expect(screen.getByRole('region', { name: 'Who will see this idea' })).toBeInTheDocument()
+    for (const radio of screen.getAllByRole('radio', { name: /level/ })) {
       expect(radio).toBeDisabled()
     }
-    // Only who can see it is fixed: the story itself is still the author's to revise.
+    // Only the level is fixed: the story itself is still the author's to revise.
     goToStep('Tell us about the impact')
     expect(screen.getByRole('radio', { name: 'Daily' })).toBeEnabled()
 

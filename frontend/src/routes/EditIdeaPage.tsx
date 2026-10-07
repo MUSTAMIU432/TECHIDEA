@@ -60,14 +60,14 @@ export function EditIdeaPage() {
   const editable = idea !== null && idea.authorId === user?.id && EDITABLE.includes(idea.status)
 
   return (
-    <div className="mx-auto w-full max-w-6xl">
-      <div className="sticky top-[var(--app-chrome-height)] z-20 -mt-8 border-b border-gray-200 bg-slate-50 pt-8 pb-5">
+    <div className="flex w-full max-w-none flex-col lg:h-[calc(100dvh-var(--app-chrome-height,0px)-4.5rem)]">
+      <div className="sticky top-[var(--app-chrome-height)] z-20 -mt-8 border-b border-gray-200 bg-slate-50 pt-8 pb-3">
         <h1 className="text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl">
           {idea?.status === 'CHANGES_REQUESTED' ? 'Revise your idea.' : 'Edit your draft.'}
         </h1>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4 flex flex-col lg:min-h-0 lg:flex-1">
         {load.state === 'loading' ? (
           <p className="text-sm text-gray-600">Loading your idea…</p>
         ) : load.state === 'error' ? (

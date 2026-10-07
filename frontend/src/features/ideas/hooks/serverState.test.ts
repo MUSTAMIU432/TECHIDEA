@@ -160,9 +160,14 @@ describe('useIdeaVotes', () => {
   it('lets a refreshed list replace the numbers a vote response left behind', async () => {
     // 1. Initial server state.
     const view = renderHook(({ ideas }: { ideas: Idea[] }) => useIdeaVotes(ideas), {
-      initialProps: { ideas: [makeIdea({ voteCount: 2, viewerHasVoted: false })] },
+      initialProps: {
+        ideas: [makeIdea({ voteCount: 2, viewerHasVoted: false })],
+      },
     })
-    expect(view.result.current.votes['1']).toMatchObject({ voteCount: 2, viewerHasVoted: false })
+    expect(view.result.current.votes['1']).toMatchObject({
+      voteCount: 2,
+      viewerHasVoted: false,
+    })
 
     // 2. The reader votes; the UI shows the server's answer to the mutation.
     voteMock.mockResolvedValue({
@@ -173,12 +178,17 @@ describe('useIdeaVotes', () => {
     })
     act(() => view.result.current.toggle('1'))
     await waitFor(() =>
-      expect(view.result.current.votes['1']).toMatchObject({ voteCount: 3, pending: false }),
+      expect(view.result.current.votes['1']).toMatchObject({
+        voteCount: 3,
+        pending: false,
+      }),
     )
 
     // 3. The list is fetched again and the server now says something else -
     //    other people voted, and this reader's vote was withdrawn elsewhere.
-    view.rerender({ ideas: [makeIdea({ voteCount: 5, viewerHasVoted: false })] })
+    view.rerender({
+      ideas: [makeIdea({ voteCount: 5, viewerHasVoted: false })],
+    })
 
     // 4. The refreshed server state wins; the old response is not pinned.
     expect(view.result.current.votes['1']).toMatchObject({
@@ -226,6 +236,9 @@ describe('useIdeaVotes', () => {
 
     // A re-render with the same answer is not a new answer.
     view.rerender({ list: ideas })
-    expect(view.result.current.votes['1']).toMatchObject({ voteCount: 3, viewerHasVoted: true })
+    expect(view.result.current.votes['1']).toMatchObject({
+      voteCount: 3,
+      viewerHasVoted: true,
+    })
   })
 })

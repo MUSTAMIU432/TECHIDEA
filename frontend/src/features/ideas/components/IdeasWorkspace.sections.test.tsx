@@ -26,7 +26,9 @@ vi.mock('../../reviews/api/reviewsApi', async (importOriginal) => ({
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { organizationIdeasRequest, commentsRequest, attachmentsRequest } =
   await import('../api/ideasApi')
@@ -41,7 +43,9 @@ const SECOND = makeIdea({ id: '2', title: 'Second idea' })
 const THIRD = makeIdea({ id: '3', title: 'Third idea' })
 
 function mockContext(ideas: Idea[] = [FIRST, SECOND, THIRD]) {
-  vi.mocked(useAuth).mockReturnValue({ user: SIGNED_IN } as unknown as ReturnType<typeof useAuth>)
+  vi.mocked(useAuth).mockReturnValue({
+    user: SIGNED_IN,
+  } as unknown as ReturnType<typeof useAuth>)
   vi.mocked(useOrganization).mockReturnValue({
     activeOrganization: { id: '3', name: 'Acme Labs' },
     status: 'ready',

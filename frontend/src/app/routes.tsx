@@ -1,4 +1,5 @@
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, Navigate } from 'react-router-dom'
+import { AccountSettingsPage } from '../features/identity/components/AccountSettingsPage'
 
 import type * as AdminPages from '../features/administration/pages'
 
@@ -10,6 +11,7 @@ import { AcceptInvitationPage } from '../features/invitations/components/AcceptI
 import { MessageThreadPage } from '../features/messaging/components/MessageThreadPage'
 import { MessagesPage } from '../features/messaging/components/MessagesPage'
 import { NotificationsPage } from '../features/notifications/components/NotificationsPage'
+import { IdeaDetailPage } from '../features/ideas/components/IdeaDetailPage'
 import { IdeaReportPage } from '../features/reviews/components/IdeaReportPage'
 import { AppLayout } from '../layouts/AppLayout'
 import { RootLayout } from '../layouts/RootLayout'
@@ -20,7 +22,16 @@ import { IdeasPage } from '../routes/IdeasPage'
 import { NewIdeaPage } from '../routes/NewIdeaPage'
 import { NotFoundPage } from '../routes/NotFoundPage'
 import { ReviewsPage } from '../routes/ReviewsPage'
+import { OrganizationDetailPage } from '../features/organizations/components/OrganizationDetailPage'
 import { TeamDetailPage } from '../routes/TeamDetailPage'
+import { ProposalReadPage } from '../features/proposals/components/ProposalReadPage'
+import { AutomationLayout } from '../features/automation/components/AutomationLayout'
+import { DeveloperQueuePage } from '../features/automation/components/DeveloperQueuePage'
+import { OpportunitiesPage } from '../features/automation/components/OpportunitiesPage'
+import { OpportunityPage } from '../features/automation/components/OpportunityPage'
+import { ProjectPage } from '../features/automation/components/ProjectPage'
+import { ProjectsPage } from '../features/automation/components/ProjectsPage'
+import { OrganizationsPage } from '../routes/OrganizationsPage'
 import { TeamsPage } from '../routes/TeamsPage'
 
 /**
@@ -63,7 +74,9 @@ type AdminPageName = keyof typeof AdminPages
 
 /** A console page, loaded with the rest of the console the first time it is visited. */
 function adminPage(name: AdminPageName) {
-  return async () => ({ Component: (await import('../features/administration/pages'))[name] })
+  return async () => ({
+    Component: (await import('../features/administration/pages'))[name],
+  })
 }
 
 export const router = createBrowserRouter([
@@ -96,6 +109,15 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <DashboardPage /> },
           { path: 'ideas', element: <IdeasPage /> },
+          /*
+            One idea. Three places already linked here and all three were a 404,
+            because ideas existed only as rows in a list - so this is the fix as
+            much as the feature. Its query parameters carry the ownership the
+            reader chose: `?context=team&team=9` opens the form already decided,
+            which is what makes a Team page's "Create Idea" a link rather than a
+            second copy of the ownership question.
+          */
+          { path: 'ideas/:ideaId', element: <IdeaDetailPage /> },
           { path: 'ideas/new', element: <NewIdeaPage /> },
           { path: 'ideas/:ideaId/edit', element: <EditIdeaPage /> },
           /*
@@ -106,6 +128,7 @@ export const router = createBrowserRouter([
             edit forms.
           */
           { path: 'ideas/:ideaId/report', element: <IdeaReportPage /> },
+          { path: 'ideas/:ideaId/proposal', element: <ProposalReadPage /> },
           { path: 'reviews', element: <ReviewsPage /> },
           /*
             Teams and messages are `/app` children but read nothing from
@@ -114,11 +137,33 @@ export const router = createBrowserRouter([
             neither has an organization to scope itself to. Putting them under
             `/app` is still what gives them the sign-in gate.
           */
+          { path: 'organizations', element: <OrganizationsPage /> },
+          {
+            path: 'automation',
+            element: <AutomationLayout />,
+            children: [
+              { index: true, element: <Navigate to="opportunities" replace /> },
+              { path: 'opportunities', element: <OpportunitiesPage /> },
+              { path: 'opportunities/:opportunityId', element: <OpportunityPage /> },
+              { path: 'queue', element: <DeveloperQueuePage /> },
+              { path: 'projects', element: <ProjectsPage /> },
+              { path: 'projects/:projectId', element: <ProjectPage /> },
+            ],
+          },
           { path: 'teams', element: <TeamsPage /> },
           { path: 'teams/:teamId', element: <TeamDetailPage /> },
+          {
+            path: 'organizations/:organizationId',
+            element: <OrganizationDetailPage />,
+          },
           { path: 'messages', element: <MessagesPage /> },
           { path: 'messages/:threadId', element: <MessageThreadPage /> },
           { path: 'notifications', element: <NotificationsPage /> },
+          {
+            path: 'settings',
+            element: <Navigate to="/app/settings/profile" replace />,
+          },
+          { path: 'settings/:section', element: <AccountSettingsPage /> },
           {
             path: 'admin',
             lazy: async () => ({
@@ -129,7 +174,10 @@ export const router = createBrowserRouter([
               { index: true, lazy: adminPage('AdminDashboardPage') },
               { path: 'users', lazy: adminPage('AdminUsersPage') },
               { path: 'users/:userId', lazy: adminPage('AdminUserDetailPage') },
-              { path: 'organizations', lazy: adminPage('AdminOrganizationsPage') },
+              {
+                path: 'organizations',
+                lazy: adminPage('AdminOrganizationsPage'),
+              },
               {
                 path: 'organizations/:organizationId',
                 lazy: adminPage('AdminOrganizationDetailPage'),
@@ -137,8 +185,33 @@ export const router = createBrowserRouter([
               { path: 'ideas', lazy: adminPage('AdminIdeasPage') },
               { path: 'ideas/:ideaId', lazy: adminPage('AdminIdeaDetailPage') },
               { path: 'reviews', lazy: adminPage('AdminReviewsPage') },
-              { path: 'reviews/:reviewId', lazy: adminPage('AdminReviewDetailPage') },
+              {
+                path: 'reviews/:reviewId',
+                lazy: adminPage('AdminReviewDetailPage'),
+              },
               { path: 'approvals', lazy: adminPage('AdminApprovalsPage') },
+              { path: 'reviewers', lazy: adminPage('AdminReviewersPage') },
+              { path: 'proposals', lazy: adminPage('AdminProposalsPage') },
+              { path: 'automation', lazy: adminPage('AdminAutomationPage') },
+              /*
+                The collaboration set: teams, and the three record sets that
+                answer how people got into them, how they talk, and what the
+                platform has told them. All read-only, and Teams is a sibling of
+                Organizations rather than a child of it - a team is a
+                collaboration boundary, not a tenant.
+              */
+              { path: 'teams', lazy: adminPage('AdminTeamsPage') },
+              { path: 'teams/:teamId', lazy: adminPage('AdminTeamDetailPage') },
+              { path: 'invitations', lazy: adminPage('AdminInvitationsPage') },
+              { path: 'messages', lazy: adminPage('AdminMessagesPage') },
+              {
+                path: 'messages/:threadId',
+                lazy: adminPage('AdminMessageDetailPage'),
+              },
+              {
+                path: 'notifications',
+                lazy: adminPage('AdminNotificationsPage'),
+              },
               { path: 'categories', lazy: adminPage('AdminCategoriesPage') },
             ],
           },

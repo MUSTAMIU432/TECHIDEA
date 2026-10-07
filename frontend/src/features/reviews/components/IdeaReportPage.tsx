@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { SpinnerIcon } from '../../identity/components/icons'
-import { giveGoAheadRequest } from '../../ideas/api/ideasApi'
+import { proposalStateRequest } from '../../proposals/api/proposalsApi'
 import {
   ideaReviewReportRequest,
   ideaSubmissionVersionsRequest,
@@ -189,69 +188,57 @@ export function IdeaReportPage() {
 }
 
 /**
- * The one button on this page, and it is the author's.
+ * What comes after the report: the proposal, and only then the owner's go-ahead.
  *
- * Platform approval is a recommendation; giving the go-ahead is a separate act
- * that only the author may make, which is why it gets its own control rather
- * than being folded into "approved". `decided` comes from the report's own
- * decision, so a report that did not recommend approval offers nothing here
- * rather than offering a button the server would refuse.
+ * The go-ahead used to be a button here. It now follows the proposal the review team writes and
+ * an admin releases, so this page points there - or says that the proposal is still being
+ * prepared - rather than offering a decision on the report alone. `decided` comes from the
+ * report's own decision, so a report that did not recommend approval offers nothing here.
  */
 function GoAheadPanel({ ideaId, decided }: { ideaId: string; decided: boolean }) {
-  const [state, setState] = useState<'idle' | 'pending' | 'done'>('idle')
-  const [message, setMessage] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [released, setReleased] = useState<boolean | null>(null)
 
-  if (decided) return null
-
-  async function handleGoAhead() {
-    setState('pending')
-    setMessage(null)
-    setError(null)
-    try {
-      const result = await giveGoAheadRequest(ideaId)
-      if (!result.success) {
-        setError(result.message)
-        setState('idle')
-        return
-      }
-      setMessage(result.message)
-      setState('done')
-    } catch {
-      setError('We could not reach the server, so nothing has changed. Please try again.')
-      setState('idle')
+  useEffect(() => {
+    if (decided) return
+    let cancelled = false
+    proposalStateRequest(ideaId)
+      .then((state) => {
+        if (!cancelled) setReleased(state.proposal?.status === 'released')
+      })
+      .catch(() => {
+        if (!cancelled) setReleased(false)
+      })
+    return () => {
+      cancelled = true
     }
-  }
+  }, [ideaId, decided])
+
+  if (decided || released === null) return null
 
   return (
     <section
-      aria-label="Your decision"
+      aria-label="Your proposal"
       className="mt-6 rounded-xl border border-brand-200 bg-brand-50 p-5"
     >
-      <h2 className="text-base font-semibold text-brand-900">Your decision</h2>
-      {state === 'done' ? (
-        <output className="mt-2 block text-sm text-brand-800">{message}</output>
-      ) : (
+      <h2 className="text-base font-semibold text-brand-900">Your proposal</h2>
+      {released ? (
         <>
           <p className="mt-2 text-sm leading-6 text-brand-900">
-            The platform recommends this idea. Whether it goes ahead is yours to say, and nobody
-            else&rsquo;s — giving the go-ahead is what moves it on.
+            The platform has prepared a proposal for your idea. Read it, then decide whether to give
+            your go-ahead - that is yours to say, and nobody else&rsquo;s.
           </p>
-          {error ? (
-            <p role="alert" className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
-              {error}
-            </p>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => void handleGoAhead()}
-            disabled={state === 'pending'}
-            className="mt-4 inline-flex h-11 items-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+          <Link
+            to={`/app/ideas/${ideaId}/proposal`}
+            className="mt-3 inline-block text-sm font-semibold text-brand-800 hover:underline"
           >
-            {state === 'pending' && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
-            {state === 'pending' ? 'Recording…' : 'Give the go-ahead'}
-          </button>
+            Read the proposal →
+          </Link>
         </>
+      ) : (
+        <p className="mt-2 text-sm leading-6 text-brand-900">
+          The review team is preparing a proposal for your idea. You will be told when it is ready
+          to read; your go-ahead comes after you have read it.
+        </p>
       )}
     </section>
   )

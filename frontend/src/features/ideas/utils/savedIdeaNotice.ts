@@ -9,6 +9,7 @@ import type { SubmitOutcome } from '../components/IdeaForm'
 const DRAFT_READERS: Record<IdeaVisibility, string> = {
   PRIVATE: 'Only you can see it.',
   ORGANIZATION: 'Members of this organization can read it.',
+  TEAM: 'The other members of your team can read it.',
   PUBLIC: 'Anyone signed in to the platform can read it.',
   DEPARTMENT: 'Only you can see it.',
 }

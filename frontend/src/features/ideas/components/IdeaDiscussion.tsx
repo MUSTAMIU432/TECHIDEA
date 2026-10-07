@@ -57,6 +57,18 @@ const PREVIEW_COMMENTS = 1
  * instead. Either way the two boxes cannot both own the same state, so it is
  * held here.
  */
+/**
+ * The discussion, always open.
+ *
+ * The list's card wraps this in a disclosure so twenty ideas do not fetch
+ * twenty discussions; the idea's own page *is* the discussion's page, so there
+ * is nothing to open it from. Same component, same fetches, one fewer click -
+ * and the `open` prop stays because the card still needs it.
+ */
+export function IdeaDiscussionPanel({ idea }: { idea: Idea }) {
+  return <IdeaDiscussion idea={idea} open />
+}
+
 export function IdeaDiscussion({ idea, open }: { idea: Idea; open: boolean }) {
   const { user } = useAuth()
   // Fetched only while open. The list can hold twenty ideas, and a page that

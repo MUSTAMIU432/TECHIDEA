@@ -7,7 +7,10 @@ import type { ResetPasswordFormValues } from '../types/auth'
 import { PasswordField } from './PasswordField'
 import { SpinnerIcon } from './icons'
 
-const INITIAL_VALUES: ResetPasswordFormValues = { password: '', confirmPassword: '' }
+const INITIAL_VALUES: ResetPasswordFormValues = {
+  password: '',
+  confirmPassword: '',
+}
 
 /**
  * `invalid-token` and `error` are separate states on purpose: the first is

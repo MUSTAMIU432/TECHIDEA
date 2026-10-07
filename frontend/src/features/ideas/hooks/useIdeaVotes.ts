@@ -101,7 +101,10 @@ export function useIdeaVotes(ideas: Idea[]): {
   })
 
   const update = useCallback((ideaId: string, patch: Partial<IdeaVoteControl>) => {
-    setOverrides((previous) => ({ ...previous, [ideaId]: { ...previous[ideaId], ...patch } }))
+    setOverrides((previous) => ({
+      ...previous,
+      [ideaId]: { ...previous[ideaId], ...patch },
+    }))
   }, [])
 
   const toggle = useCallback(

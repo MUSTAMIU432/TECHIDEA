@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,11 +10,11 @@ vi.mock('../api/reviewsApi', () => ({
   ideaSubmissionVersionsRequest: vi.fn(async () => []),
 }))
 
-vi.mock('../../ideas/api/ideasApi', () => ({ giveGoAheadRequest: vi.fn() }))
+vi.mock('../../proposals/api/proposalsApi', () => ({ proposalStateRequest: vi.fn() }))
 
 const { ideaReviewReportRequest: reportMock, ideaSubmissionVersionsRequest: versionsMock } =
   await import('../api/reviewsApi')
-const { giveGoAheadRequest: goAheadMock } = await import('../../ideas/api/ideasApi')
+const { proposalStateRequest: proposalMock } = await import('../../proposals/api/proposalsApi')
 
 const REPORT: PlatformReviewReport = {
   id: 'r1',
@@ -58,6 +58,7 @@ function renderAt(ideaId = '1') {
 describe('IdeaReportPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(proposalMock).mockResolvedValue({ proposal: null } as never)
     vi.mocked(reportMock).mockResolvedValue(REPORT)
     vi.mocked(versionsMock).mockResolvedValue([])
   })
@@ -83,41 +84,31 @@ describe('IdeaReportPage', () => {
     expect(assessed.textContent).not.toMatch(/\b\d+\s*\/\s*\d+\b/)
   })
 
-  it('offers the author their own decision, separately from the approval', async () => {
-    vi.mocked(goAheadMock).mockResolvedValue({
-      success: true,
-      message: 'Given. Your idea is ready for implementation.',
-      field: null,
-      idea: null,
-    })
+  it('points the author to the proposal once it is released, and has no go-ahead button of its own', async () => {
+    vi.mocked(proposalMock).mockResolvedValue({ proposal: { status: 'released' } } as never)
     renderAt()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Give the go-ahead' }))
-
-    await waitFor(() => expect(goAheadMock).toHaveBeenCalledWith('1'))
-    expect(await screen.findByText(/ready for implementation/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /Read the proposal/ })).toHaveAttribute(
+      'href',
+      '/app/ideas/1/proposal',
+    )
+    expect(screen.queryByRole('button', { name: 'Give the go-ahead' })).toBeNull()
   })
 
-  it('reports a refused go-ahead as the server wrote it', async () => {
-    vi.mocked(goAheadMock).mockResolvedValue({
-      success: false,
-      message: 'Read the report before deciding.',
-      field: null,
-      idea: null,
-    })
+  it('says the proposal is being prepared before it is released', async () => {
+    vi.mocked(proposalMock).mockResolvedValue({ proposal: null } as never)
     renderAt()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Give the go-ahead' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('Read the report')
+    expect(await screen.findByText(/The review team is preparing a proposal/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Read the proposal/ })).toBeNull()
   })
 
-  it('offers no go-ahead on a report that did not recommend approval', async () => {
+  it('offers nothing about a proposal on a report that did not recommend approval', async () => {
     vi.mocked(reportMock).mockResolvedValue({ ...REPORT, decision: 'CHANGES_REQUESTED' })
     renderAt()
 
     await screen.findByRole('heading', { level: 1 })
-    expect(screen.queryByRole('button', { name: 'Give the go-ahead' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Your proposal' })).toBeNull()
   })
 
   it('says there is nothing here without saying why', async () => {

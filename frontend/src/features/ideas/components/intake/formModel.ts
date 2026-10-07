@@ -1,11 +1,9 @@
 import {
-  SELECTABLE_VISIBILITIES,
   type Idea,
   type IdeaCurrentTool,
   type IdeaDraftInput,
   type IdeaFrequency,
   type IdeaImpact,
-  type IdeaVisibility,
   type SubmissionContext,
   type SubmissionTarget,
 } from '../../api/ideasApi'
@@ -29,40 +27,11 @@ export const MAX_TITLE_LENGTH = 200
 
 export type SaveMode = 'draft' | 'submit'
 
-/** The reviewable visibilities; mirrors `ideas.services.REVIEWABLE_VISIBILITIES`. */
-export const REVIEWABLE_VISIBILITIES: readonly IdeaVisibility[] = ['ORGANIZATION', 'PUBLIC']
-
-export const PRIVATE_CANNOT_BE_REVIEWED =
-  'A private idea cannot be reviewed. Share it with your organization or make it public before submitting.'
-
-/**
- * The other half of that rule: an idea nobody's organization is behind is read
- * by platform reviewers, who are not in any organization of the author's, so
- * the only visibility that reaches them is `PUBLIC`. Mirrors
- * `ideas.services.DIRECT_CONTEXT_VISIBILITY_MESSAGE`.
- */
-export const DIRECT_CONTEXT_CANNOT_BE_REVIEWED =
-  'An idea you submit on your own, or for a team, is reviewed by the platform. Make it public so platform reviewers can read it before submitting.'
-
-/**
- * The visibilities a submission can carry, per context.
- *
- * A *draft* may be private in any context - the author's own draft is nobody
- * else's business until they put it forward - so this narrows what the form
- * asks for on submit, not what it lets somebody save. The organization
- * context keeps `ORGANIZATION` because its reviewers are in the organization;
- * the two direct contexts have no organization to widen to.
- */
-export function reviewableVisibilities(context: SubmissionContext): readonly IdeaVisibility[] {
-  return context === 'ORGANIZATION' ? REVIEWABLE_VISIBILITIES : ['PUBLIC']
-}
-
 /** Everything the form edits, as the controls hold it. */
 export interface FormValues {
   title: string
   description: string
   categoryId: string
-  visibility: IdeaVisibility
   /**
    * Who is putting this forward. Not part of the idea *content*, which is why
    * `toInput` leaves it out: it names the tenant `createIdea` files the idea
@@ -93,14 +62,23 @@ export interface FormValues {
 export type FieldName = keyof FormValues
 export type FieldErrors = Partial<Record<FieldName, string>>
 
-export function initialValues(idea: Idea | null): FormValues {
+export function initialValues(
+  idea: Idea | null,
+  /**
+   * An ownership the reader already chose before the form opened - from a
+   * team's page, an organization's page, or the "Where does this idea belong?"
+   * dialog. Seeded here rather than defaulted later so the very first render
+   * shows the chosen context, not a form that flickers from "Just me" to the
+   * answer.
+   */
+  locked?: { context: SubmissionContext; teamId?: string | null },
+): FormValues {
   return {
     title: idea?.title ?? '',
     description: idea?.description ?? '',
     categoryId: idea?.category?.id ?? '',
-    visibility: idea?.visibility ?? 'PRIVATE',
-    submissionContext: idea?.submissionContext ?? 'INDIVIDUAL',
-    teamId: idea?.teamId ?? '',
+    submissionContext: idea?.submissionContext ?? locked?.context ?? 'INDIVIDUAL',
+    teamId: idea?.teamId ?? locked?.teamId ?? '',
     currentProcess: idea?.currentProcess ?? '',
     currentTools: idea?.currentTools ?? [],
     currentToolsOther: idea?.currentToolsOther ?? '',
@@ -119,23 +97,6 @@ export function initialValues(idea: Idea | null): FormValues {
   }
 }
 
-/**
- * The visibilities the picker offers for a context.
- *
- * A draft may be private whatever its context - it is nobody else's business
- * until somebody puts it forward - so this is not the submission rule. What it
- * avoids is offering "My organization" to somebody filing on their own or for
- * a team, which names a tenant their idea does not belong to and which they
- * could never submit with anyway.
- */
-export function visibilitiesForContext(
-  context: SubmissionContext,
-): ReadonlyArray<{ value: IdeaVisibility; label: string; hint: string }> {
-  return context === 'ORGANIZATION'
-    ? SELECTABLE_VISIBILITIES
-    : SELECTABLE_VISIBILITIES.filter((option) => option.value !== 'ORGANIZATION')
-}
-
 /** The whole input, trimmed: an update writes every field, so every field is sent. */
 export function toInput(values: FormValues): IdeaDraftInput {
   const people = values.peopleInvolved.trim()
@@ -143,7 +104,6 @@ export function toInput(values: FormValues): IdeaDraftInput {
     title: values.title.trim(),
     description: values.description.trim(),
     categoryId: values.categoryId || null,
-    visibility: values.visibility,
     currentProcess: values.currentProcess.trim(),
     currentTools: values.currentTools,
     // Only meaningful alongside "Other"; dropped rather than sent orphaned.
@@ -194,7 +154,7 @@ export function toTarget(
  * A draft needs a title and nothing else - drafts may be incomplete, which
  * is the server's rule too. Submitting also needs what the server's
  * submission rule asks for: a description long enough to understand, a
- * category, and a visibility whoever will review it can read. Every other
+ * category. Every other
  * question is there to help, and none of them blocks anything.
  */
 export function validate(values: FormValues, mode: SaveMode): FieldErrors {
@@ -216,15 +176,6 @@ export function validate(values: FormValues, mode: SaveMode): FieldErrors {
     if (!values.categoryId) errors.categoryId = 'Choose a category before submitting this idea.'
     if (values.submissionContext === 'TEAM' && !values.teamId) {
       errors.teamId = 'Choose which team is putting this forward.'
-    }
-    // Which visibility a submission needs depends on who reviews it, so the
-    // message does too: telling somebody filing alone that their idea must be
-    // shared with "your organization" would name a tenant they do not have.
-    if (!reviewableVisibilities(values.submissionContext).includes(values.visibility)) {
-      errors.visibility =
-        values.submissionContext === 'ORGANIZATION'
-          ? PRIVATE_CANNOT_BE_REVIEWED
-          : DIRECT_CONTEXT_CANNOT_BE_REVIEWED
     }
   }
   return errors
@@ -281,9 +232,9 @@ export const STEPS: readonly Step[] = [
     fields: ['importantConsiderations'],
   },
   {
-    title: 'Who is filing this, and who can see it',
-    hint: 'Whether this is yours alone, your team’s or your organization’s — and who should be able to read it.',
-    fields: ['submissionContext', 'teamId', 'categoryId', 'visibility'],
+    title: 'At which level are you filing this?',
+    hint: 'Individual level, team level or organization level. It decides who can see the idea and who checks it before the platform does.',
+    fields: ['submissionContext', 'teamId', 'categoryId'],
   },
   {
     title: 'Supporting documents',
@@ -303,10 +254,9 @@ export function firstStepWithError(errors: FieldErrors): number | null {
 /** Whether the author has answered anything on `step` yet. */
 export function stepHasAnswers(values: FormValues, step: Step): boolean {
   return step.fields.some((field) => {
-    // Neither is an *answer*: the context always has a value and the
-    // visibility defaults to private, so counting them would mark this step
+    // The level always has a value, so counting it would mark this step
     // answered on a form nobody has touched.
-    if (field === 'visibility' || field === 'submissionContext') return false
+    if (field === 'submissionContext') return false
     const value = values[field]
     return Array.isArray(value) ? value.length > 0 : value.trim() !== ''
   })

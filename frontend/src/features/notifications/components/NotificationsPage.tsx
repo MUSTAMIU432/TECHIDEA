@@ -119,19 +119,26 @@ function NotificationRow({
             {notificationLabel(notification.kind)} · {formatDate(notification.createdAt)}
           </p>
           <div className="mt-2 flex flex-wrap gap-3">
-            {notification.ideaId && (
+            {/*
+              **Where this goes is the server's answer.** `actionPath` comes from
+              one mapping on the server that also builds any payload for a future
+              push channel, so an in-app link and a notification tapped on a
+              phone cannot land on different screens. This client used to compose
+              the destination itself out of `ideaId` and the kind, which is how
+              three links came to point at a route that did not exist.
+
+              A report link is offered separately and only for a decision about
+              an idea, because the report is the thing worth reading in that case
+              and the idea page is not.
+            */}
+            {notification.actionPath && (
               <Link
-                to={`/app/ideas/${notification.ideaId}`}
+                to={notification.actionPath}
                 className="text-sm font-semibold text-brand-700 hover:text-brand-800"
               >
-                Open the idea
+                {actionLinkLabel(notification)}
               </Link>
             )}
-            {/*
-              A report link is offered only for a decision about an idea, and it
-              is a link to the idea's report rather than to the report as a
-              document: the report lives inside the app, behind the sign-in.
-            */}
             {notification.reportId && hasReportLink(notification.kind) && (
               <Link
                 to={`/app/ideas/${notification.ideaId}/report`}
@@ -164,6 +171,20 @@ function NotificationRow({
  * So this reads the kind itself, which is a stable identifier rather than
  * display text.
  */
+/**
+ * What the link says, from where it points.
+ *
+ * The destination is the server's; the wording is this client's, and it names
+ * the thing rather than the route - "Open the idea", "Read the report", "Open
+ * your conversations" - so a reader is not shown a path.
+ */
+function actionLinkLabel(notification: Notification): string {
+  if (notification.actionPath?.endsWith('/report')) return 'Read the review report'
+  if (notification.actionPath?.startsWith('/app/messages')) return 'Open your conversations'
+  if (notification.actionPath?.startsWith('/app/ideas')) return 'Open the idea'
+  return 'Open'
+}
+
 function notificationLabel(kind: NotificationKind): string {
   const [, what] = kind.split('.')
   return what.replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase())

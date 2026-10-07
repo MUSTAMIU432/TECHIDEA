@@ -78,7 +78,12 @@ describe('organizationApi', () => {
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
   }
-  const USER = { id: '1', email: 'ada@example.com', firstName: 'Ada', lastName: 'Lovelace' }
+  const USER = {
+    id: '1',
+    email: 'ada@example.com',
+    firstName: 'Ada',
+    lastName: 'Lovelace',
+  }
   const MEMBERSHIP = {
     id: '10',
     status: 'active' as const,
@@ -206,7 +211,13 @@ describe('organizationApi', () => {
       'fetch',
       vi.fn(async () =>
         Response.json(
-          { errors: [{ message: 'Cannot query field "bogus" on type "OrganizationType".' }] },
+          {
+            errors: [
+              {
+                message: 'Cannot query field "bogus" on type "OrganizationType".',
+              },
+            ],
+          },
           { headers: { 'content-type': 'application/json' } },
         ),
       ),

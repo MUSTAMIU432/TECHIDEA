@@ -66,7 +66,9 @@ describe('ResetPasswordForm', () => {
   it('requires a minimum password length', () => {
     renderWithToken('sample-token')
 
-    fireEvent.change(screen.getByLabelText('New password'), { target: { value: 'short' } })
+    fireEvent.change(screen.getByLabelText('New password'), {
+      target: { value: 'short' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Reset Password' }))
 
     expect(screen.getByText('Password must be at least 8 characters.')).toBeInTheDocument()

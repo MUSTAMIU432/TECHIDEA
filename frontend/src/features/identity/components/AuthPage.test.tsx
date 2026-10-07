@@ -31,7 +31,11 @@ describe('AuthPage', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     setAccessToken(null)
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
     mockedLogin.mockResolvedValue({
       success: false,
@@ -82,7 +86,9 @@ describe('AuthPage', () => {
         initialEntries={[
           {
             pathname: '/auth',
-            state: { from: { pathname: '/app/settings', search: '?tab=activity' } },
+            state: {
+              from: { pathname: '/app/settings', search: '?tab=activity' },
+            },
           },
         ]}
       >
@@ -96,7 +102,9 @@ describe('AuthPage', () => {
     )
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
     fireEvent.change(screen.getByLabelText('Password'), {
       target: { value: 'a-strong-unique-pass-1' },
     })

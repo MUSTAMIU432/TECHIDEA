@@ -15,7 +15,12 @@ import { AppLayout } from './AppLayout'
  */
 vi.mock('../features/identity/auth/AuthContext', () => ({
   useAuth: vi.fn(() => ({
-    user: { id: '7', email: 'ada@example.com', firstName: 'Ada', lastName: 'A' },
+    user: {
+      id: '7',
+      email: 'ada@example.com',
+      firstName: 'Ada',
+      lastName: 'A',
+    },
     logout: vi.fn(async () => {}),
   })),
 }))
@@ -45,7 +50,9 @@ vi.mock('../features/administration/context/useAdminCapabilities', () => ({
     reload: vi.fn(),
   })),
 }))
-vi.mock('../features/reviews/hooks/useCanReview', () => ({ useCanReview: vi.fn(() => false) }))
+vi.mock('../features/reviews/hooks/useCanReview', () => ({
+  useCanReview: vi.fn(() => false),
+}))
 vi.mock('../features/notifications/hooks/useUnreadNotifications', () => ({
   useUnreadNotifications: vi.fn(() => 0),
 }))
@@ -125,7 +132,9 @@ describe('AppLayout', () => {
     vi.mocked(useUnreadMessageThreads).mockReturnValue(3)
     renderAt()
 
-    const link = await screen.findByRole('link', { name: 'Messages, 3 unread' })
+    const link = await screen.findByRole('link', {
+      name: 'Messages, 3 unread',
+    })
     expect(link).toHaveAttribute('href', '/app/messages')
     // The badge is the server's number, so it is right even on a page where the
     // conversations list has never been loaded.
@@ -155,7 +164,7 @@ describe('AppLayout', () => {
     // Scoped to the main bar: the breadcrumb above the content links to
     // "Workspace" too, and that is a second, deliberate way back.
     const nav = screen.getByRole('navigation', { name: 'Main' })
-    expect(within(nav).getByRole('link', { name: 'Workspace' })).toHaveAttribute('href', '/app')
+    expect(within(nav).getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/app')
     expect(within(nav).getByRole('link', { name: 'Ideas' })).toHaveAttribute('href', '/app/ideas')
   })
 

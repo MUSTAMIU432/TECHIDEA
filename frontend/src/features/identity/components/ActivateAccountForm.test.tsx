@@ -193,7 +193,9 @@ describe('ActivateAccountForm', () => {
     })
     renderAt(null)
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Send a new link' }))
 
     await waitFor(() => expect(resendMock).toHaveBeenCalledWith('ada@example.com'))
@@ -208,7 +210,9 @@ describe('ActivateAccountForm', () => {
     })
     renderAt(null)
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'nobody@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'nobody@example.com' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Send a new link' }))
 
     // Identical for an address that needs confirming and one that does not, so
@@ -220,7 +224,9 @@ describe('ActivateAccountForm', () => {
   it('validates the resend address before calling the backend', () => {
     renderAt(null)
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'not-an-email' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'not-an-email' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Send a new link' }))
 
     expect(screen.getByText('Enter a valid email address.')).toBeInTheDocument()
@@ -236,7 +242,9 @@ describe('ActivateAccountForm', () => {
     })
     renderAt(null)
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Send a new link' }))
 
     expect(await screen.findByText('Enter a valid email address.')).toBeInTheDocument()

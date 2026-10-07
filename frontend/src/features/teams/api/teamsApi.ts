@@ -114,6 +114,30 @@ const ADD_TEAM_MEMBER_MUTATION = `
   }
 `
 
+const SET_TEAM_REVIEWER_MUTATION = `
+  mutation SetTeamReviewer($teamId: ID!, $userId: ID!, $isReviewer: Boolean!) {
+    setTeamReviewer(teamId: $teamId, userId: $userId, isReviewer: $isReviewer) {
+      success message field
+    }
+  }
+`
+
+/**
+ * Makes a member one of the team's reviewers, or takes that back. The server only
+ * allows it to someone who can manage the team's members.
+ */
+export async function setTeamReviewerRequest(
+  teamId: string,
+  userId: string,
+  isReviewer: boolean,
+): Promise<TeamMutationResult> {
+  const data = await graphqlClient.request<{ setTeamReviewer: TeamMutationResult }>(
+    SET_TEAM_REVIEWER_MUTATION,
+    { teamId, userId, isReviewer },
+  )
+  return data.setTeamReviewer
+}
+
 /** Every team the caller is an active member of. Empty is a real answer. */
 export async function teamsRequest(): Promise<Team[]> {
   const data = await graphqlClient.request<{ teams: Team[] }>(TEAMS_QUERY)

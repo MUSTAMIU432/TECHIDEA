@@ -37,7 +37,12 @@ const USER = {
 
 function SignInPage() {
   const location = useLocation()
-  return <p>Sign-in page{location.state?.from?.pathname === '/app' ? ' from /app' : ''}</p>
+  return (
+    <p>
+      Sign-in page
+      {location.state?.from?.pathname === '/app' ? ' from /app' : ''}
+    </p>
+  )
 }
 
 function renderProtectedRoute() {
@@ -59,7 +64,11 @@ describe('RequireAuth', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     setAccessToken(null)
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
   })
 
@@ -78,7 +87,11 @@ describe('RequireAuth', () => {
   })
 
   it('redirects to /auth when there is no authenticated session', async () => {
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
 
     renderProtectedRoute()
 
@@ -90,7 +103,11 @@ describe('RequireAuth', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 

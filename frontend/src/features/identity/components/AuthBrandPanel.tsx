@@ -1,8 +1,24 @@
 const JOURNEY_STEPS = [
-  { step: '01', title: 'Discover', description: 'Find problems worth automating.' },
-  { step: '02', title: 'Validate', description: 'Turn ideas into structured opportunities.' },
-  { step: '03', title: 'Build', description: 'Connect ideas with developers and teams.' },
-  { step: '04', title: 'Measure', description: 'Understand the impact of automation.' },
+  {
+    step: '01',
+    title: 'Discover',
+    description: 'Find problems worth automating.',
+  },
+  {
+    step: '02',
+    title: 'Validate',
+    description: 'Turn ideas into structured opportunities.',
+  },
+  {
+    step: '03',
+    title: 'Build',
+    description: 'Connect ideas with developers and teams.',
+  },
+  {
+    step: '04',
+    title: 'Measure',
+    description: 'Understand the impact of automation.',
+  },
 ]
 
 /** Minimal original wordmark: an initials badge plus the product name. */

@@ -89,9 +89,10 @@ export const MAX_COMMENT_LENGTH = 2000
 export function useComments(ideaId: string | null, canPost: boolean): CommentDiscussion {
   const [answer, setAnswer] = useState<Answer | null>(null)
   const [errorKey, setErrorKey] = useState<string | null>(null)
-  const [writeError, setWriteError] = useState<{ message: string; field: string | null } | null>(
-    null,
-  )
+  const [writeError, setWriteError] = useState<{
+    message: string
+    field: string | null
+  } | null>(null)
   const [posting, setPosting] = useState(false)
   const [busyCommentId, setBusyCommentId] = useState<string | null>(null)
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
@@ -222,7 +223,10 @@ export function useComments(ideaId: string | null, canPost: boolean): CommentDis
           setAnswer({
             ...answer,
             comments: [...answer.comments, created],
-            pageInfo: { ...answer.pageInfo, totalCount: answer.pageInfo.totalCount + 1 },
+            pageInfo: {
+              ...answer.pageInfo,
+              totalCount: answer.pageInfo.totalCount + 1,
+            },
           })
         }
         return true

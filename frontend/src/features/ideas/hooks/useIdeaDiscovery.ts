@@ -98,7 +98,13 @@ export function useIdeaDiscovery(
     // can neither replace nor wipe the newer one.
     let cancelled = false
 
-    organizationIdeasRequest(organizationId, { search, categoryId, status, offset, limit })
+    organizationIdeasRequest(organizationId, {
+      search,
+      categoryId,
+      status,
+      offset,
+      limit,
+    })
       .then((page) => {
         if (cancelled) return
         setAnswer({ key, ideas: page.items, pageInfo: page.pageInfo })

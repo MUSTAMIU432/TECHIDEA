@@ -1,17 +1,20 @@
 import { useEffect, useId, useRef, useState } from 'react'
 
+import { Link } from 'react-router-dom'
+
 import type { AuthUser } from '../auth/authApi'
+import { Avatar } from './Avatar'
 
 interface UserMenuProps {
   user: AuthUser | null
   onSignOut: () => void
 }
 
-function initialsFor(user: AuthUser | null): string {
-  if (!user) return '?'
-  const fromName = `${user.firstName.trim().charAt(0)}${user.lastName.trim().charAt(0)}`
-  return (fromName || user.email.charAt(0)).toUpperCase()
-}
+const ACCOUNT_LINKS = [
+  { to: '/app/settings/profile', label: 'Profile' },
+  { to: '/app/settings/security', label: 'Security' },
+  { to: '/app/settings/password', label: 'Change password' },
+]
 
 function displayName(user: AuthUser | null): string {
   if (!user) return 'Account'
@@ -28,7 +31,7 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const firstItemRef = useRef<HTMLButtonElement>(null)
+  const firstItemRef = useRef<HTMLAnchorElement>(null)
   const menuId = useId()
 
   useEffect(() => {
@@ -63,9 +66,12 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
         aria-expanded={isOpen}
         aria-controls={isOpen ? menuId : undefined}
         onClick={() => setIsOpen((open) => !open)}
-        className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-sm font-bold text-brand-800 shadow-sm ring-2 ring-white/40 transition hover:ring-white/80 focus:outline-none focus-visible:ring-white"
+        className="rounded-full shadow-sm ring-2 ring-white/40 transition hover:ring-white/80 focus:outline-none focus-visible:ring-white"
       >
-        {initialsFor(user)}
+        <Avatar
+          user={user}
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-sm font-bold text-brand-800"
+        />
       </button>
 
       {isOpen && (
@@ -76,12 +82,10 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
           className="absolute right-0 z-40 mt-2 w-64 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl shadow-gray-900/10"
         >
           <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
-            <span
-              aria-hidden="true"
+            <Avatar
+              user={user}
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-600 text-sm font-bold text-white"
-            >
-              {initialsFor(user)}
-            </span>
+            />
             <span className="min-w-0">
               <span className="block truncate text-sm font-bold text-gray-900">
                 {displayName(user)}
@@ -90,8 +94,20 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
             </span>
           </div>
           <div className="p-1.5">
+            {ACCOUNT_LINKS.map((link, index) => (
+              <Link
+                key={link.to}
+                ref={index === 0 ? firstItemRef : undefined}
+                to={link.to}
+                role="menuitem"
+                onClick={() => setIsOpen(false)}
+                className="flex w-full items-center rounded-lg px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none"
+              >
+                {link.label}
+              </Link>
+            ))}
+            <div className="my-1 border-t border-gray-100" />
             <button
-              ref={firstItemRef}
               type="button"
               role="menuitem"
               onClick={() => {

@@ -86,6 +86,10 @@ export function makeIdea(overrides: Partial<Idea> = {}): Idea {
     category: null,
     availableTransitions: [],
     discussionOpen: true,
+    // The fixture is somebody else's draft by default, so "may edit" is false;
+    // tests about the edit path override it rather than every fixture
+    // pretending the reader owns it.
+    viewerCanEdit: false,
     voteCount: 0,
     viewerHasVoted: false,
     viewerCanStartReview: false,

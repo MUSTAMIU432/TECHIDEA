@@ -105,37 +105,16 @@ export interface IdeaState {
  * department tier to honour it yet - so it can never arrive on an idea this
  * client receives.
  */
-export type IdeaVisibility = 'PUBLIC' | 'ORGANIZATION' | 'DEPARTMENT' | 'PRIVATE'
-
 /**
- * The visibilities the form may offer. Deliberately a client-side copy of
- * `ideas.services.SELECTABLE_VISIBILITIES` rather than a list derived from
- * the enum: `DEPARTMENT` is in the vocabulary and not in the picker, and the
- * difference is a product decision, not a formatting one. The server refuses
- * it regardless - this copy only avoids offering something that would be
- * rejected.
+ * Who may read an idea. **Independent of who owns it** - see `SubmissionContext`
+ * - and a `TEAM` idea can be `TEAM`-visible or `PUBLIC`, and stays owned by its
+ * team either way.
+ *
+ * `DEPARTMENT` is reserved vocabulary with no Department tier behind it: the
+ * server refuses it and nothing offers it, and it is here only so the type can
+ * describe what the API returns.
  */
-export const SELECTABLE_VISIBILITIES: ReadonlyArray<{
-  value: IdeaVisibility
-  label: string
-  hint: string
-}> = [
-  {
-    value: 'PRIVATE',
-    label: 'Only me',
-    hint: 'Only you can see this idea.',
-  },
-  {
-    value: 'ORGANIZATION',
-    label: 'My organization',
-    hint: 'People in your organization who have permission can see it.',
-  },
-  {
-    value: 'PUBLIC',
-    label: 'Everyone',
-    hint: 'Other users can discover this idea.',
-  },
-]
+export type IdeaVisibility = 'PUBLIC' | 'ORGANIZATION' | 'TEAM' | 'DEPARTMENT' | 'PRIVATE'
 
 /**
  * Where the caller is in a paged result, as the server applied it.
@@ -160,21 +139,34 @@ export interface IdeaPage {
 
 /**
  * The narrowing arguments of a discovery query. Mirrors the backend's
- * `IdeaFiltersInput`, and is missing the same things on purpose: no
- * `visibility`, no `authorId`, and no `organizationId` (a tenant is scoped by
- * the `organizationIdeas` query that names it, so a request cannot name two
- * tenants at once).
+ * `IdeaFiltersInput`.
  *
- * Every field is optional and every field is a narrowing one, which is what
- * makes the whole object safe to build from form fields. `undefined` and
- * `null` are both normalized to `null` before sending, because a GraphQL
- * input that carries `undefined` is a document that carries a field the
- * server did not ask for.
+ * **Every field here removes rows and none of them adds any.** That is the whole
+ * safety argument, and it is why `visibility` and `submissionContext` can exist
+ * without becoming a grant: `visibility: 'PUBLIC'` returns only ideas this
+ * reader could already see *and* that are public. `mine` is the reader's own
+ * account rather than an id they supply, which is the difference between "my
+ * ideas" and a way of asking for somebody else's.
+ *
+ * `authorId` is absent on purpose and `organizationId`/`teamId` are absent
+ * because a tenant is scoped by the query that names it (`organizationIdeas`,
+ * `teamIdeas`), so one request cannot name two tenants at once.
+ *
+ * Every field is optional, which is what makes the whole object safe to build
+ * from form fields. `undefined` and `null` are both normalized away before
+ * sending, because a GraphQL input that carries `undefined` is a document that
+ * carries a field the server did not ask for.
  */
 export interface IdeaFilters {
   categoryId?: string | null
   status?: IdeaStatus | null
   search?: string | null
+  /** Who owns it: one person, a team, or an organization. */
+  submissionContext?: SubmissionContext | null
+  /** Who may read it. Independent of the owner, on purpose. */
+  visibility?: IdeaVisibility | null
+  /** This reader's own ideas, and only theirs. */
+  mine?: boolean | null
   offset?: number
   limit?: number
 }
@@ -330,7 +322,12 @@ export interface Idea extends IdeaProblemStory {
    *   read it and did not write it, on an idea waiting in `SUBMITTED`.
    * - `viewerActiveReviewId`: this viewer's own in-progress review, if any.
    *   Never another reviewer's.
+   * - `viewerCanEdit`: whether this viewer may edit the idea *right now*, asked
+   *   of the server by the same code `updateIdea` runs. So the form never offers
+   *   a save the server would refuse, and a client does not have to re-derive
+   *   "is this mine and is it still a draft" from two other fields.
    */
+  viewerCanEdit: boolean
   viewerCanStartReview: boolean
   viewerCanStartOrganizationReview: boolean
   viewerActiveReviewId: string | null
@@ -398,6 +395,7 @@ export const IDEA_FIELDS = `
   discussionOpen
   voteCount
   viewerHasVoted
+  viewerCanEdit
   viewerCanStartReview
   viewerCanStartOrganizationReview
   viewerActiveReviewId
@@ -478,6 +476,15 @@ const IDEAS_QUERY = `
 const ORGANIZATION_IDEAS_QUERY = `
   query OrganizationIdeas($organizationId: ID!, $filters: IdeaFiltersInput) {
     organizationIdeas(organizationId: $organizationId, filters: $filters) {
+      items { ${IDEA_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const TEAM_IDEAS_QUERY = `
+  query TeamIdeas($teamId: ID!, $filters: IdeaFiltersInput) {
+    teamIdeas(teamId: $teamId, filters: $filters) {
       items { ${IDEA_FIELDS} }
       pageInfo { ${PAGE_INFO_FIELDS} }
     }
@@ -642,10 +649,9 @@ const GIVE_GO_AHEAD_MUTATION = `
  * "an organization submitted its member's idea" happens.
  */
 export async function submitToPlatformRequest(id: string): Promise<IdeaMutationResult> {
-  const data = await graphqlClient.request<{ submitToPlatform: IdeaMutationResult }>(
-    SUBMIT_TO_PLATFORM_MUTATION,
-    { id },
-  )
+  const data = await graphqlClient.request<{
+    submitToPlatform: IdeaMutationResult
+  }>(SUBMIT_TO_PLATFORM_MUTATION, { id })
   return data.submitToPlatform
 }
 
@@ -680,16 +686,17 @@ export async function transitionIdeaRequest(
   id: string,
   to: IdeaStatus,
 ): Promise<IdeaMutationResult> {
-  const data = await graphqlClient.request<{ transitionIdea: IdeaMutationResult }>(
-    TRANSITION_IDEA_MUTATION,
-    { id, to },
-  )
+  const data = await graphqlClient.request<{
+    transitionIdea: IdeaMutationResult
+  }>(TRANSITION_IDEA_MUTATION, { id, to })
   return data.transitionIdea
 }
 
 /** One idea, or `null` for anything the signed-in user may not read. */
 export async function ideaRequest(id: string): Promise<Idea | null> {
-  const data = await graphqlClient.request<{ idea: Idea | null }>(IDEA_QUERY, { id })
+  const data = await graphqlClient.request<{ idea: Idea | null }>(IDEA_QUERY, {
+    id,
+  })
   return data.idea
 }
 
@@ -708,6 +715,9 @@ function filterVariables(filters: IdeaFilters): Record<string, unknown> {
   if (filters.categoryId) variables.categoryId = filters.categoryId
   if (filters.status) variables.status = filters.status
   if (filters.search) variables.search = filters.search
+  if (filters.submissionContext) variables.submissionContext = filters.submissionContext
+  if (filters.visibility) variables.visibility = filters.visibility
+  if (filters.mine) variables.mine = true
   if (filters.offset !== undefined) variables.offset = filters.offset
   if (filters.limit !== undefined) variables.limit = filters.limit
   return variables
@@ -728,6 +738,25 @@ export async function ideasRequest(filters: IdeaFilters = {}): Promise<IdeaPage>
  * server does not confirm that the organization exists, so the UI shows an
  * empty state rather than an error.
  */
+/**
+ * One team's ideas.
+ *
+ * Empty for a team the caller is not on and for one that does not exist - the
+ * same answer for both, so a team id cannot be used to discover other teams -
+ * and every row is still visibility-filtered, so a team member does not see a
+ * teammate's private idea in their own team's feed.
+ */
+export async function teamIdeasRequest(
+  teamId: string,
+  filters: IdeaFilters = {},
+): Promise<IdeaPage> {
+  const data = await graphqlClient.request<{ teamIdeas: IdeaPage }>(TEAM_IDEAS_QUERY, {
+    teamId,
+    filters: filterVariables(filters),
+  })
+  return data.teamIdeas
+}
+
 export async function organizationIdeasRequest(
   organizationId: string,
   filters: IdeaFilters = {},
@@ -901,16 +930,15 @@ export async function createCommentRequest(
   content: string,
   parentId?: string | null,
 ): Promise<CommentMutationResult> {
-  const data = await graphqlClient.request<{ createComment: CommentMutationResult }>(
-    CREATE_COMMENT_MUTATION,
-    {
-      input: {
-        ideaId,
-        comment: { content },
-        ...(parentId ? { parentId } : {}),
-      },
+  const data = await graphqlClient.request<{
+    createComment: CommentMutationResult
+  }>(CREATE_COMMENT_MUTATION, {
+    input: {
+      ideaId,
+      comment: { content },
+      ...(parentId ? { parentId } : {}),
     },
-  )
+  })
   return data.createComment
 }
 
@@ -922,10 +950,9 @@ export async function updateCommentRequest(
   id: string,
   content: string,
 ): Promise<CommentMutationResult> {
-  const data = await graphqlClient.request<{ updateComment: CommentMutationResult }>(
-    UPDATE_COMMENT_MUTATION,
-    { input: { id, comment: { content } } },
-  )
+  const data = await graphqlClient.request<{
+    updateComment: CommentMutationResult
+  }>(UPDATE_COMMENT_MUTATION, { input: { id, comment: { content } } })
   return data.updateComment
 }
 
@@ -934,10 +961,9 @@ export async function updateCommentRequest(
  * shape to return - so the caller refreshes on `success`, not on the payload.
  */
 export async function deleteCommentRequest(id: string): Promise<CommentMutationResult> {
-  const data = await graphqlClient.request<{ deleteComment: CommentMutationResult }>(
-    DELETE_COMMENT_MUTATION,
-    { id },
-  )
+  const data = await graphqlClient.request<{
+    deleteComment: CommentMutationResult
+  }>(DELETE_COMMENT_MUTATION, { id })
   return data.deleteComment
 }
 
@@ -1149,10 +1175,9 @@ export async function attachmentsRequest(
  * rule, not this client's to soften.
  */
 export async function deleteAttachmentRequest(id: string): Promise<AttachmentMutationResult> {
-  const data = await graphqlClient.request<{ deleteAttachment: AttachmentMutationResult }>(
-    DELETE_ATTACHMENT_MUTATION,
-    { id },
-  )
+  const data = await graphqlClient.request<{
+    deleteAttachment: AttachmentMutationResult
+  }>(DELETE_ATTACHMENT_MUTATION, { id })
   return data.deleteAttachment
 }
 
@@ -1265,6 +1290,55 @@ async function readUploadResponse(response: Response): Promise<UploadAttachmentR
  * for the rest of the session.
  */
 export const BLOB_URL_LIFETIME_MS = 40_000
+
+/**
+ * What a browser can safely show in a tab: PDFs and common raster images. Anything
+ * else (a spreadsheet, a document) has no inline viewer, so it stays a download
+ * rather than offering a "preview" that would only download anyway. SVG is
+ * deliberately absent - it can carry script.
+ */
+const PREVIEWABLE_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+export function isPreviewable(attachment: Pick<IdeaAttachment, 'contentType'>): boolean {
+  return PREVIEWABLE_TYPES.includes(attachment.contentType.toLowerCase())
+}
+
+/**
+ * Opens an attachment in a new tab instead of saving it.
+ *
+ * The tab is opened *first*, synchronously, because a browser only allows a new
+ * tab as the direct result of the click; it is pointed at the blob once the bytes
+ * have arrived. The blob is re-typed from the attachment's own recorded type, never
+ * from the response, so what the tab renders is what the server validated.
+ */
+export async function previewAttachmentRequest(attachment: IdeaAttachment): Promise<void> {
+  if (!isPreviewable(attachment)) throw new Error('This file type cannot be previewed.')
+  const tab = window.open('about:blank', '_blank')
+  try {
+    const token = getAccessToken()
+    const response = await fetch(`${env.apiBaseUrl}${attachment.downloadUrl}`, {
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!response.ok) throw new Error('Could not open this attachment.')
+
+    const blob = new Blob([await response.blob()], {
+      type: attachment.contentType,
+    })
+    const url = URL.createObjectURL(blob)
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_LIFETIME_MS)
+    if (tab === null) {
+      // A blocker stopped the tab; the same-tab fallback still shows the file.
+      window.location.assign(url)
+      return
+    }
+    tab.opener = null
+    tab.location.href = url
+  } catch (error) {
+    tab?.close()
+    throw error
+  }
+}
 
 export async function downloadAttachmentRequest(attachment: IdeaAttachment): Promise<void> {
   const token = getAccessToken()

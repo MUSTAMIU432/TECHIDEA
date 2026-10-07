@@ -20,7 +20,9 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
 const listMock = vi.mocked(organizationIdeasRequest)
@@ -121,8 +123,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
 
     await screen.findByText('Idea in DRAFT')
     // Human labels, not the raw enum names a client would otherwise have to
-    // carry its own table for. Each appears twice — once as the badge, once in
-    // the details row — which is asserted rather than assumed.
+    // carry its own table for.
+    //
+    // **Once per card now, not twice.** The details row used to repeat the
+    // status under a "Status" heading beside the badge that already said it -
+    // two renderings of one fact, on the same card, where a reader could be
+    // left wondering whether they disagreed. The badge is the one.
     //
     // Read from within the list: the status filter above the list offers
     // options with these same words, and a filter named "Draft" is exactly what
@@ -132,7 +138,7 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
       statusLabel(status),
       list.getAllByText(statusLabel(status)).length,
     ])
-    expect(labels).toEqual(states.map((status) => [statusLabel(status), 2]))
+    expect(labels).toEqual(states.map((status) => [statusLabel(status), 1]))
   })
 
   it('does not call a platform-approved idea approved, because the author still owes a decision', async () => {
@@ -152,7 +158,9 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   })
 
   it('explains what a changes-requested idea needs from its author', async () => {
-    mockContext({ ideas: [makeIdea({ status: 'CHANGES_REQUESTED', authorId: '7' })] })
+    mockContext({
+      ideas: [makeIdea({ status: 'CHANGES_REQUESTED', authorId: '7' })],
+    })
     renderWithRouter(<IdeasWorkspace />)
 
     // The state whose next step belongs to the reader, so it is worth saying
@@ -179,15 +187,26 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
 
   // --- visibility rendering -------------------------------------------------
 
+  // The audience badge's wording, which is also `visibilityLabel`'s: one fact,
+  // one set of words. "Organization only" rather than "This organization"
+  // because a bare "Organization" on a card reads as the kind of idea.
   it.each([
-    ['PUBLIC', 'Everyone on the platform'],
-    ['ORGANIZATION', 'This organization'],
-    ['PRIVATE', 'Only you'],
+    ['PUBLIC', 'Public'],
+    ['ORGANIZATION', 'Organization only'],
+    ['TEAM', 'Team only'],
+    ['PRIVATE', 'Private'],
   ])('renders %s as "%s"', async (visibility, label) => {
-    mockContext({ ideas: [makeIdea({ visibility: visibility as Idea['visibility'] })] })
+    mockContext({
+      ideas: [makeIdea({ visibility: visibility as Idea['visibility'] })],
+    })
     renderWithRouter(<IdeasWorkspace />)
 
-    expect(await screen.findByText(label)).toBeInTheDocument()
+    // Scoped to the list: the audience filter above the list offers options with
+    // these same words, which is not a collision to design around - a filter
+    // labelled "Public" is what it should be called. The assertion is about the
+    // rows.
+    const list = await screen.findByRole('list', { name: 'Ideas' })
+    expect(await within(list).findByText(label)).toBeInTheDocument()
   })
 
   // --- what is offered ------------------------------------------------------
@@ -268,7 +287,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     mockContext({
       viewer: REVIEWER,
       systemRole: true,
-      ideas: [makeIdea({ status: 'APPROVED', availableTransitions: ['AUTOMATION_PROPOSAL'] })],
+      ideas: [
+        makeIdea({
+          status: 'APPROVED',
+          availableTransitions: ['AUTOMATION_PROPOSAL'],
+        }),
+      ],
     })
     renderWithRouter(<IdeasWorkspace />)
 
@@ -290,7 +314,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     })
     mockContext({
       viewer: SIGNED_IN,
-      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
+      ideas: [
+        makeIdea({
+          authorId: '7',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+        }),
+      ],
     })
     renderWithRouter(<IdeasWorkspace />)
 
@@ -313,7 +342,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     })
     mockContext({
       viewer: SIGNED_IN,
-      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
+      ideas: [
+        makeIdea({
+          authorId: '7',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+        }),
+      ],
     })
     renderWithRouter(<IdeasWorkspace />)
 
@@ -327,7 +361,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     transitionMock.mockRejectedValue(new Error('Failed to fetch'))
     mockContext({
       viewer: SIGNED_IN,
-      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
+      ideas: [
+        makeIdea({
+          authorId: '7',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+        }),
+      ],
     })
     renderWithRouter(<IdeasWorkspace />)
 
@@ -347,7 +386,12 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     )
     mockContext({
       viewer: SIGNED_IN,
-      ideas: [makeIdea({ authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] })],
+      ideas: [
+        makeIdea({
+          authorId: '7',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+        }),
+      ],
     })
     renderWithRouter(<IdeasWorkspace />)
 
@@ -377,7 +421,11 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
     mockContext({
       viewer: SIGNED_IN,
       ideas: [
-        makeIdea({ id: '1', authorId: '7', availableTransitions: ['SUBMITTED_TO_ORGANIZATION'] }),
+        makeIdea({
+          id: '1',
+          authorId: '7',
+          availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
+        }),
         makeIdea({
           id: '2',
           title: 'Another idea',
@@ -395,7 +443,9 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
 
     await waitFor(() =>
       expect(
-        within(cards[0]).getByRole('button', { name: 'Send to my organization' }),
+        within(cards[0]).getByRole('button', {
+          name: 'Send to my organization',
+        }),
       ).toBeDisabled(),
     )
     // The other idea's button is untouched: one move in flight does not lock
@@ -418,7 +468,9 @@ describe('IdeasWorkspace lifecycle (S2-003)', () => {
   })
 
   it('does not offer a transition on an idea the viewer cannot see', async () => {
-    mockContext({ ideas: [makeIdea({ visibility: 'PRIVATE', availableTransitions: [] })] })
+    mockContext({
+      ideas: [makeIdea({ visibility: 'PRIVATE', availableTransitions: [] })],
+    })
     renderWithRouter(<IdeasWorkspace />)
 
     // Scoped to the idea's own card: the page's "File a new idea" link lives

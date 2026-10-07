@@ -50,13 +50,19 @@ describe('storySections', () => {
   })
 
   it('keeps a bare "Other" when nothing else was said', () => {
-    const [today] = storySections({ ...EMPTY_PROBLEM_STORY, currentTools: ['OTHER'] })
+    const [today] = storySections({
+      ...EMPTY_PROBLEM_STORY,
+      currentTools: ['OTHER'],
+    })
 
     expect(today.answers[0].answer).toBe('Other')
   })
 
   it('counts zero people as an answer', () => {
-    const [impact] = storySections({ ...EMPTY_PROBLEM_STORY, peopleInvolved: 0 })
+    const [impact] = storySections({
+      ...EMPTY_PROBLEM_STORY,
+      peopleInvolved: 0,
+    })
 
     expect(impact.answers).toEqual([{ question: 'People involved', answer: 'About 0' }])
   })
@@ -72,11 +78,16 @@ describe('IdeaStory', () => {
   it('renders author text as text, never as markup', () => {
     render(
       <IdeaStory
-        story={{ ...EMPTY_PROBLEM_STORY, importantConsiderations: '<b>Private</b> details' }}
+        story={{
+          ...EMPTY_PROBLEM_STORY,
+          importantConsiderations: '<b>Private</b> details',
+        }}
       />,
     )
 
-    const region = screen.getByRole('region', { name: 'The problem in detail' })
+    const region = screen.getByRole('region', {
+      name: 'The problem in detail',
+    })
     expect(within(region).getByText('<b>Private</b> details')).toBeInTheDocument()
     expect(region.querySelector('b')).toBeNull()
   })

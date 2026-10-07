@@ -14,6 +14,7 @@ vi.mock('../api/teamsApi', () => ({
   createTeamRequest: vi.fn(),
   leaveTeamRequest: vi.fn(),
   addTeamMemberRequest: vi.fn(),
+  setTeamReviewerRequest: vi.fn(),
   teamRoleLabel: (slug: string) =>
     slug.replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase()),
 }))
@@ -27,6 +28,7 @@ vi.mock('../../invitations/api/invitationsApi', () => ({
   invitationDetailsRequest: vi.fn(),
 }))
 
+vi.mock('../../reviews/api/reviewsApi', () => ({ teamReviewQueueRequest: vi.fn(async () => []) }))
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 
 // The add-a-colleague panel draws its candidates from the reader's organization
@@ -42,7 +44,9 @@ const {
   teamMembersRequest: teamMembersMock,
   leaveTeamRequest: leaveMock,
   addTeamMemberRequest: addMemberMock,
+  setTeamReviewerRequest: setReviewerMock,
 } = await import('../api/teamsApi')
+const { teamReviewQueueRequest: queueMock } = await import('../../reviews/api/reviewsApi')
 const { sendTeamInvitationRequest: inviteMock } =
   await import('../../invitations/api/invitationsApi')
 const { useOrganization } = await import('../../organizations/context/useOrganization')
@@ -345,6 +349,78 @@ describe('TeamWorkspace', () => {
 
       expect(screen.queryByLabelText('Colleague')).not.toBeInTheDocument()
       expect(orgMembersMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('team review', () => {
+    it('lets the owner make a member a reviewer, and says what the server refuses', async () => {
+      vi.mocked(setReviewerMock).mockResolvedValue({
+        success: false,
+        message: 'You cannot change who reviews for this team.',
+        field: null,
+      })
+      renderAt()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Make reviewer' }))
+
+      await waitFor(() => expect(setReviewerMock).toHaveBeenCalledWith('9', '8', true))
+      expect(await screen.findByRole('alert')).toHaveTextContent('cannot change who reviews')
+    })
+
+    it('offers to take the role back from somebody who already holds it', async () => {
+      vi.mocked(teamMembersMock).mockResolvedValue([
+        {
+          userId: '7',
+          email: 'ada@example.com',
+          firstName: 'Ada',
+          lastName: 'A',
+          roleSlugs: ['owner'],
+          joinedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          userId: '8',
+          email: 'rae@example.com',
+          firstName: 'Rae',
+          lastName: 'B',
+          roleSlugs: ['member', 'reviewer'],
+          joinedAt: '2026-02-01T00:00:00.000Z',
+        },
+      ])
+      renderAt()
+
+      expect(await screen.findByRole('button', { name: 'Remove as reviewer' })).toBeInTheDocument()
+    })
+
+    it('shows the review queue to a reviewer, and not to a plain member', async () => {
+      vi.mocked(queueMock).mockResolvedValue([
+        {
+          id: '31',
+          title: 'Automate hostel payments',
+          submittedAt: '2026-03-01T00:00:00Z',
+        } as never,
+      ])
+      renderAt()
+
+      expect(
+        await screen.findByRole('heading', { name: 'Waiting for your review' }),
+      ).toBeInTheDocument()
+      expect(await screen.findByRole('link', { name: /Automate hostel payments/ })).toHaveAttribute(
+        'href',
+        '/app/ideas/31',
+      )
+    })
+
+    it('does not show the queue, or the reviewer controls, to an ordinary member', async () => {
+      vi.mocked(useAuth).mockReturnValue({
+        user: { id: '8', email: 'rae@example.com' },
+      } as unknown as ReturnType<typeof useAuth>)
+      renderAt()
+
+      await screen.findByRole('heading', { level: 1, name: 'Registrar' })
+      expect(
+        screen.queryByRole('heading', { name: 'Waiting for your review' }),
+      ).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Make reviewer' })).not.toBeInTheDocument()
     })
   })
 })

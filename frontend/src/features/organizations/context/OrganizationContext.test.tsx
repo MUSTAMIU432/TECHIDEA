@@ -154,7 +154,11 @@ function setAuthenticatedSession() {
   mockedRefresh.mockResolvedValue({
     success: true,
     message: 'ok',
-    session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+    session: {
+      accessToken: 'token',
+      accessTokenExpiresAt: '2099-01-01',
+      user: USER,
+    },
   })
   mockedMe.mockResolvedValue(USER)
 }
@@ -273,7 +277,11 @@ describe('OrganizationProvider', () => {
   })
 
   it('does not load organization data without an authenticated session', async () => {
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
 
     renderContext()

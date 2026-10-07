@@ -19,7 +19,23 @@ vi.mock('../features/organizations/api/organizationApi', () => ({
   createOrganizationRequest: vi.fn(),
 }))
 
-vi.mock('../features/reviews/api/reviewsApi', () => ({ viewerCanReviewInRequest: vi.fn() }))
+vi.mock('../features/ideas/api/ideasApi', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ideasRequest: () =>
+    Promise.resolve({
+      items: [],
+      pageInfo: {
+        offset: 0,
+        limit: 5,
+        totalCount: 0,
+        hasNextPage: false,
+        hasPreviousPage: false,
+      },
+    }),
+}))
+vi.mock('../features/reviews/api/reviewsApi', () => ({
+  viewerCanReviewInRequest: vi.fn(),
+}))
 
 vi.mock('../features/identity/auth/authApi', () => ({
   loginRequest: vi.fn(),
@@ -88,8 +104,6 @@ const MEMBERSHIP = {
   },
 }
 
-const SECOND_ORGANIZATION = { ...ORGANIZATION, id: '11', name: 'Beta Works', slug: 'beta-works' }
-
 /** Stands in for a real app page: shows which organization the layout hands it. */
 function OrganizationProbe({ label }: { label: string }) {
   const { activeOrganization } = useOrganization()
@@ -125,7 +139,11 @@ describe('DashboardPage', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
     mockedCanReview.mockResolvedValue(false)
@@ -152,7 +170,7 @@ describe('DashboardPage', () => {
     setAccessToken(null)
   })
 
-  it('shows the brand logo and current organization role, without the user email', async () => {
+  it('shows the brand logo, without the user email', async () => {
     renderDashboard()
 
     expect(await screen.findByRole('link', { name: 'MUSTANET home' })).toHaveAttribute(
@@ -160,7 +178,6 @@ describe('DashboardPage', () => {
       '/app',
     )
     expect(screen.queryByText(/ada@example.com/)).not.toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: /Acme Labs/ })).toHaveTextContent('Owner')
   })
 
   it('signing out calls the logout API and navigates back to /auth', async () => {
@@ -179,7 +196,7 @@ describe('DashboardPage', () => {
     await screen.findByText('Welcome back, Ada')
 
     const nav = screen.getByRole('navigation', { name: 'Main' })
-    expect(within(nav).getByRole('link', { name: 'Workspace' })).toHaveAttribute('href', '/app')
+    expect(within(nav).getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/app')
     expect(within(nav).getByRole('link', { name: 'Ideas' })).toHaveAttribute('href', '/app/ideas')
     expect(await screen.findByRole('link', { name: /Put a problem forward/ })).toHaveAttribute(
       'href',
@@ -196,7 +213,7 @@ describe('DashboardPage', () => {
       'href',
       '/app/reviews',
     )
-    expect(screen.getByRole('link', { name: /Review queue/ })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: /Review queue/ })).toHaveAttribute(
       'href',
       '/app/reviews',
     )
@@ -208,28 +225,12 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(mockedCanReview).toHaveBeenCalledWith('10'))
 
     expect(screen.queryByRole('link', { name: 'Reviews' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /Review queue/ })).not.toBeInTheDocument()
-  })
-
-  it('keeps the chosen organization when navigating to another app page', async () => {
-    mockedOrganizations.mockResolvedValue([
-      MEMBERSHIP,
-      {
-        organization: SECOND_ORGANIZATION,
-        membership: { ...MEMBERSHIP.membership, id: '21', organization: SECOND_ORGANIZATION },
-      },
-    ])
-    renderDashboard()
-
-    fireEvent.change(await screen.findByRole('combobox', { name: 'Active organization' }), {
-      target: { value: '11' },
-    })
-    fireEvent.click(
-      within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Ideas' }),
+    // The card is always there so Home has both; it says plainly when you cannot review.
+    expect(await screen.findByText(/You are not a reviewer there yet/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Put a problem forward/ })).toHaveAttribute(
+      'href',
+      '/app/ideas',
     )
-
-    expect(await screen.findByText('Ideas page for Beta Works')).toBeInTheDocument()
-    expect(mockedOrganizations).toHaveBeenCalledOnce()
   })
 
   it('offers a breadcrumb back to the workspace from app sub-pages only', async () => {
@@ -240,22 +241,23 @@ describe('DashboardPage', () => {
     fireEvent.click(
       within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Ideas' }),
     )
-    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' })
+    const breadcrumb = await screen.findByRole('navigation', {
+      name: 'Breadcrumb',
+    })
     expect(within(breadcrumb).getByText('Ideas')).toHaveAttribute('aria-current', 'page')
 
-    fireEvent.click(within(breadcrumb).getByRole('link', { name: 'Workspace' }))
+    fireEvent.click(within(breadcrumb).getByRole('link', { name: 'Home' }))
     expect(await screen.findByText('Welcome back, Ada')).toBeInTheDocument()
   })
 
   it('leads from the new-idea page back to the ideas list through the breadcrumb', async () => {
     renderDashboard('/app/ideas/new')
 
-    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' })
+    const breadcrumb = await screen.findByRole('navigation', {
+      name: 'Breadcrumb',
+    })
     expect(within(breadcrumb).getByText('New idea')).toHaveAttribute('aria-current', 'page')
-    expect(within(breadcrumb).getByRole('link', { name: 'Workspace' })).toHaveAttribute(
-      'href',
-      '/app',
-    )
+    expect(within(breadcrumb).getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/app')
 
     fireEvent.click(within(breadcrumb).getByRole('link', { name: 'Ideas' }))
     expect(await screen.findByText(/^Ideas page/)).toBeInTheDocument()
@@ -274,7 +276,13 @@ describe('DashboardPage', () => {
     expect(avatar).toHaveAttribute('aria-expanded', 'true')
     expect(within(menu).getByText('Ada Lovelace')).toBeInTheDocument()
     expect(within(menu).getByText('ada@example.com')).toBeInTheDocument()
-    expect(within(menu).getByRole('menuitem', { name: 'Sign out' })).toHaveFocus()
+    expect(within(menu).getByRole('menuitem', { name: 'Profile' })).toHaveFocus()
+    expect(within(menu).getByRole('menuitem', { name: 'Security' })).toHaveAttribute(
+      'href',
+      '/app/settings/security',
+    )
+    expect(within(menu).getByRole('menuitem', { name: 'Change password' })).toBeInTheDocument()
+    expect(within(menu).getByRole('menuitem', { name: 'Sign out' })).toBeInTheDocument()
 
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()

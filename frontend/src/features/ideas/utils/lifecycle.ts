@@ -1,4 +1,5 @@
 import type { IdeaStatus, IdeaVisibility, SubmissionContext } from '../api/ideasApi'
+import { visibilityTitle } from './ownership'
 
 /**
  * The lifecycle, as the UI needs it: a human label for each state, and the
@@ -33,7 +34,7 @@ export const STATUS_LABELS: Record<IdeaStatus, string> = {
 }
 
 export const STATUS_DESCRIPTIONS: Record<IdeaStatus, string> = {
-  DRAFT: 'Only you can edit this. Who can read it is set by its visibility.',
+  DRAFT: 'Only you can see this and edit it, until you submit it.',
   SUBMITTED_TO_ORGANIZATION:
     'Your organization is checking this represents what it wants to put forward. It has not reached the platform yet.',
   ORGANIZATION_CHANGES_REQUESTED:
@@ -52,20 +53,48 @@ export const STATUS_DESCRIPTIONS: Record<IdeaStatus, string> = {
   AUTOMATION_PROPOSAL: 'Handed to the automation-opportunity track.',
 }
 
-/** The three ways an idea can be put forward, in the words the picker uses. */
+/**
+ * The three ways an idea can be put forward, in the words the picker uses.
+ *
+ * These are the *short* labels, for a form's own controls where the surrounding
+ * copy already says who the reader is. `CONTEXT_TITLES` below is the long form -
+ * "Individual Idea", "Team Idea" - and it is what a card, a banner and a
+ * confirmation use, because those are the places where the reader may not
+ * already know whose page they are on.
+ */
 export const CONTEXT_LABELS: Record<SubmissionContext, string> = {
   INDIVIDUAL: 'Just me',
   TEAM: 'My team',
   ORGANIZATION: 'My organization',
 }
 
+/** The long form of the same three, for a reader who has to be told. */
+export const CONTEXT_TITLES: Record<SubmissionContext, string> = {
+  INDIVIDUAL: 'Individual Idea',
+  TEAM: 'Team Idea',
+  ORGANIZATION: 'Organization Idea',
+}
+
 /** One line explaining where each context's idea goes next. */
 export const CONTEXT_DESCRIPTIONS: Record<SubmissionContext, string> = {
   INDIVIDUAL:
     'Filed by you alone. The platform reviews it directly — there is no organization to check it first.',
-  TEAM: 'Filed by you and your team together. The platform reviews it directly.',
+  TEAM: 'Filed by you for your team. Your team’s reviewers check it first, then you send it on to the platform.',
   ORGANIZATION:
     'Your organization checks it represents what the organization wants to submit before the platform sees it.',
+}
+
+/** Who sees an idea at each level. The audience follows the level; it is never a separate choice. */
+export const CONTEXT_AUDIENCE: Record<SubmissionContext, string> = {
+  INDIVIDUAL:
+    'Only you can see it. When you submit it, the platform’s reviewers read it - nobody else does.',
+  TEAM: 'Everyone in your team can see it once you submit it, and the team’s reviewers check it first. Then you send it on to the platform.',
+  ORGANIZATION:
+    'Everyone in your organization can see it once you submit it, and its reviewers check it first. Then you send it on to the platform.',
+}
+
+export function audienceDescription(context: SubmissionContext): string {
+  return CONTEXT_AUDIENCE[context] ?? ''
 }
 
 export function contextLabel(context: SubmissionContext): string {
@@ -101,11 +130,21 @@ export function trackOf(status: IdeaStatus): 'organization' | 'platform' | null 
     : null
 }
 
+/**
+ * Who may read an idea, in the words the UI uses.
+ *
+ * **The table lives in `utils/ownership` and is re-exported here**, because an
+ * idea's audience is one fact and it must have one wording. Two label maps for
+ * the same enum is how a card ends up saying "This organization" in one place
+ * and "Organization only" in another, and a reader cannot tell whether the
+ * difference means anything.
+ */
 export const VISIBILITY_LABELS: Record<IdeaVisibility, string> = {
-  PUBLIC: 'Everyone on the platform',
-  ORGANIZATION: 'This organization',
+  PUBLIC: 'Public',
+  ORGANIZATION: 'Organization only',
+  TEAM: 'Team only',
+  PRIVATE: 'Private',
   DEPARTMENT: 'A department',
-  PRIVATE: 'Only you',
 }
 
 /**
@@ -130,16 +169,29 @@ export const TRANSITION_LABELS: Partial<Record<IdeaStatus, string>> = {
   CHANGES_REQUESTED: 'Submit again',
 }
 
-export function statusLabel(status: IdeaStatus): string {
-  return STATUS_LABELS[status] ?? status
+/**
+ * The same words for the idea's level. The stage that checks an idea first is the
+ * organization's or the team's; the statuses are named for the organization, which
+ * came first, so a team's idea reads 'team'.
+ */
+function forLevel(text: string, context?: SubmissionContext | null): string {
+  return context === 'TEAM'
+    ? text.replace(/Organization/g, 'Team').replace(/organization/g, 'team')
+    : text
 }
 
-export function statusDescription(status: IdeaStatus): string {
-  return STATUS_DESCRIPTIONS[status] ?? ''
+export function statusLabel(status: IdeaStatus, context?: SubmissionContext | null): string {
+  return forLevel(STATUS_LABELS[status] ?? status, context)
+}
+
+export function statusDescription(status: IdeaStatus, context?: SubmissionContext | null): string {
+  return forLevel(STATUS_DESCRIPTIONS[status] ?? '', context)
 }
 
 export function visibilityLabel(visibility: IdeaVisibility): string {
-  return VISIBILITY_LABELS[visibility] ?? visibility
+  // Delegated rather than re-implemented: `utils/ownership` owns the wording
+  // for this fact, and a second table beside it is a second answer.
+  return visibilityTitle(visibility)
 }
 
 /**

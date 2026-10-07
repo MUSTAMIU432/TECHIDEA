@@ -6,8 +6,16 @@ import { useAuth } from '../../identity/auth/AuthContext'
 import { TeamInvitations } from '../../invitations/components/TeamInvitations'
 import { formatDate } from '../../reviews/utils/reviewLabels'
 import { useTeamMembers } from '../hooks/useTeamMembers'
-import { leaveTeamRequest, teamRequest, teamRoleLabel, type Team } from '../api/teamsApi'
+import {
+  leaveTeamRequest,
+  setTeamReviewerRequest,
+  teamRequest,
+  teamRoleLabel,
+  type Team,
+} from '../api/teamsApi'
 import { TeamAddMember } from './TeamAddMember'
+import { TeamReviewQueue } from './TeamReviewQueue'
+import { TeamIdeasPanel } from './TeamIdeasPanel'
 
 /**
  * One team at `/app/teams/:teamId`: who is in it, what can be done about that,
@@ -25,6 +33,49 @@ import { TeamAddMember } from './TeamAddMember'
  * membership, and a control that offered a removal it would refuse is worse
  * than none.
  */
+/** An owner's control for who checks the team's ideas. The server decides who may use it. */
+function ReviewerToggle({
+  teamId,
+  userId,
+  isReviewer,
+  onChanged,
+}: {
+  teamId: string
+  userId: string
+  isReviewer: boolean
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState<string | null>(null)
+  return (
+    <span className="flex flex-col items-end">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true)
+          setFailed(null)
+          setTeamReviewerRequest(teamId, userId, !isReviewer)
+            .then((result) => {
+              if (result.success) onChanged()
+              else setFailed(result.message)
+            })
+            .catch(() => setFailed('We could not reach the server. Please try again.'))
+            .finally(() => setBusy(false))
+        }}
+        className="rounded border border-gray-300 px-2 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:opacity-60"
+      >
+        {isReviewer ? 'Remove as reviewer' : 'Make reviewer'}
+      </button>
+      {failed && (
+        <span role="alert" className="mt-1 text-xs text-red-700">
+          {failed}
+        </span>
+      )}
+    </span>
+  )
+}
+
 export function TeamWorkspace() {
   const { teamId = '' } = useParams()
   const navigate = useNavigate()
@@ -125,15 +176,30 @@ export function TeamWorkspace() {
             <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600">{team.description}</p>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={() => void handleLeave()}
-          disabled={leaving}
-          className="inline-flex h-11 shrink-0 items-center gap-2 self-start rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {leaving && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
-          {leaving ? 'Leaving…' : 'Leave team'}
-        </button>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 self-start">
+          {/*
+            The team's own entry point, and it goes **straight to the form**: the
+            context is not a question on this page, because the page *is* the
+            answer. No dialog - the global "File a new idea" button is the only
+            place a reader is asked where an idea belongs, and this is not it.
+          */}
+          <Link
+            to={`/app/ideas/new?context=team&team=${team.id}`}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+          >
+            <span aria-hidden="true">+</span>
+            Create Idea
+          </Link>
+          <button
+            type="button"
+            onClick={() => void handleLeave()}
+            disabled={leaving}
+            className="inline-flex h-11 items-center gap-2 rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {leaving && <SpinnerIcon className="h-4 w-4 motion-safe:animate-spin" />}
+            {leaving ? 'Leaving…' : 'Leave team'}
+          </button>
+        </div>
       </div>
 
       {error ? (
@@ -173,6 +239,14 @@ export function TeamWorkspace() {
                     {member.roleSlugs.map(teamRoleLabel).join(', ')}
                   </span>
                 )}
+                {isOwner && member.userId !== team.ownerId && (
+                  <ReviewerToggle
+                    teamId={team.id}
+                    userId={member.userId}
+                    isReviewer={member.roleSlugs.includes('reviewer')}
+                    onChanged={roster.reload}
+                  />
+                )}
                 {member.userId === team.ownerId && (
                   <span className="rounded-full bg-brand-100 px-2.5 py-1 text-xs font-semibold text-brand-800">
                     Team owner
@@ -183,6 +257,17 @@ export function TeamWorkspace() {
           </ul>
         )}
       </section>
+
+      {/* Only a reviewer of this team is shown the queue; the server answers empty to
+          anybody else, so this narrows what is drawn and decides nothing. */}
+      {roster.members.some(
+        (member) =>
+          member.userId === user?.id &&
+          (member.roleSlugs.includes('reviewer') || member.roleSlugs.includes('owner')),
+      ) && <TeamReviewQueue teamId={team.id} />}
+
+      {/* The team's own ideas, server-filtered to this team. */}
+      <TeamIdeasPanel teamId={team.id} />
 
       {/*
         Only the owner is offered the add form. `addTeamMember` needs

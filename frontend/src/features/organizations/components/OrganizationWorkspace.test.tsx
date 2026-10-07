@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { MemoryRouter } from 'react-router-dom'
+
 import { setAccessToken } from '../../../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../../identity/auth/authApi'
 import { AuthProvider } from '../../identity/auth/AuthContext'
@@ -89,14 +91,23 @@ function makeItem(id: string, name: string, slug: string) {
   }
 }
 
+/**
+ * In a `MemoryRouter` because the organization list now offers a way *into* an
+ * organization - a `Link` to `/app/organizations/:id`, where its ideas and its own
+ * "Create Idea" button live. The real app is always inside a router (every `/app`
+ * page is a child of one), so this is the component's actual context rather than
+ * a test accommodation.
+ */
 function renderWorkspace() {
   return render(
-    <AuthProvider>
-      <OrganizationProvider>
-        <OrganizationSwitcher />
-        <OrganizationWorkspace />
-      </OrganizationProvider>
-    </AuthProvider>,
+    <MemoryRouter>
+      <AuthProvider>
+        <OrganizationProvider>
+          <OrganizationSwitcher />
+          <OrganizationWorkspace />
+        </OrganizationProvider>
+      </AuthProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -107,7 +118,11 @@ describe('OrganizationWorkspace', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
     mockedOrganizations.mockResolvedValue([
@@ -205,12 +220,19 @@ describe('OrganizationWorkspace', () => {
     renderWorkspace()
     await screen.findByText('No organizations yet')
 
-    fireEvent.change(screen.getByLabelText('Organization name'), { target: { value: 'New Org' } })
-    fireEvent.change(screen.getByLabelText(/Slug/), { target: { value: 'new-org' } })
+    fireEvent.change(screen.getByLabelText('Organization name'), {
+      target: { value: 'New Org' },
+    })
+    fireEvent.change(screen.getByLabelText(/Slug/), {
+      target: { value: 'new-org' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Create organization' }))
 
     expect(await screen.findByRole('button', { name: /New Org/ })).toBeInTheDocument()
     expect(screen.getByText('Organization created successfully.')).toBeInTheDocument()
-    expect(mockedCreateOrganization).toHaveBeenCalledWith({ name: 'New Org', slug: 'new-org' })
+    expect(mockedCreateOrganization).toHaveBeenCalledWith({
+      name: 'New Org',
+      slug: 'new-org',
+    })
   })
 })

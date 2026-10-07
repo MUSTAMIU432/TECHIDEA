@@ -437,6 +437,304 @@ export async function removeMembershipRoleRequest(
   return data.adminRemoveMembershipRole
 }
 
+// --- teams, invitations, messages and notifications ---------------------------------
+
+/*
+  The collaboration set, read-only. Four lists and two details, and no mutation
+  anywhere in this section - which is the server's position as much as the
+  client's: a membership is only ever created by accepting an invitation, a
+  message belongs to its participants, and neither is the console's to change.
+
+  **A message body arrives as `null` unless the caller holds the console's
+  content-inspection permission**, and the page that shows one says "restricted"
+  rather than rendering an empty message. `subject` can be null for the same
+  reason: a thread anchored to an idea takes its subject from that idea's title,
+  so a subject is sometimes an idea title.
+*/
+
+export interface AdminTeam {
+  id: string
+  name: string
+  slug: string
+  description: string
+  owner: AdminPerson
+  memberCount: number
+  inactiveMemberCount: number
+  ideaCount: number
+  invitationCount: number
+  createdAt: string
+}
+
+export interface AdminTeamRole {
+  id: string
+  name: string
+  slug: string
+  description: string
+  isSystem: boolean
+  permissions: string[]
+  holderCount: number
+}
+
+export interface AdminTeamMember {
+  id: string
+  status: string
+  joinedAt: string
+  user: AdminPerson
+  userIsActive: boolean
+  roles: AdminRoleRef[]
+}
+
+export interface AdminTeamDetail extends AdminTeam {
+  roles: AdminTeamRole[]
+  /** Active and inactive: a team keeps the row of somebody who left. */
+  members: AdminTeamMember[]
+  ideasByStatus: AdminStatusCount[]
+}
+
+export interface AdminInvitation {
+  id: string
+  scope: string
+  status: string
+  isOpen: boolean
+  email: string
+  roleSlug: string
+  tenantId: string | null
+  tenantName: string
+  invitedBy: AdminPerson
+  acceptedBy: AdminPerson | null
+  createdAt: string
+  expiresAt: string
+  acceptedAt: string | null
+}
+
+export interface AdminMessageThread {
+  id: string
+  /** Null when the thread is anchored to an idea this caller may not read. */
+  subject: string | null
+  ideaId: string | null
+  ideaTitle: string | null
+  startedBy: AdminPerson
+  participantCount: number
+  messageCount: number
+  staleParticipantCount: number
+  latestMessageAt: string
+  createdAt: string
+  contentRestricted: boolean
+}
+
+export interface AdminMessageThreadDetail extends AdminMessageThread {
+  participants: AdminPerson[]
+}
+
+export interface AdminMessage {
+  id: string
+  sender: AdminPerson
+  /** Null unless the caller may inspect content. */
+  body: string | null
+  createdAt: string
+}
+
+export interface AdminMessagePage extends Page<AdminMessage> {
+  contentRestricted: boolean
+}
+
+export interface AdminNotification {
+  id: string
+  kind: string
+  title: string
+  body: string
+  recipient: AdminPerson
+  isRead: boolean
+  ideaId: string | null
+  ideaTitle: string | null
+  reportId: string | null
+  createdAt: string
+}
+
+const TEAM_FIELDS = `
+  id name slug description memberCount inactiveMemberCount ideaCount invitationCount
+  owner { ${PERSON} } createdAt
+`
+
+const INVITATION_FIELDS = `
+  id scope status isOpen email roleSlug tenantId tenantName
+  invitedBy { ${PERSON} } acceptedBy { ${PERSON} }
+  createdAt expiresAt acceptedAt
+`
+
+const THREAD_FIELDS = `
+  id subject ideaId ideaTitle startedBy { ${PERSON} }
+  participantCount messageCount staleParticipantCount contentRestricted
+  latestMessageAt createdAt
+`
+
+const TEAMS_QUERY = `
+  query AdminTeams($search: String, $offset: Int, $limit: Int) {
+    adminTeams(search: $search, offset: $offset, limit: $limit) {
+      items { ${TEAM_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const TEAM_QUERY = `
+  query AdminTeam($id: ID!) {
+    adminTeam(id: $id) {
+      ${TEAM_FIELDS}
+      roles { id name slug description isSystem permissions holderCount }
+      members { id status joinedAt userIsActive user { ${PERSON} } roles { id name slug isSystem } }
+      ideasByStatus { status count }
+    }
+  }
+`
+
+const TEAM_INVITATIONS_QUERY = `
+  query AdminTeamInvitations($teamId: ID!, $offset: Int, $limit: Int) {
+    adminTeamInvitations(teamId: $teamId, offset: $offset, limit: $limit) {
+      items { ${INVITATION_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const INVITATIONS_QUERY = `
+  query AdminInvitations(
+    $scope: String, $status: String, $organizationId: ID, $teamId: ID,
+    $offset: Int, $limit: Int
+  ) {
+    adminInvitations(
+      scope: $scope, status: $status, organizationId: $organizationId, teamId: $teamId,
+      offset: $offset, limit: $limit
+    ) {
+      items { ${INVITATION_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const THREADS_QUERY = `
+  query AdminMessageThreads($search: String, $anchored: Boolean, $offset: Int, $limit: Int) {
+    adminMessageThreads(search: $search, anchored: $anchored, offset: $offset, limit: $limit) {
+      items { ${THREAD_FIELDS} }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+const THREAD_QUERY = `
+  query AdminMessageThread($id: ID!) {
+    adminMessageThread(id: $id) {
+      ${THREAD_FIELDS}
+      participants { ${PERSON} }
+    }
+  }
+`
+
+const THREAD_MESSAGES_QUERY = `
+  query AdminThreadMessages($threadId: ID!, $offset: Int, $limit: Int) {
+    adminThreadMessages(threadId: $threadId, offset: $offset, limit: $limit) {
+      items { id body sender { ${PERSON} } createdAt }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+      contentRestricted
+    }
+  }
+`
+
+const NOTIFICATIONS_QUERY = `
+  query AdminNotifications($kind: String, $unreadOnly: Boolean, $offset: Int, $limit: Int) {
+    adminNotifications(kind: $kind, unreadOnly: $unreadOnly, offset: $offset, limit: $limit) {
+      items {
+        id kind title body isRead ideaId ideaTitle reportId createdAt
+        recipient { ${PERSON} }
+      }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
+export async function adminTeamsRequest(
+  search = '',
+  page: PageRequest = {},
+): Promise<Page<AdminTeam>> {
+  const data = await graphqlClient.request<{ adminTeams: Page<AdminTeam> }>(TEAMS_QUERY, {
+    ...(search ? { search } : {}),
+    ...pageVariables(page),
+  })
+  return data.adminTeams
+}
+
+export async function adminTeamRequest(id: string): Promise<AdminTeamDetail | null> {
+  const data = await graphqlClient.request<{ adminTeam: AdminTeamDetail | null }>(TEAM_QUERY, {
+    id,
+  })
+  return data.adminTeam
+}
+
+export async function adminTeamInvitationsRequest(
+  teamId: string,
+  page: PageRequest = {},
+): Promise<Page<AdminInvitation>> {
+  const data = await graphqlClient.request<{ adminTeamInvitations: Page<AdminInvitation> }>(
+    TEAM_INVITATIONS_QUERY,
+    { teamId, ...pageVariables(page) },
+  )
+  return data.adminTeamInvitations
+}
+
+export async function adminInvitationsRequest(
+  filters: { scope?: string; status?: string; organizationId?: string; teamId?: string } = {},
+  page: PageRequest = {},
+): Promise<Page<AdminInvitation>> {
+  const data = await graphqlClient.request<{ adminInvitations: Page<AdminInvitation> }>(
+    INVITATIONS_QUERY,
+    { ...compact(filters), ...pageVariables(page) },
+  )
+  return data.adminInvitations
+}
+
+export async function adminMessageThreadsRequest(
+  filters: { search?: string; anchored?: boolean } = {},
+  page: PageRequest = {},
+): Promise<Page<AdminMessageThread>> {
+  const data = await graphqlClient.request<{ adminMessageThreads: Page<AdminMessageThread> }>(
+    THREADS_QUERY,
+    { ...compact(filters), ...pageVariables(page) },
+  )
+  return data.adminMessageThreads
+}
+
+export async function adminMessageThreadRequest(
+  id: string,
+): Promise<AdminMessageThreadDetail | null> {
+  const data = await graphqlClient.request<{ adminMessageThread: AdminMessageThreadDetail | null }>(
+    THREAD_QUERY,
+    { id },
+  )
+  return data.adminMessageThread
+}
+
+export async function adminThreadMessagesRequest(
+  threadId: string,
+  page: PageRequest = {},
+): Promise<AdminMessagePage> {
+  const data = await graphqlClient.request<{ adminThreadMessages: AdminMessagePage }>(
+    THREAD_MESSAGES_QUERY,
+    { threadId, ...pageVariables(page) },
+  )
+  return data.adminThreadMessages
+}
+
+export async function adminNotificationsRequest(
+  filters: { kind?: string; unreadOnly?: boolean } = {},
+  page: PageRequest = {},
+): Promise<Page<AdminNotification>> {
+  const data = await graphqlClient.request<{ adminNotifications: Page<AdminNotification> }>(
+    NOTIFICATIONS_QUERY,
+    { ...compact(filters), ...pageVariables(page) },
+  )
+  return data.adminNotifications
+}
+
 // --- ideas ------------------------------------------------------------------
 
 export interface AdminIdea {

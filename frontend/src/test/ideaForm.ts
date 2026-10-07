@@ -44,7 +44,7 @@ export function goToStep(title: string) {
 }
 
 /** The step that decides who is filing the idea and who may read it. */
-export const CLASSIFY_STEP = 'Who is filing this, and who can see it'
+export const CLASSIFY_STEP = 'At which level are you filing this?'
 export const EVIDENCE_STEP = 'Supporting documents'
 
 /**

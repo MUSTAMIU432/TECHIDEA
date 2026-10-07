@@ -5,7 +5,18 @@ import { setAccessToken } from '../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../features/identity/auth/authApi'
 import { organizationIdeasRequest } from '../features/ideas/api/ideasApi'
 import { organizationsRequest } from '../features/organizations/api/organizationApi'
-import { adminOverviewRequest } from '../features/administration/api/administrationApi'
+import {
+  adminInvitationsRequest,
+  adminMessageThreadRequest,
+  adminMessageThreadsRequest,
+  adminNotificationsRequest,
+  adminOverviewRequest,
+  adminTeamInvitationsRequest,
+  adminTeamRequest,
+  adminTeamsRequest,
+  adminThreadMessagesRequest,
+} from '../features/administration/api/administrationApi'
+import { EMPTY_PAGE_INFO, pageOfItems } from '../test/renderAdmin'
 import {
   adminCapabilitiesRequest,
   NO_ADMIN_CAPABILITIES,
@@ -39,6 +50,16 @@ vi.mock('../features/organizations/api/organizationApi', () => ({
 // documents are asserted in `features/ideas/api/ideasApi.test.ts`.
 vi.mock('../features/ideas/api/ideasApi', () => ({
   organizationIdeasRequest: vi.fn(),
+  ideasRequest: vi.fn(async () => ({
+    items: [],
+    pageInfo: {
+      offset: 0,
+      limit: 5,
+      totalCount: 0,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    },
+  })),
   categoriesRequest: vi.fn(async () => []),
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
@@ -64,6 +85,14 @@ vi.mock('../features/administration/api/capabilitiesApi', async (importOriginal)
 vi.mock('../features/administration/api/administrationApi', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   adminOverviewRequest: vi.fn(),
+  adminTeamsRequest: vi.fn(),
+  adminTeamRequest: vi.fn(),
+  adminTeamInvitationsRequest: vi.fn(),
+  adminInvitationsRequest: vi.fn(),
+  adminMessageThreadsRequest: vi.fn(),
+  adminMessageThreadRequest: vi.fn(),
+  adminThreadMessagesRequest: vi.fn(),
+  adminNotificationsRequest: vi.fn(),
 }))
 
 vi.mock('../features/identity/auth/authApi', () => ({
@@ -85,6 +114,14 @@ const mockedOrganizations = vi.mocked(organizationsRequest)
 const mockedIdeas = vi.mocked(organizationIdeasRequest)
 const mockedCapabilities = vi.mocked(adminCapabilitiesRequest)
 const mockedOverview = vi.mocked(adminOverviewRequest)
+const mockedTeams = vi.mocked(adminTeamsRequest)
+const mockedTeam = vi.mocked(adminTeamRequest)
+const mockedTeamInvitations = vi.mocked(adminTeamInvitationsRequest)
+const mockedInvitations = vi.mocked(adminInvitationsRequest)
+const mockedThreads = vi.mocked(adminMessageThreadsRequest)
+const mockedThread = vi.mocked(adminMessageThreadRequest)
+const mockedThreadMessages = vi.mocked(adminThreadMessagesRequest)
+const mockedNotifications = vi.mocked(adminNotificationsRequest)
 
 const USER = {
   id: '1',
@@ -101,7 +138,11 @@ describe('route tree', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     setAccessToken(null)
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
     mockedOrganizations.mockResolvedValue([])
     mockedIdeas.mockResolvedValue(page([]))
@@ -162,14 +203,21 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
     renderRoutes(router.routes, '/app/ideas')
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'Put a problem forward.' }),
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Put a problem forward.',
+      }),
     ).toBeInTheDocument()
   })
 
@@ -177,14 +225,21 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
     renderRoutes(router.routes, '/app/ideas/new')
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'Tell us about a problem.' }),
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Tell us about a problem.',
+      }),
     ).toBeInTheDocument()
   })
 
@@ -192,14 +247,21 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
     renderRoutes(router.routes, '/app/ideas/1/edit')
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'Edit your draft.' }),
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Edit your draft.',
+      }),
     ).toBeInTheDocument()
     expect(await screen.findByText('This idea is not available.')).toBeInTheDocument()
   })
@@ -219,14 +281,21 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
     renderRoutes(router.routes, '/app/reviews')
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'Review submitted ideas.' }),
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Review submitted ideas.',
+      }),
     ).toBeInTheDocument()
   })
 
@@ -242,7 +311,11 @@ describe('route tree', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
@@ -256,7 +329,11 @@ describe('route tree', () => {
       mockedRefresh.mockResolvedValue({
         success: true,
         message: 'ok',
-        session: { accessToken: 'token', accessTokenExpiresAt: '2099-01-01', user: USER },
+        session: {
+          accessToken: 'token',
+          accessTokenExpiresAt: '2099-01-01',
+          user: USER,
+        },
       })
       mockedMe.mockResolvedValue(USER)
     }
@@ -324,6 +401,92 @@ describe('route tree', () => {
         await screen.findByRole('heading', { name: 'Overview' }, { timeout: LAZY_ROUTE_TIMEOUT }),
       ).toBeInTheDocument()
       expect(screen.getByRole('navigation', { name: 'Administration' })).toBeInTheDocument()
+    })
+
+    /*
+      The console's four collaboration sections are lazy routes like every other
+      one, so "the link is in the nav" proves nothing on its own - a section that
+      is linked but not routed is a 404 behind a working-looking nav. Each is
+      asserted here by its own heading, which is what somebody typing
+      `/app/admin/teams` actually gets.
+    */
+    it.each([
+      ['/app/admin/teams', 'Teams'],
+      ['/app/admin/invitations', 'Invitations'],
+      ['/app/admin/messages', 'Messages'],
+      ['/app/admin/notifications', 'Notifications'],
+    ])('routes %s to its own section', async (path, heading) => {
+      signIn()
+      mockedCapabilities.mockResolvedValue(ADMIN)
+      mockedTeams.mockReturnValue(new Promise(() => {}))
+      mockedInvitations.mockReturnValue(new Promise(() => {}))
+      mockedThreads.mockReturnValue(new Promise(() => {}))
+      mockedNotifications.mockReturnValue(new Promise(() => {}))
+
+      renderRoutes(router.routes, path)
+
+      expect(
+        await screen.findByRole('heading', { name: heading }, { timeout: LAZY_ROUTE_TIMEOUT }),
+      ).toBeInTheDocument()
+    })
+
+    it('routes a team to its detail page', async () => {
+      signIn()
+      mockedCapabilities.mockResolvedValue(ADMIN)
+      mockedTeam.mockResolvedValue({
+        id: '9',
+        name: 'Registrar',
+        slug: 'registrar',
+        description: '',
+        owner: { id: '7', email: 'ada@example.com', name: 'Ada Author' },
+        memberCount: 1,
+        inactiveMemberCount: 0,
+        ideaCount: 0,
+        invitationCount: 0,
+        createdAt: '2026-01-01T00:00:00Z',
+        roles: [],
+        members: [],
+        ideasByStatus: [],
+      })
+      mockedTeamInvitations.mockResolvedValue(pageOfItems([]))
+
+      renderRoutes(router.routes, '/app/admin/teams/9')
+
+      expect(
+        await screen.findByRole('heading', { name: 'Registrar' }, { timeout: LAZY_ROUTE_TIMEOUT }),
+      ).toBeInTheDocument()
+    })
+
+    it('routes a conversation to its detail page, with its words withheld', async () => {
+      signIn()
+      mockedCapabilities.mockResolvedValue(ADMIN)
+      mockedThread.mockResolvedValue({
+        id: '40',
+        subject: null,
+        ideaId: null,
+        ideaTitle: null,
+        startedBy: { id: '7', email: 'ada@example.com', name: 'Ada Author' },
+        participantCount: 1,
+        messageCount: 1,
+        staleParticipantCount: 0,
+        latestMessageAt: '2026-02-01T00:00:00Z',
+        createdAt: '2026-02-01T00:00:00Z',
+        contentRestricted: true,
+        participants: [{ id: '7', email: 'ada@example.com', name: 'Ada Author' }],
+      })
+      mockedThreadMessages.mockResolvedValue({
+        items: [],
+        pageInfo: EMPTY_PAGE_INFO,
+        contentRestricted: true,
+      })
+
+      renderRoutes(router.routes, '/app/admin/messages/40')
+
+      expect(
+        await screen.findByText(/cannot read message bodies/u, undefined, {
+          timeout: LAZY_ROUTE_TIMEOUT,
+        }),
+      ).toBeInTheDocument()
     })
   })
 })

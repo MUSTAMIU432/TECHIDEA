@@ -19,7 +19,9 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { categoriesRequest, organizationIdeasRequest, transitionIdeaRequest } =
   await import('../api/ideasApi')
@@ -29,7 +31,12 @@ const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
 const CATEGORIES = [
-  { id: '4', name: 'Customer support', slug: 'customer-support', description: '' },
+  {
+    id: '4',
+    name: 'Customer support',
+    slug: 'customer-support',
+    description: '',
+  },
   { id: '5', name: 'Finance', slug: 'finance', description: '' },
 ]
 
@@ -514,7 +521,10 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
     renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    const requests: { resolve: (value: IdeaPage) => void; reject: (reason: unknown) => void }[] = []
+    const requests: {
+      resolve: (value: IdeaPage) => void
+      reject: (reason: unknown) => void
+    }[] = []
     listMock.mockImplementation(
       () =>
         new Promise<IdeaPage>((resolve, reject) => {

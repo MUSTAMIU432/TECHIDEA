@@ -115,7 +115,11 @@ describe('AuthContext', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     setAccessToken(null)
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
   })
 
@@ -157,7 +161,11 @@ describe('AuthContext', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'refreshed-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'refreshed-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
@@ -195,7 +203,11 @@ describe('AuthContext', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'refreshed-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'refreshed-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
 
     render(
@@ -215,7 +227,11 @@ describe('AuthContext', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'unusable-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'unusable-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
 
     render(
@@ -234,7 +250,11 @@ describe('AuthContext', () => {
     mockedRefresh.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'strict-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'strict-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedMe.mockResolvedValue(USER)
 
@@ -261,7 +281,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'login-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'login-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
 
     render(
@@ -286,7 +310,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValue({
       success: true,
       message: 'Signed in successfully.',
-      session: { accessToken: 'login-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'login-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
 
     render(
@@ -309,7 +337,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'login-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'login-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
 
@@ -358,7 +390,11 @@ describe('AuthContext', () => {
     mockedGoogleLogin.mockResolvedValue({
       success: true,
       message: 'Signed in successfully.',
-      session: { accessToken: 'google-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'google-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
 
     render(
@@ -382,7 +418,11 @@ describe('AuthContext', () => {
     mockedGoogleLogin.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'google-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'google-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
 
@@ -431,7 +471,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'login-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'login-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedLogout.mockResolvedValue(undefined)
 
@@ -488,7 +532,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValue({
       success: true,
       message: 'ok',
-      session: { accessToken: 'login-token', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'login-token',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     mockedLogout.mockImplementation(() => Promise.reject(new Error('network error')))
 
@@ -579,7 +627,11 @@ describe('AuthContext', () => {
     mockedLogin.mockResolvedValueOnce({
       success: true,
       message: 'ok',
-      session: { accessToken: 'second-try', accessTokenExpiresAt: '2099-01-01', user: USER },
+      session: {
+        accessToken: 'second-try',
+        accessTokenExpiresAt: '2099-01-01',
+        user: USER,
+      },
     })
     const retried = await go((context) => context.login('ada@example.com', 'a-strong-pass-1'))
 

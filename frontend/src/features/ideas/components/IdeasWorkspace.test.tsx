@@ -20,7 +20,9 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
 const listMock = vi.mocked(organizationIdeasRequest)
@@ -158,8 +160,9 @@ describe('IdeasWorkspace', () => {
     ])
     renderWithRouter(<IdeasWorkspace />)
 
-    // Each state appears as its badge *and* in the details row, so the count
-    // is asserted rather than assumed: one badge plus one row per idea.
+    // Each state appears once per card, as the badge. It used to appear twice -
+    // the badge plus a "Status" row - and two renderings of one fact on one
+    // card is a place for them to disagree.
     //
     // Scoped to the list, because the status filter above offers options with
     // the same words in them. That is not a collision to design around - a
@@ -167,15 +170,24 @@ describe('IdeasWorkspace', () => {
     // asks about the rows rather than about the whole page.
     await screen.findByText('Their idea')
     const list = within(screen.getByRole('list'))
-    expect(list.getAllByText('Draft')).toHaveLength(2)
-    expect(list.getAllByText('Submitted')).toHaveLength(2)
+    expect(list.getAllByText('Draft')).toHaveLength(1)
+    expect(list.getAllByText('Submitted')).toHaveLength(1)
   })
 
-  it('shows who each idea is shared with', async () => {
+  it('shows who each idea is shared with, and who owns it, separately', async () => {
     mockContext([{ ...DRAFT, visibility: 'ORGANIZATION' }])
     renderWithRouter(<IdeasWorkspace />)
 
-    expect(await screen.findByText('This organization')).toBeInTheDocument()
+    // Two facts, two badges, and never merged into one: an idea can belong to
+    // an organization and be read by everybody, and a card that said only
+    // "Organization" would leave the reader guessing which of the two it meant.
+    //
+    // Scoped to the card, because the filter bar above the list offers
+    // "Organization only" as an option too.
+    const list = await screen.findByRole('list', { name: 'Ideas' })
+    expect(await within(list).findByText('Organization only')).toBeInTheDocument()
+    expect(within(list).getByText('Organization Idea')).toBeInTheDocument()
+    expect(within(list).getByText('Owned by')).toBeInTheDocument()
   })
 
   // --- what is offered ----------------------------------------------------
@@ -221,24 +233,41 @@ describe('IdeasWorkspace', () => {
 
   // --- creating -----------------------------------------------------------
 
-  it('links to the create page rather than opening a form inline', async () => {
+  it('opens the context dialog rather than a form, and no form inline', async () => {
     renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')
 
-    expect(screen.getByRole('link', { name: /File a new idea/ })).toHaveAttribute(
-      'href',
-      '/app/ideas/new',
-    )
+    // A button, not a link: it asks where the idea belongs before anything is
+    // created, and that question has no answer to put in a URL yet.
+    fireEvent.click(screen.getByRole('button', { name: /File a new idea/ }))
+
+    expect(await screen.findByRole('dialog', { name: 'Create a New Idea' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Where does this idea belong?' }),
+    ).toBeInTheDocument()
+    // And no form on this page, inline or otherwise.
     expect(screen.queryByRole('heading', { name: 'File a new idea' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Tell us about a problem.')).not.toBeInTheDocument()
   })
 
-  it('offers no create link without an active organization', async () => {
+  it('offers the create control to a reader with no organization', async () => {
+    // Someone with no organization is exactly the reader an individual idea
+    // exists for, so gating the button on an organization would lock out the
+    // case the feature was built for.
     mockContext([], null)
     renderWithRouter(<IdeasWorkspace />)
 
-    await waitFor(() =>
-      expect(screen.queryByRole('link', { name: /File a new idea/ })).not.toBeInTheDocument(),
-    )
+    expect(screen.getByRole('button', { name: /File a new idea/ })).toBeInTheDocument()
+  })
+
+  it('shows no list heading for an organization when there is none', async () => {
+    mockContext([], null)
+    renderWithRouter(<IdeasWorkspace />)
+
+    // "Your ideas" rather than an organization's name: with no organization the
+    // page is not a tenant's feed, and calling it one would be a claim about
+    // ownership the reader has not made.
+    expect(await screen.findByRole('heading', { name: 'Your ideas' })).toBeInTheDocument()
   })
 
   it('marks the idea the create page just filed', async () => {
@@ -246,7 +275,10 @@ describe('IdeasWorkspace', () => {
     render(
       <MemoryRouter
         initialEntries={[
-          { pathname: '/app/ideas', state: { notice, tone: 'success', ideaId: '1' } },
+          {
+            pathname: '/app/ideas',
+            state: { notice, tone: 'success', ideaId: '1' },
+          },
         ]}
       >
         <IdeasWorkspace />
@@ -268,7 +300,10 @@ describe('IdeasWorkspace', () => {
     render(
       <MemoryRouter
         initialEntries={[
-          { pathname: '/app/ideas', state: { notice, tone: 'warning', ideaId: '1' } },
+          {
+            pathname: '/app/ideas',
+            state: { notice, tone: 'warning', ideaId: '1' },
+          },
         ]}
       >
         <IdeasWorkspace />
@@ -317,7 +352,9 @@ describe('IdeasWorkspace', () => {
 
     expect(screen.queryByRole('heading', { name: 'Edit this draft' })).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('textbox', { name: 'What problem would you like to solve?' }),
+      screen.queryByRole('textbox', {
+        name: 'What problem would you like to solve?',
+      }),
     ).toBeNull()
   })
 
@@ -328,7 +365,11 @@ describe('IdeasWorkspace', () => {
       success: true,
       message: 'Idea moved to Submitted.',
       field: null,
-      idea: { ...DRAFT, status: 'SUBMITTED', submittedAt: '2026-02-01T00:00:00.000Z' },
+      idea: {
+        ...DRAFT,
+        status: 'SUBMITTED',
+        submittedAt: '2026-02-01T00:00:00.000Z',
+      },
     })
     renderWithRouter(<IdeasWorkspace />)
     await screen.findByText('Automate the invoice run')

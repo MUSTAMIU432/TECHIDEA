@@ -33,6 +33,12 @@ export interface InvitationPreview {
   expired: boolean
   accepted: boolean
   revoked: boolean
+  /**
+   * The recipient turned it down. Kept apart from `expired` and `revoked`
+   * because all three are dead states and each says something different to the
+   * person looking at it - one link, three different reasons.
+   */
+  declined: boolean
 }
 
 /** One invitation on an inviter's list: what was sent and what is outstanding. */
@@ -92,6 +98,7 @@ const INVITATION_DETAILS_QUERY = `
       expired
       accepted
       revoked
+      declined
     }
   }
 `
@@ -138,6 +145,12 @@ const REVOKE_INVITATION_MUTATION = `
       field
       invitation { ${INVITATION_FIELDS} }
     }
+  }
+`
+
+const DECLINE_INVITATION_MUTATION = `
+  mutation DeclineInvitation($token: String!) {
+    declineInvitation(token: $token) { success message field invitation { ${INVITATION_FIELDS} } }
   }
 `
 
@@ -232,6 +245,23 @@ export async function revokeInvitationRequest(id: string): Promise<InvitationMut
     { id },
   )
   return data.revokeInvitation
+}
+
+/**
+ * Decline: close an invitation without joining.
+ *
+ * The counterpart of accepting, and the recipient's own act under the same
+ * address rule - a decline is a statement *about* the invitation, so only the
+ * person it was sent to may make one. Creates nothing and removes nothing:
+ * a membership only ever comes from accepting, so there is nothing to undo and
+ * the invitation's own terminal state is the whole record.
+ */
+export async function declineInvitationRequest(token: string): Promise<AcceptInvitationResult> {
+  const data = await graphqlClient.request<{ declineInvitation: AcceptInvitationResult }>(
+    DECLINE_INVITATION_MUTATION,
+    { token },
+  )
+  return data.declineInvitation
 }
 
 /**

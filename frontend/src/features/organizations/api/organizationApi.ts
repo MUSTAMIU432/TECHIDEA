@@ -141,9 +141,9 @@ const ORGANIZATION_MEMBERS_QUERY = `
 `
 
 export async function organizationsRequest(): Promise<OrganizationMembership[]> {
-  const data = await graphqlClient.request<{ meOrganizations: OrganizationMembership[] }>(
-    ME_ORGANIZATIONS_QUERY,
-  )
+  const data = await graphqlClient.request<{
+    meOrganizations: OrganizationMembership[]
+  }>(ME_ORGANIZATIONS_QUERY)
   return data.meOrganizations
 }
 
@@ -156,19 +156,17 @@ export async function organizationsRequest(): Promise<OrganizationMembership[]> 
  * does not ask for anybody in particular.
  */
 export async function organizationMembersRequest(organizationId: string): Promise<Membership[]> {
-  const data = await graphqlClient.request<{ organizationMembers: Membership[] }>(
-    ORGANIZATION_MEMBERS_QUERY,
-    { organizationId },
-  )
+  const data = await graphqlClient.request<{
+    organizationMembers: Membership[]
+  }>(ORGANIZATION_MEMBERS_QUERY, { organizationId })
   return data.organizationMembers
 }
 
 export async function createOrganizationRequest(
   input: CreateOrganizationInput,
 ): Promise<CreateOrganizationResult> {
-  const data = await graphqlClient.request<{ createOrganization: CreateOrganizationResult }>(
-    CREATE_ORGANIZATION_MUTATION,
-    { input },
-  )
+  const data = await graphqlClient.request<{
+    createOrganization: CreateOrganizationResult
+  }>(CREATE_ORGANIZATION_MUTATION, { input })
   return data.createOrganization
 }

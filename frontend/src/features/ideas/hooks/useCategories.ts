@@ -16,7 +16,10 @@ import { categoriesRequest, type IdeaCategory } from '../api/ideasApi'
  * category that the server was down. The control stays rendered and simply
  * offers fewer options.
  */
-export function useCategories(): { categories: IdeaCategory[]; loadError: boolean } {
+export function useCategories(): {
+  categories: IdeaCategory[]
+  loadError: boolean
+} {
   const [categories, setCategories] = useState<IdeaCategory[]>([])
   const [loadError, setLoadError] = useState(false)
 

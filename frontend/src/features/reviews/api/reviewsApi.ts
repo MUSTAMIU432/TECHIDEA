@@ -462,3 +462,20 @@ export async function ideaSubmissionVersionsRequest(ideaId: string): Promise<Sub
   )
   return data.ideaSubmissionVersions
 }
+
+const TEAM_REVIEW_QUEUE_QUERY = `
+  query TeamReviewQueue($teamId: ID!) {
+    teamReviewQueue(teamId: $teamId) { ${IDEA_FIELDS} }
+  }
+`
+
+/**
+ * Team ideas waiting for the caller to verify, oldest first. Empty unless the
+ * caller is one of the team's reviewers, and it never lists their own ideas.
+ */
+export async function teamReviewQueueRequest(teamId: string): Promise<Idea[]> {
+  const data = await graphqlClient.request<{ teamReviewQueue: Idea[] }>(TEAM_REVIEW_QUEUE_QUERY, {
+    teamId,
+  })
+  return data.teamReviewQueue
+}

@@ -47,7 +47,11 @@ function stubGoogleSignIn({ isConfigured = true } = {}) {
   let capturedOnCredential: (credential: string) => void = () => {}
   mockedUseGoogleSignIn.mockImplementation((onCredential) => {
     capturedOnCredential = onCredential
-    return { hiddenButtonContainerId: 'google-button-container', trigger: vi.fn(), isConfigured }
+    return {
+      hiddenButtonContainerId: 'google-button-container',
+      trigger: vi.fn(),
+      isConfigured,
+    }
   })
   return {
     emitCredential: (credential: string) => act(() => capturedOnCredential(credential)),
@@ -59,7 +63,11 @@ describe('SignInForm', () => {
     setAccessToken(null)
     // No pre-existing session: every test starts from the sign-in form,
     // not redirected/pre-authenticated by the mount-time silent refresh.
-    mockedRefresh.mockResolvedValue({ success: false, message: 'no session', session: null })
+    mockedRefresh.mockResolvedValue({
+      success: false,
+      message: 'no session',
+      session: null,
+    })
     mockedMe.mockResolvedValue(null)
     stubGoogleSignIn()
   })
@@ -85,7 +93,9 @@ describe('SignInForm', () => {
     renderWithProviders(<SignInForm onSwitchToSignUp={() => {}} onForgotPassword={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'not-an-email' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'not-an-email' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
 
     expect(screen.getByText('Enter a valid email address.')).toBeInTheDocument()
@@ -129,7 +139,9 @@ describe('SignInForm', () => {
     renderWithProviders(<SignInForm onSwitchToSignUp={() => {}} onForgotPassword={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
     fireEvent.change(screen.getByLabelText('Password'), {
       target: { value: 'a-strong-unique-pass-1' },
     })
@@ -138,7 +150,11 @@ describe('SignInForm', () => {
     expect(await screen.findByRole('button', { name: 'Signing in…' })).toBeDisabled()
     expect(mockedLogin).toHaveBeenCalledWith('ada@example.com', 'a-strong-unique-pass-1')
 
-    resolveLogin({ success: false, message: 'Invalid email or password.', session: null })
+    resolveLogin({
+      success: false,
+      message: 'Invalid email or password.',
+      session: null,
+    })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Sign In' })).not.toBeDisabled())
   })
 
@@ -152,8 +168,12 @@ describe('SignInForm', () => {
     renderWithProviders(<SignInForm onSwitchToSignUp={() => {}} onForgotPassword={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
-    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'wrong-password' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'wrong-password' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid email or password.')
@@ -171,12 +191,18 @@ describe('SignInForm', () => {
     renderWithProviders(<SignInForm onSwitchToSignUp={() => {}} onForgotPassword={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
-    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'wrong-password' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'wrong-password' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'trying-again-1' } })
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'trying-again-1' },
+    })
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
@@ -265,8 +291,12 @@ describe('SignInForm', () => {
 
     renderWithProviders(<SignInForm onSwitchToSignUp={() => {}} onForgotPassword={() => {}} />)
     await waitFor(() => expect(mockedRefresh).toHaveBeenCalled())
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'ada@example.com' } })
-    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a-strong-pass-1' } })
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    })
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'a-strong-pass-1' },
+    })
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
 

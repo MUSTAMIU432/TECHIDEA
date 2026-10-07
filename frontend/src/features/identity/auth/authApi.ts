@@ -7,6 +7,8 @@
  */
 
 import { graphqlClient } from '../../../graphql/client'
+import { getAccessToken } from '../../../graphql/tokenStore'
+import { env } from '../../../lib/env'
 
 export interface AuthUser {
   id: string
@@ -16,6 +18,8 @@ export interface AuthUser {
   phoneNumber: string
   isActive: boolean
   isVerified: boolean
+  /** Where the profile photo is served from (needs the bearer token), or null. */
+  avatarUrl?: string | null
 }
 
 export interface AuthSession {
@@ -63,6 +67,7 @@ const USER_FIELDS = `
   phoneNumber
   isActive
   isVerified
+  avatarUrl
 `
 
 const LOGIN_MUTATION = `
@@ -314,10 +319,9 @@ const RESEND_ACTIVATION_EMAIL_MUTATION = `
  * the API did. So this returns the message to display rather than a boolean.
  */
 export async function requestPasswordResetRequest(email: string): Promise<ActionResult> {
-  const data = await graphqlClient.request<{ requestPasswordReset: ActionResult }>(
-    REQUEST_PASSWORD_RESET_MUTATION,
-    { input: { email } },
-  )
+  const data = await graphqlClient.request<{
+    requestPasswordReset: ActionResult
+  }>(REQUEST_PASSWORD_RESET_MUTATION, { input: { email } })
   return data.requestPasswordReset
 }
 
@@ -364,9 +368,117 @@ export async function activateAccountRequest(token: string): Promise<ActionResul
  * same generic message for every outcome — for the same reason.
  */
 export async function resendActivationEmailRequest(email: string): Promise<ActionResult> {
-  const data = await graphqlClient.request<{ resendActivationEmail: ActionResult }>(
-    RESEND_ACTIVATION_EMAIL_MUTATION,
-    { input: { email } },
-  )
+  const data = await graphqlClient.request<{
+    resendActivationEmail: ActionResult
+  }>(RESEND_ACTIVATION_EMAIL_MUTATION, { input: { email } })
   return data.resendActivationEmail
+}
+
+const UPDATE_PROFILE_MUTATION = `
+  mutation UpdateProfile($input: UpdateProfileInput!) {
+    updateProfile(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+const CHANGE_PASSWORD_MUTATION = `
+  mutation ChangePassword($input: ChangePasswordInput!) {
+    changePassword(input: $input) {
+      success
+      message
+      field
+      user { ${USER_FIELDS} }
+    }
+  }
+`
+
+/** Saves the signed-in user's name and phone number. Email is not editable. */
+export async function updateProfileRequest(input: {
+  firstName: string
+  lastName: string
+  phoneNumber: string
+}): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ updateProfile: ActionResult }>(
+    UPDATE_PROFILE_MUTATION,
+    { input },
+  )
+  return data.updateProfile
+}
+
+/**
+ * Changes the signed-in user's password. The server signs every *other* device
+ * out; this browser's session is untouched.
+ */
+export async function changePasswordRequest(
+  currentPassword: string,
+  newPassword: string,
+): Promise<ActionResult> {
+  const data = await graphqlClient.request<{ changePassword: ActionResult }>(
+    CHANGE_PASSWORD_MUTATION,
+    { input: { currentPassword, newPassword } },
+  )
+  return data.changePassword
+}
+
+export const AVATAR_MAX_BYTES = 100 * 1024 * 1024
+export const AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+
+interface AvatarResult {
+  success: boolean
+  message: string
+  avatarUrl: string | null
+}
+
+async function avatarRequest(method: 'POST' | 'DELETE', body?: FormData): Promise<AvatarResult> {
+  const token = getAccessToken()
+  const response = await fetch(`${env.apiBaseUrl}/account/avatar/`, {
+    method,
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body,
+  })
+  // Not every failure is our JSON (a proxy's 502, say), so a bad body is
+  // reported, not thrown: the server answered, it just was not us.
+  let payload: {
+    success?: boolean
+    message?: string
+    user?: { avatarUrl?: string | null }
+  } = {}
+  try {
+    payload = await response.json()
+  } catch {
+    /* handled below */
+  }
+  return {
+    success: response.ok && payload.success === true,
+    message: payload.message ?? 'We could not update your photo. Please try again.',
+    avatarUrl: payload.user?.avatarUrl ?? null,
+  }
+}
+
+/** Uploads a new profile photo (JPEG, PNG or WebP, up to 100 MB). */
+export function uploadAvatarRequest(file: File): Promise<AvatarResult> {
+  const body = new FormData()
+  body.append('file', file)
+  return avatarRequest('POST', body)
+}
+
+/** Removes the profile photo. */
+export function removeAvatarRequest(): Promise<AvatarResult> {
+  return avatarRequest('DELETE')
+}
+
+/** Fetches a photo with the bearer token, since an `<img>` cannot send one. */
+export async function fetchAvatarBlob(avatarUrl: string): Promise<Blob> {
+  const token = getAccessToken()
+  const response = await fetch(`${env.apiBaseUrl}${avatarUrl}`, {
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) throw new Error('No photo')
+  return response.blob()
 }

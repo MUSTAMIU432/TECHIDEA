@@ -60,7 +60,11 @@ const CREATED: Idea = makeIdea({
   availableTransitions: ['SUBMITTED_TO_ORGANIZATION'],
 })
 
-const SUBMITTED: Idea = { ...CREATED, status: 'SUBMITTED', submittedAt: '2026-01-01T00:01:00Z' }
+const SUBMITTED: Idea = {
+  ...CREATED,
+  status: 'SUBMITTED',
+  submittedAt: '2026-01-01T00:01:00Z',
+}
 
 function attachment(filename: string): IdeaAttachment {
   return {
@@ -80,7 +84,9 @@ function file(name: string, size = 1024): File {
 }
 
 function chooseFiles(...files: File[]) {
-  fireEvent.change(screen.getByLabelText('Choose files'), { target: { files } })
+  fireEvent.change(screen.getByLabelText('Choose files'), {
+    target: { files },
+  })
 }
 
 /** A complete, submittable idea, waiting on the last step. */
@@ -88,18 +94,19 @@ async function readyToSubmit() {
   fillProblem()
   goToStep(CLASSIFY_STEP)
   await screen.findByRole('option', { name: 'Finance' })
-  fireEvent.change(screen.getByLabelText('Category'), { target: { value: '11' } })
-  fireEvent.click(contextChoice('My organization'))
-  fireEvent.click(screen.getByRole('radio', { name: /My organization.*People in your/ }))
+  fireEvent.change(screen.getByLabelText('Category'), {
+    target: { value: '11' },
+  })
+  fireEvent.click(contextChoice('Organization level'))
   goToStep(EVIDENCE_STEP)
 }
 
 describe('IdeaForm — supporting documents', () => {
   beforeEach(() => {
     categoriesMock.mockResolvedValue(CATEGORIES)
-    vi.mocked(useAuth).mockReturnValue({ user: { id: '7' } } as unknown as ReturnType<
-      typeof useAuth
-    >)
+    vi.mocked(useAuth).mockReturnValue({
+      user: { id: '7' },
+    } as unknown as ReturnType<typeof useAuth>)
   })
 
   afterEach(() => {
@@ -170,7 +177,12 @@ describe('IdeaForm — supporting documents', () => {
   })
 
   it('shows each file uploading, one at a time, while the idea is saved', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: CREATED })
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: CREATED,
+    })
     let finishFirst: () => void = () => {}
     uploadMock
       .mockImplementationOnce(
@@ -233,7 +245,12 @@ describe('IdeaForm — supporting documents', () => {
     })
     uploadMock.mockImplementation(async (_id, picked) => {
       calls.push(`upload ${picked.name}`)
-      return { success: true, message: 'ok', field: null, attachment: attachment(picked.name) }
+      return {
+        success: true,
+        message: 'ok',
+        field: null,
+        attachment: attachment(picked.name),
+      }
     })
     submitMock.mockImplementation(async () => {
       calls.push('submit')
@@ -249,7 +266,10 @@ describe('IdeaForm — supporting documents', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
 
     await waitFor(() =>
-      expect(onSubmitted).toHaveBeenCalledWith({ submitted: true, idea: SUBMITTED }),
+      expect(onSubmitted).toHaveBeenCalledWith({
+        submitted: true,
+        idea: SUBMITTED,
+      }),
     )
     expect(calls).toEqual(['create', 'upload form.pdf', 'upload photo.png', 'submit'])
     // Into the idea just created, through the ordinary upload request.
@@ -258,7 +278,12 @@ describe('IdeaForm — supporting documents', () => {
   })
 
   it('attaches the files to a draft saved from the last step too', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: CREATED })
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: CREATED,
+    })
     uploadMock.mockResolvedValue({
       success: true,
       message: 'ok',
@@ -279,7 +304,12 @@ describe('IdeaForm — supporting documents', () => {
   })
 
   it('still submits, and names the file, when an upload is refused', async () => {
-    createMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: CREATED })
+    createMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: CREATED,
+    })
     uploadMock
       .mockResolvedValueOnce({
         success: false,
@@ -294,7 +324,12 @@ describe('IdeaForm — supporting documents', () => {
         field: null,
         attachment: attachment('fine.pdf'),
       })
-    submitMock.mockResolvedValue({ success: true, message: 'ok', field: null, idea: SUBMITTED })
+    submitMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      field: null,
+      idea: SUBMITTED,
+    })
     const onSubmitted = vi.fn()
     render(<IdeaForm organizationId="3" onSaved={vi.fn()} onSubmitted={onSubmitted} />)
     await readyToSubmit()

@@ -26,7 +26,9 @@ vi.mock('../../reviews/api/reviewsApi', () => ({
   completeReviewRequest: vi.fn(),
 }))
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const { organizationIdeasRequest, submitIdeaRequest, transitionIdeaRequest, updateIdeaRequest } =
   await import('../api/ideasApi')

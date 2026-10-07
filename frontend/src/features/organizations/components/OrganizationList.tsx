@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom'
+
 import { useOrganization } from '../context/useOrganization'
 
 function statusLabel(status: 'active' | 'inactive'): string {
@@ -83,6 +85,18 @@ export function OrganizationList() {
                 </span>
               ) : null}
             </button>
+            {/*
+              A way *into* the organization, as well as a way to make it the
+              active one. Choosing it in the header changes what the rest of the
+              app is pointed at; opening it changes nothing and shows the ideas
+              it owns, its members and its own "Create Idea" button.
+            */}
+            <Link
+              to={`/app/organizations/${organization.id}`}
+              className="mt-2 inline-block text-sm font-semibold text-brand-700 hover:text-brand-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+            >
+              Open {organization.name} →
+            </Link>
           </li>
         )
       })}

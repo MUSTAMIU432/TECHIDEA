@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import {
   submitIdeaRequest,
@@ -13,6 +13,7 @@ import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeaList } from './IdeaList'
 import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
 import { readIdeasRedirect, type NoticeTone } from '../utils/savedIdeaNotice'
+import { IdeaContextDialog } from './IdeaContextDialog'
 
 /**
  * The Ideas area: the organization's ideas. Filing a new idea
@@ -57,12 +58,17 @@ export function IdeasWorkspace() {
   const [submittingIdeaId, setSubmittingIdeaId] = useState<string | null>(null)
   const [submittingTarget, setSubmittingTarget] = useState<IdeaStatus | null>(null)
   const [filters, setFilters] = useState<IdeaFilters>({})
+  // Whether the "Where does this idea belong?" dialog is open. The one piece of
+  // create-idea state that lives on the list rather than on a page of its own,
+  // because it is a question about the next thing rather than about an idea.
+  const [choosingContext, setChoosingContext] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
   // Both seeded from the redirect after filing a new idea on `/app/ideas/new`.
   const [redirect] = useState(() => readIdeasRedirect(location.state))
-  const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(() =>
-    redirect ? { text: redirect.notice, tone: redirect.tone } : null,
-  )
+  const [notice, setNotice] = useState<{
+    text: string
+    tone: NoticeTone
+  } | null>(() => (redirect ? { text: redirect.notice, tone: redirect.tone } : null))
   const highlightedIdeaId = redirect?.ideaId ?? null
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -84,7 +90,10 @@ export function IdeasWorkspace() {
    */
   useEffect(() => {
     if (readIdeasRedirect(location.state) !== null) {
-      navigate(`${location.pathname}${location.search}`, { replace: true, state: null })
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: null,
+      })
     }
   }, [location.state, location.pathname, location.search, navigate])
 
@@ -131,6 +140,24 @@ export function IdeasWorkspace() {
 
   return (
     <section aria-labelledby="ideas-heading" className="mt-8">
+      {choosingContext && (
+        <IdeaContextDialog
+          onCancel={() => setChoosingContext(false)}
+          onChosen={(choice) => {
+            setChoosingContext(false)
+            // The choice goes into the URL, so the page it opens can be
+            // bookmarked, reloaded and navigated back to - and so the form has
+            // one source of truth for "where does this idea belong".
+            const query =
+              choice.context === 'TEAM'
+                ? `?context=team&team=${choice.ownerId ?? ''}`
+                : choice.context === 'ORGANIZATION'
+                  ? `?context=organization&organization=${choice.ownerId ?? ''}`
+                  : '?context=individual'
+            navigate(`/app/ideas/new${query}`)
+          }}
+        />
+      )}
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-700">Ideas</p>
@@ -141,15 +168,21 @@ export function IdeasWorkspace() {
             {activeOrganization ? activeOrganization.name : 'Your ideas'}
           </h2>
         </div>
-        {activeOrganization && (
-          <Link
-            to="/app/ideas/new"
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
-          >
-            <span aria-hidden="true">+</span>
-            File a new idea
-          </Link>
-        )}
+        {/*
+          The global entry point, and the only place a reader is asked where an
+          idea belongs. It opens a dialog rather than navigating straight to the
+          form, because an idea filed for the wrong owner is hard to notice
+          afterwards - nothing breaks, it simply never reaches the queue its
+          owner can see.
+        */}
+        <button
+          type="button"
+          onClick={() => setChoosingContext(true)}
+          className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm shadow-brand-900/10 hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+        >
+          <span aria-hidden="true">+</span>
+          File a new idea
+        </button>
       </div>
 
       {notice && (

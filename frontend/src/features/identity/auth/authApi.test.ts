@@ -218,7 +218,9 @@ describe('authApi', () => {
     // No email, no name, no Google user id: everything the backend uses is
     // extracted from the verified credential server-side, so there is
     // nothing here for a caller to tamper with.
-    expect(request.variables).toEqual({ input: { credential: 'a-google-id-token' } })
+    expect(request.variables).toEqual({
+      input: { credential: 'a-google-id-token' },
+    })
   })
 
   it('surfaces the backend generic message for a refused Google sign-in', async () => {
@@ -300,7 +302,11 @@ describe('authApi', () => {
 
   it('reports a whole-form backend failure with a null field', async () => {
     stubFetch({
-      register: { success: false, message: 'We could not create the account.', field: null },
+      register: {
+        success: false,
+        message: 'We could not create the account.',
+        field: null,
+      },
     })
 
     const result = await registerRequest({
@@ -375,7 +381,12 @@ describe('authApi', () => {
 
   it('sends activateAccount with the token', async () => {
     const fetchMock = stubFetch({
-      activateAccount: { success: true, message: 'Confirmed.', field: null, user: null },
+      activateAccount: {
+        success: true,
+        message: 'Confirmed.',
+        field: null,
+        user: null,
+      },
     })
 
     await activateAccountRequest('a-real-token')
@@ -432,7 +443,12 @@ describe('authApi', () => {
     ['resendActivationEmail', () => resendActivationEmailRequest('ada@example.com')],
   ])('sends no access token for %s, since none establishes a session', async (rootField, call) => {
     const fetchMock = stubFetch({
-      [rootField]: { success: true, message: 'Done.', field: null, user: null },
+      [rootField]: {
+        success: true,
+        message: 'Done.',
+        field: null,
+        user: null,
+      },
     })
 
     await call()

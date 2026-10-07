@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 
 import { useAuth } from '../../../identity/auth/AuthContext'
-import type { Idea } from '../../api/ideasApi'
+import { isPreviewable, type Idea } from '../../api/ideasApi'
 import { useAttachments } from '../../hooks/useAttachments'
 import { attachmentProblem } from '../../utils/attachmentRules'
 import { FileUploadPanel, type UploadRow, type UploadStatus } from './FileUploadPanel'
@@ -74,10 +74,14 @@ export function IdeaEvidenceUploader({ idea }: { idea: Idea }) {
       <button
         type="button"
         disabled={gallery.downloadingId === attachment.id}
-        onClick={() => void gallery.download(attachment)}
+        onClick={() =>
+          void (isPreviewable(attachment)
+            ? gallery.preview(attachment)
+            : gallery.download(attachment))
+        }
         className="rounded px-1.5 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:opacity-50"
       >
-        Download
+        {isPreviewable(attachment) ? 'Preview' : 'Download'}
       </button>
     ),
     onRemove:

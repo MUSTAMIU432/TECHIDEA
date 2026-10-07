@@ -33,7 +33,7 @@ export const ACCEPTED_FILE_TYPES = ACCEPTED_EXTENSIONS.join(',')
  * deployment changes the server's limit, the server's own message on a
  * refused upload is what a reader sees for anything this let through.
  */
-export const COURTESY_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+export const COURTESY_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 /**
  * The limit in the words a person reads, derived rather than written.

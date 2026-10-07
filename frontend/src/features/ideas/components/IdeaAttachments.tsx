@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { SpinnerIcon } from '../../identity/components/icons'
 import { useAttachments } from '../hooks/useAttachments'
-import type { Idea, IdeaAttachment } from '../api/ideasApi'
+import { isPreviewable, type Idea, type IdeaAttachment } from '../api/ideasApi'
 import {
   ACCEPTED_FILE_TYPES,
   attachmentProblem,
@@ -121,6 +121,7 @@ function AttachmentRow({
   gallery: ReturnType<typeof useAttachments>
 }) {
   const downloading = gallery.downloadingId === attachment.id
+  const previewable = isPreviewable(attachment)
   const deleting = gallery.deletingId === attachment.id
 
   return (
@@ -137,12 +138,12 @@ function AttachmentRow({
           type="button"
           disabled={downloading}
           onClick={() => {
-            void gallery.download(attachment)
+            void (previewable ? gallery.preview(attachment) : gallery.download(attachment))
           }}
           className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:opacity-50"
         >
           {downloading && <SpinnerIcon className="h-3 w-3 motion-safe:animate-spin" />}
-          Download
+          {previewable ? 'Preview' : 'Download'}
         </button>
         {isOwner && (
           <button

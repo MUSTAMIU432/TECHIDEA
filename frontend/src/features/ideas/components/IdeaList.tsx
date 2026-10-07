@@ -13,8 +13,9 @@ import {
   statusDescription,
   statusLabel,
   transitionLabel,
-  visibilityLabel as visibilityLabelFor,
 } from '../utils/lifecycle'
+import { IdeaOwnershipSummary } from './IdeaOwnership'
+import { ownerNameFor } from '../utils/ownership'
 import { IdeaAttachments } from './IdeaAttachments'
 import { IdeaDiscussion } from './IdeaDiscussion'
 import { IdeaReviewSection } from '../../reviews/components/IdeaReviewSection'
@@ -187,6 +188,9 @@ export function IdeaList({
         onSearchChange={onSearchChange}
         onCategoryChange={(categoryId) => onFiltersChange({ ...filters, categoryId })}
         onStatusChange={(status) => onFiltersChange({ ...filters, status })}
+        onContextChange={(submissionContext) => onFiltersChange({ ...filters, submissionContext })}
+        onVisibilityChange={(visibility) => onFiltersChange({ ...filters, visibility })}
+        onMineChange={(mine) => onFiltersChange({ ...filters, mine })}
         onClear={() => {
           onSearchChange('')
           onFiltersChange({})
@@ -213,7 +217,13 @@ export function IdeaList({
           />
         ) : (
           <>
-            <ul className="space-y-3">
+            {/*
+              `aria-label` on the list, not just a class: it is what lets a test
+              ask "what is in the rows?" of the rows rather than of the whole
+              page, which now includes a filter bar that offers the same words
+              the badges use.
+            */}
+            <ul className="space-y-3" aria-label="Ideas">
               {ideas.map((idea) => {
                 const isMine = user?.id === idea.authorId
                 const isDraft = idea.status === 'DRAFT'
@@ -254,7 +264,7 @@ export function IdeaList({
                       <span
                         className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(idea.status)}`}
                       >
-                        {statusLabel(idea.status)}
+                        {statusLabel(idea.status, idea.submissionContext)}
                       </span>
                     </div>
 
@@ -265,18 +275,34 @@ export function IdeaList({
                       author having to infer it from a badge colour.
                     */}
                     {idea.status !== 'DRAFT' && (
-                      <p className="mt-2 text-xs text-gray-500">{statusDescription(idea.status)}</p>
+                      <p className="mt-2 text-xs text-gray-500">
+                        {statusDescription(idea.status, idea.submissionContext)}
+                      </p>
                     )}
 
+                    {/*
+                      Ownership and audience, as two badges and never as one.
+
+                      This is the line that answers "whose idea is this?" and it
+                      sits above the metadata because it is the first thing a
+                      reader of a *list* needs - a list of ideas from three
+                      different owners is otherwise unreadable. The status badge
+                      above already says the state, so it is not repeated here.
+                    */}
+                    <div className="mt-3">
+                      <IdeaOwnershipSummary
+                        context={idea.submissionContext}
+                        ownerName={ownerNameFor(
+                          idea.submissionContext,
+                          idea.tenantName,
+                          idea.authorId,
+                          user?.id ?? null,
+                        )}
+                        visibility={idea.visibility}
+                      />
+                    </div>
+
                     <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
-                      <div className="flex items-center gap-1">
-                        <dt>Visibility</dt>
-                        <dd className="font-medium text-gray-700">{visibilityLabel(idea)}</dd>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <dt>Status</dt>
-                        <dd className="font-medium text-gray-700">{statusLabel(idea.status)}</dd>
-                      </div>
                       <div className="flex items-center gap-1">
                         <dt>Category</dt>
                         <dd className="font-medium text-gray-700">
@@ -495,8 +521,4 @@ function LoadingPanel() {
       <span className="mt-3 block h-3 w-56 animate-pulse rounded bg-gray-100" />
     </output>
   )
-}
-
-function visibilityLabel(idea: Idea): string {
-  return visibilityLabelFor(idea.visibility)
 }

@@ -13,23 +13,36 @@ import { COURTESY_MAX_UPLOAD_BYTES, MAX_UPLOAD_LABEL } from '../utils/attachment
 vi.mock('../api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
   categoriesRequest: vi.fn(async () => [
-    { id: '4', name: 'Customer support', slug: 'customer-support', description: '' },
+    {
+      id: '4',
+      name: 'Customer support',
+      slug: 'customer-support',
+      description: '',
+    },
   ]),
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
   organizationIdeasRequest: vi.fn(),
-  commentsRequest: vi.fn(async () => ({ items: [], pageInfo: page([]).pageInfo })),
+  commentsRequest: vi.fn(async () => ({
+    items: [],
+    pageInfo: page([]).pageInfo,
+  })),
   voteIdeaRequest: vi.fn(),
   removeVoteRequest: vi.fn(),
   attachmentsRequest: vi.fn(),
   uploadAttachmentRequest: vi.fn(),
   deleteAttachmentRequest: vi.fn(),
   downloadAttachmentRequest: vi.fn(),
+  previewAttachmentRequest: vi.fn(),
+  isPreviewable: (a: { contentType: string }) =>
+    ['application/pdf', 'image/png', 'image/jpeg'].includes(a.contentType),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
-vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
+vi.mock('../../organizations/context/useOrganization', () => ({
+  useOrganization: vi.fn(),
+}))
 
 const {
   organizationIdeasRequest,
@@ -37,12 +50,14 @@ const {
   uploadAttachmentRequest,
   deleteAttachmentRequest,
   downloadAttachmentRequest,
+  previewAttachmentRequest,
 } = await import('../api/ideasApi')
 const listMock = vi.mocked(organizationIdeasRequest)
 const attachmentsMock = vi.mocked(attachmentsRequest)
 const uploadMock = vi.mocked(uploadAttachmentRequest)
 const deleteMock = vi.mocked(deleteAttachmentRequest)
 const downloadMock = vi.mocked(downloadAttachmentRequest)
+const previewMock = vi.mocked(previewAttachmentRequest)
 
 const OWNER = { id: '9', email: 'author@example.com' }
 const COLLEAGUE = { id: '7', email: 'colleague@example.com' }
@@ -65,7 +80,11 @@ function attachment(overrides: Partial<IdeaAttachment> = {}): IdeaAttachment {
 }
 
 function mockContext(
-  options: { user?: typeof OWNER; ideas?: Idea[]; attachments?: IdeaAttachment[] } = {},
+  options: {
+    user?: typeof OWNER
+    ideas?: Idea[]
+    attachments?: IdeaAttachment[]
+  } = {},
 ) {
   const { user = OWNER, ideas: ideaList = [OWNED_IDEA], attachments: attachmentList = [] } = options
 
@@ -82,7 +101,11 @@ function mockContext(
     field: null,
     attachment: attachment(),
   })
-  deleteMock.mockResolvedValue({ success: true, message: 'Attachment deleted.', field: null })
+  deleteMock.mockResolvedValue({
+    success: true,
+    message: 'Attachment deleted.',
+    field: null,
+  })
   downloadMock.mockResolvedValue(undefined)
 }
 
@@ -209,7 +232,9 @@ describe('Idea attachments (S2-007)', () => {
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
     }) as HTMLInputElement
-    fireEvent.change(input, { target: { files: [pdfFile('new-evidence.pdf')] } })
+    fireEvent.change(input, {
+      target: { files: [pdfFile('new-evidence.pdf')] },
+    })
 
     await waitFor(() => expect(uploadMock).toHaveBeenCalledWith('1', expect.any(File)))
     expect(await within(card).findByText('new-evidence.pdf')).toBeInTheDocument()
@@ -303,7 +328,9 @@ describe('Idea attachments (S2-007)', () => {
     const input = within(card).getByLabelText(/choose file/i, {
       selector: 'input',
     }) as HTMLInputElement
-    const exe = new File(['x'], 'script.exe', { type: 'application/octet-stream' })
+    const exe = new File(['x'], 'script.exe', {
+      type: 'application/octet-stream',
+    })
 
     fireEvent.change(input, { target: { files: [exe] } })
 
@@ -313,23 +340,41 @@ describe('Idea attachments (S2-007)', () => {
 
   // --- download -----------------------------------------------------------------
 
-  it('downloads an attachment when its button is pressed', async () => {
+  it('previews a PDF in a tab instead of downloading it', async () => {
     mockContext({ attachments: [attachment()] })
     renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
-    fireEvent.click(within(card).getByRole('button', { name: /download/i }))
+    expect(within(card).queryByRole('button', { name: /download/i })).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: /preview/i }))
 
-    await waitFor(() => expect(downloadMock).toHaveBeenCalledWith(attachment()))
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(attachment()))
+    expect(downloadMock).not.toHaveBeenCalled()
   })
 
-  it('every reader who can see the section can download, not only the author', async () => {
+  it('keeps Download for a file a browser cannot show', async () => {
+    const sheet = attachment({
+      contentType: 'application/vnd.ms-excel',
+      filename: 'payments.xls',
+    })
+    mockContext({ attachments: [sheet] })
+    renderWithRouter(<IdeasWorkspace />)
+    const card = await openEvidence()
+    await within(card).findByText('payments.xls')
+
+    expect(within(card).queryByRole('button', { name: /preview/i })).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: /download/i }))
+
+    await waitFor(() => expect(downloadMock).toHaveBeenCalledWith(sheet))
+  })
+
+  it('every reader who can see the section can preview, not only the author', async () => {
     mockContext({ user: COLLEAGUE, attachments: [attachment()] })
     renderWithRouter(<IdeasWorkspace />)
     const card = await openEvidence()
 
-    expect(await within(card).findByRole('button', { name: /download/i })).toBeInTheDocument()
+    expect(await within(card).findByRole('button', { name: /preview/i })).toBeInTheDocument()
   })
 
   // --- delete -----------------------------------------------------------------
@@ -401,8 +446,14 @@ describe('Idea attachments (S2-007)', () => {
     const card = await openEvidence()
     await within(card).findByText('evidence.pdf')
 
-    const section = within(card).getByRole('region', { name: /^Supporting evidence:/ })
-    expect(within(section).queryByRole('button', { name: /vote|discussion|comment/i })).toBeNull()
+    const section = within(card).getByRole('region', {
+      name: /^Supporting evidence:/,
+    })
+    expect(
+      within(section).queryByRole('button', {
+        name: /vote|discussion|comment/i,
+      }),
+    ).toBeNull()
   })
 
   // --- accessibility -------------------------------------------------------------
@@ -413,7 +464,9 @@ describe('Idea attachments (S2-007)', () => {
     const card = await openEvidence()
 
     expect(
-      within(card).getByRole('region', { name: 'Supporting evidence: Automate the invoice run' }),
+      within(card).getByRole('region', {
+        name: 'Supporting evidence: Automate the invoice run',
+      }),
     ).toBeInTheDocument()
   })
 
@@ -422,7 +475,9 @@ describe('Idea attachments (S2-007)', () => {
     await screen.findByText('Automate the invoice run')
     await act(async () => {})
     const card = screen.getByText('Automate the invoice run').closest('li') as HTMLElement
-    const toggle = within(card).getByRole('button', { name: /supporting evidence/i })
+    const toggle = within(card).getByRole('button', {
+      name: /supporting evidence/i,
+    })
 
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(toggle)

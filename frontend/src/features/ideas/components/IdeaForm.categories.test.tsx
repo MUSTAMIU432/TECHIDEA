@@ -38,7 +38,12 @@ const createMock = vi.mocked(createIdeaRequest)
 
 const FROM_THE_SERVER: IdeaCategory[] = [
   { id: '901', name: 'Zeta Widgets', slug: 'zeta-widgets', description: '' },
-  { id: '902', name: 'Alpha Gadgets', slug: 'alpha-gadgets', description: 'Gadgets.' },
+  {
+    id: '902',
+    name: 'Alpha Gadgets',
+    slug: 'alpha-gadgets',
+    description: 'Gadgets.',
+  },
 ]
 
 function optionLabels(): string[] {
@@ -95,11 +100,18 @@ describe('IdeaForm — categories come from the backend', () => {
 
   it('sends the chosen category by its backend id', async () => {
     categoriesMock.mockResolvedValue(FROM_THE_SERVER)
-    createMock.mockResolvedValue({ success: false, message: 'stop', field: null, idea: null })
+    createMock.mockResolvedValue({
+      success: false,
+      message: 'stop',
+      field: null,
+      idea: null,
+    })
     renderAtCategory()
     await screen.findByRole('option', { name: 'Alpha Gadgets' })
 
-    fireEvent.change(screen.getByLabelText('Category'), { target: { value: '902' } })
+    fireEvent.change(screen.getByLabelText('Category'), {
+      target: { value: '902' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
 
     await waitFor(() =>
@@ -125,7 +137,12 @@ describe('IdeaForm — categories come from the backend', () => {
 
   it('says when categories could not be loaded, and still saves a draft', async () => {
     categoriesMock.mockRejectedValue(new Error('offline'))
-    createMock.mockResolvedValue({ success: false, message: 'stop', field: null, idea: null })
+    createMock.mockResolvedValue({
+      success: false,
+      message: 'stop',
+      field: null,
+      idea: null,
+    })
     renderAtCategory()
 
     expect(await screen.findByText(/Categories could not be loaded/)).toBeInTheDocument()
@@ -145,8 +162,7 @@ describe('IdeaForm — categories come from the backend', () => {
     renderAtCategory({ onSubmitted: vi.fn() })
     await screen.findByRole('option', { name: 'Zeta Widgets' })
 
-    fireEvent.click(contextChoice('My organization'))
-    fireEvent.click(screen.getByRole('radio', { name: /My organization.*People in your/ }))
+    fireEvent.click(contextChoice('Organization level'))
     goToStep(EVIDENCE_STEP)
     fireEvent.click(screen.getByRole('button', { name: 'Submit for review' }))
 

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 
-import { contextDescription } from '../utils/lifecycle'
+import { audienceDescription, contextDescription } from '../utils/lifecycle'
 import { useMyTeams } from '../../teams/hooks/useMyTeams'
 import {
   fieldErrorClasses,
@@ -16,6 +16,7 @@ import {
   type Idea,
   type IdeaCategory,
   type IdeaMutationResult,
+  type SubmissionContext,
 } from '../api/ideasApi'
 import { SpinnerIcon } from '../../identity/components/icons'
 import { ReviewHistory } from '../../reviews/components/ReviewHistory'
@@ -46,7 +47,6 @@ import {
   toInput,
   toTarget,
   validate,
-  visibilitiesForContext,
   type FieldErrors,
   type FormValues,
   type SaveMode,
@@ -110,6 +110,21 @@ interface IdeaFormProps {
    */
   organizationId: string | null
   /**
+   * The ownership the reader already chose, when they chose it *before* this
+   * form was opened - from a team's page, an organization's page, or the "Where
+   * does this idea belong?" dialog.
+   *
+   * It is applied to the form's own values and the context controls are then
+   * closed, because the question has been answered: showing a picker that
+   * silently ignores the answer would let a reader file a team idea for a
+   * different team without any indication that they had.
+   *
+   * **Presentation, not authority.** The same context, team and organization are
+   * sent with the idea and `ideas.services._resolve_context` proves membership
+   * again; a hand-written request naming another team is refused there.
+   */
+  lockedContext?: LockedContext | null
+  /**
    * The idea being edited: a draft, or (S3-005) an idea a reviewer sent back
    * with `CHANGES_REQUESTED`. `null` means "create a new one".
    */
@@ -139,6 +154,62 @@ export type SubmitOutcome =
   | { submitted: true; idea: Idea; failedUploads?: string[] }
   | { submitted: false; idea: Idea; message: string; failedUploads?: string[] }
 
+/**
+ * Who the idea belongs to, decided by the caller.
+ *
+ * `context` and the tenant it names travel together because the server needs
+ * both: an individual filing names neither, a team filing names a team, and an
+ * organization filing names an organization. `ownerName` is for the banner and
+ * is never sent.
+ */
+export interface LockedContext {
+  context: SubmissionContext
+  teamId?: string | null
+  organizationId?: string | null
+  /** For the banner. Falls back to a neutral phrase when a caller has no name. */
+  ownerName?: string
+}
+
+const CONTEXT_TITLES: Record<SubmissionContext, string> = {
+  INDIVIDUAL: 'Individual Idea',
+  TEAM: 'Team Idea',
+  ORGANIZATION: 'Organization Idea',
+}
+
+/**
+ * "Creating a Team Idea for Automation Team" - on every step, not just the one
+ * where ownership is chosen.
+ *
+ * The single most repeated sentence in this feature's requirements, and the
+ * reason it is a banner rather than a field: the intake form is eight steps
+ * long, and by the last of them a reader who chose their team three screens ago
+ * has no way to tell whether the question still stands. A banner that is on
+ * every step costs one line and removes the doubt entirely.
+ */
+export function IdeaContextBanner({ context }: { context: LockedContext }) {
+  const title = CONTEXT_TITLES[context.context]
+  const owner =
+    context.context === 'INDIVIDUAL'
+      ? 'yourself'
+      : context.ownerName && context.ownerName !== ''
+        ? context.ownerName
+        : context.context === 'TEAM'
+          ? 'your team'
+          : 'your organization'
+
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-900">
+      <span className="font-semibold">Creating {aOrAn(title)}</span>
+      <span className="text-brand-800">for</span>
+      <span className="font-semibold">{owner}</span>
+    </p>
+  )
+}
+
+function aOrAn(title: string): string {
+  return `${/^[AEIOU]/.test(title) ? 'an' : 'a'} ${title}`
+}
+
 /** A list of everyday examples under a question. */
 function Examples({ items }: { items: readonly string[] }) {
   return (
@@ -155,17 +226,24 @@ function Examples({ items }: { items: readonly string[] }) {
 
 export function IdeaForm({
   organizationId,
+  lockedContext = null,
   idea = null,
   onSaved,
   onCancel,
   onSubmitted,
 }: IdeaFormProps) {
   const isEditing = idea !== null
+  // A pre-answered ownership question closes the controls that would ask it
+  // again. Editing never closes them on this account: an existing idea's owner
+  // comes from the row, not from a choice.
+  const contextLocked = !isEditing && lockedContext !== null
   const canSubmitHere = !isEditing && onSubmitted !== undefined
   // Sent back by a reviewer (S3-005): the same form, answering the feedback.
   const isRevising = idea?.status === 'CHANGES_REQUESTED'
 
-  const [values, setValues] = useState<FormValues>(() => initialValues(idea))
+  const [values, setValues] = useState<FormValues>(() =>
+    initialValues(idea, lockedContext ?? undefined),
+  )
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   // How each held file's upload is going, by position, while the form attaches them.
   const [uploadStatuses, setUploadStatuses] = useState<UploadStatus[]>([])
@@ -181,7 +259,6 @@ export function IdeaForm({
   const [isLoadingCategories, setIsLoadingCategories] = useState(true)
   const [categoriesFailed, setCategoriesFailed] = useState(false)
 
-  const visibilityGroupId = useId()
   const categoryIdForLabel = useId()
   const teamIdForLabel = useId()
   const stepHeadingId = useId()
@@ -203,19 +280,19 @@ export function IdeaForm({
       [
         {
           value: 'INDIVIDUAL' as const,
-          label: 'Just me',
+          label: 'Individual level',
           unavailable: false,
           unavailableReason: '',
         },
         {
           value: 'TEAM' as const,
-          label: 'My team',
+          label: 'Team level',
           unavailable: teams.length === 0,
           unavailableReason: 'You are not in a team yet.',
         },
         {
           value: 'ORGANIZATION' as const,
-          label: 'My organization',
+          label: 'Organization level',
           unavailable: organizationId === null,
           unavailableReason: 'You are not in an organization yet.',
         },
@@ -310,7 +387,10 @@ export function IdeaForm({
         // send this request yet. `validate` stops a *submission* for it; a
         // draft still has to be saveable, so it is refused as a whole-form
         // problem here rather than silently filed for the wrong tenant.
-        const target = toTarget(values, organizationId)
+        // A pre-chosen organization outranks the header's switcher: the reader
+        // said which organization this idea is for, and the header is a
+        // workspace preference that happens to also name an organization.
+        const target = toTarget(values, lockedContext?.organizationId ?? organizationId)
         if (target === null) {
           setFormError('Choose who is filing this before saving it.')
           return
@@ -636,7 +716,7 @@ export function IdeaForm({
               will be. Fixed while editing - an idea's tenant is settled when it
               is created, and `updateIdea` writes no context.
             */}
-            <fieldset disabled={disabled || isRevising}>
+            <fieldset disabled={disabled || isRevising || contextLocked}>
               <legend className={labelClasses}>Who is putting this forward?</legend>
               <div className="grid gap-2 @xl:grid-cols-3">
                 {contextOptions.map((option) => (
@@ -646,7 +726,7 @@ export function IdeaForm({
                       name="submission-context"
                       value={option.value}
                       checked={values.submissionContext === option.value}
-                      disabled={disabled || isRevising || option.unavailable}
+                      disabled={disabled || isRevising || contextLocked || option.unavailable}
                       onChange={() => setField('submissionContext', option.value)}
                       className="h-4 w-4 shrink-0 accent-brand-600"
                     />
@@ -669,6 +749,11 @@ export function IdeaForm({
                   Who is filing this is fixed now that it has been submitted.
                 </p>
               )}
+              {contextLocked && (
+                <p className="mt-1.5 text-sm text-gray-500">
+                  You chose this before you started writing, so it is not a question here.
+                </p>
+              )}
             </fieldset>
 
             {values.submissionContext === 'TEAM' && (
@@ -686,7 +771,7 @@ export function IdeaForm({
                     id={teamIdForLabel}
                     className={`${inputClasses(Boolean(errors.teamId))} w-full`}
                     value={values.teamId}
-                    disabled={disabled || isRevising}
+                    disabled={disabled || isRevising || contextLocked}
                     onChange={(event) => setField('teamId', event.target.value)}
                   >
                     <option value="">Choose a team</option>
@@ -756,47 +841,20 @@ export function IdeaForm({
               )}
             </div>
 
-            <fieldset>
-              <legend className={labelClasses}>Who should be able to see this?</legend>
-              <div className="space-y-2">
-                {visibilitiesForContext(values.submissionContext).map((option) => {
-                  // Derived from one `useId()` above rather than a hook inside
-                  // the map callback, which React does not allow.
-                  const optionId = `${visibilityGroupId}-${option.value.toLowerCase()}`
-                  return (
-                    <label
-                      key={option.value}
-                      htmlFor={optionId}
-                      className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 rounded-lg border border-gray-200 p-3 text-sm font-semibold text-gray-900 transition-colors hover:border-brand-200 hover:bg-gray-50 has-checked:border-brand-400 has-checked:bg-brand-50 has-disabled:cursor-not-allowed has-disabled:opacity-60"
-                    >
-                      <input
-                        id={optionId}
-                        type="radio"
-                        name="idea-visibility"
-                        value={option.value}
-                        checked={values.visibility === option.value}
-                        // Fixed once submitted; the server refuses a change too.
-                        disabled={disabled || isRevising}
-                        onChange={() => setField('visibility', option.value)}
-                        className="mt-0.5 h-4 w-4 shrink-0 accent-brand-600"
-                      />
-                      {option.label}
-                      <span className="col-start-2 mt-0.5 font-normal text-gray-600">
-                        {option.hint}
-                      </span>
-                    </label>
-                  )
-                })}
-              </div>
-              {errors.visibility && <p className={fieldErrorClasses}>{errors.visibility}</p>}
-              <p className="mt-1.5 text-sm leading-6 text-gray-500">
-                {isRevising
-                  ? 'Who can see this is fixed now that it has been submitted.'
-                  : values.submissionContext === 'ORGANIZATION'
-                    ? 'A new idea is private until you choose otherwise. To submit it for review, choose My organization or Everyone - reviewers can only review what they can see. You can only change this while the idea is a draft.'
-                    : 'Nothing here is shared with an organization, so the platform reviews this idea directly - which means it has to be visible to everyone to be reviewed. You can still keep it private while it is a draft.'}
+            {/* No audience picker: who can see an idea follows the level it is filed
+                at, so this says what that is rather than asking. */}
+            <section
+              aria-label="Who will see this idea"
+              className="rounded-lg border border-gray-200 bg-gray-50 p-4"
+            >
+              <p className={labelClasses}>Who will see this idea</p>
+              <p className="text-sm leading-6 text-gray-600">
+                {audienceDescription(values.submissionContext)}
               </p>
-            </fieldset>
+              <p className="mt-2 text-sm leading-6 text-gray-500">
+                While it is a draft, only you can see it.
+              </p>
+            </section>
           </>
         )
       default:
@@ -829,11 +887,12 @@ export function IdeaForm({
 
   return (
     <form
-      // `@3xl:max-h` + `@3xl:flex-col`: the form is exactly as tall as the space
-      // under the app chrome, so the page never scrolls here. Everything that
+      // `lg:flex-1` + `lg:flex-col`: the form fills the page wrapper, which is
+      // exactly as tall as the space under the app chrome (a container query
+      // cannot style the element that declares the container, hence `lg:`), so the page never scrolls here. Everything that
       // does not fit goes into the questions pane instead - see the grid below.
       // Below `@3xl` none of this applies and the page scrolls as it always did.
-      className="@container rounded-xl border border-gray-200 bg-white p-5 shadow-sm sm:p-6 @3xl:flex @3xl:max-h-[calc(100dvh-var(--app-chrome-height,0px)-4.5rem)] @3xl:flex-col"
+      className="@container overflow-hidden rounded-xl border border-gray-200 bg-white p-5 pt-0 shadow-sm sm:p-6 sm:pt-0 lg:flex lg:min-h-0 lg:flex-1 lg:flex-col"
 
       onSubmit={handleSubmit}
       noValidate
@@ -866,7 +925,7 @@ export function IdeaForm({
         rule when side by side and a full-width one when stacked, so the menu
         never reads as part of the form.
       */}
-      <div className="mt-6 grid border-t-2 border-gray-300 @3xl:min-h-0 @3xl:flex-1 @3xl:grid-cols-[21rem_minmax(0,1fr)]">
+      <div className="grid @3xl:min-h-0 @3xl:flex-1 @3xl:grid-cols-[21rem_minmax(0,1fr)]">
         <div
           // Bled to the card's edge (its padding is p-5, and p-6 at the widths
           // where the panes sit side by side) so the pane reads as a pane.
