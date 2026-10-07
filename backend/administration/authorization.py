@@ -61,6 +61,12 @@ REVIEW_PLATFORM_SUBMISSIONS = 'administration.review_platform_submissions'
 # intake and deciding are different acts: the platform admin who routes work
 # need not be the person who approves it.
 ASSIGN_PLATFORM_REVIEWERS = 'administration.assign_platform_reviewers'
+# Make people reviewers and form them into review teams. Separate from routing a
+# submission to one: whoever builds the teams need not be whoever hands them work.
+MANAGE_REVIEWERS = 'administration.manage_reviewers'
+# Decide whether a review team's proposal is released to the idea's owner. Not held by the
+# reviewers who write it: the author of a proposal never approves it.
+RELEASE_PROPOSALS = 'administration.release_proposals'
 
 # The console's own permissions: the gate plus the additional capabilities, and
 # nothing about *deciding* anything. Named separately from `ALL_PERMISSIONS`
@@ -87,6 +93,8 @@ ALL_PERMISSIONS = (
     MANAGE_CATEGORIES,
     REVIEW_PLATFORM_SUBMISSIONS,
     ASSIGN_PLATFORM_REVIEWERS,
+    MANAGE_REVIEWERS,
+    RELEASE_PROPOSALS,
 )
 
 
@@ -116,6 +124,8 @@ class AdminCapabilities:
     # surface and nobody reviews without being able to see the platform's work.
     can_review_platform_submissions: bool = False
     can_assign_platform_reviewers: bool = False
+    can_manage_reviewers: bool = False
+    can_release_proposals: bool = False
 
 
 NO_CAPABILITIES = AdminCapabilities()
@@ -140,6 +150,8 @@ def capabilities_for(user: User | None) -> AdminCapabilities:
         can_manage_categories=active_user.has_perm(MANAGE_CATEGORIES),
         can_review_platform_submissions=active_user.has_perm(REVIEW_PLATFORM_SUBMISSIONS),
         can_assign_platform_reviewers=active_user.has_perm(ASSIGN_PLATFORM_REVIEWERS),
+        can_manage_reviewers=active_user.has_perm(MANAGE_REVIEWERS),
+        can_release_proposals=active_user.has_perm(RELEASE_PROPOSALS),
     )
 
 
@@ -167,6 +179,16 @@ def require_assign_reviewer(user: User | None) -> User:
     force every small platform team to be the same person.
     """
     return require_admin(user, ASSIGN_PLATFORM_REVIEWERS)
+
+
+def require_manage_reviewers(user: User | None) -> User:
+    """`user`, if they hold both `ACCESS_CONSOLE` and `MANAGE_REVIEWERS`."""
+    return require_admin(user, MANAGE_REVIEWERS)
+
+
+def require_release_proposals(user: User | None) -> User:
+    """`user`, if they hold both `ACCESS_CONSOLE` and `RELEASE_PROPOSALS`."""
+    return require_admin(user, RELEASE_PROPOSALS)
 
 
 def is_platform_admin(user: User | None) -> bool:

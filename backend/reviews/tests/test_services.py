@@ -179,7 +179,9 @@ class TestStartReview:
     def test_only_a_submitted_idea(self, world, status):
         idea = make_idea(world['acme'], world['author'], status=status)
 
-        with pytest.raises(services.ReviewError, match='not waiting for review'):
+        # A draft is its author's alone, so a reviewer is told it is unavailable
+        # rather than that it is not waiting - either way, no review starts.
+        with pytest.raises(services.ReviewError, match=r'not waiting for review|unavailable'):
             services.start_review(world['reviewer'], idea.pk)
         assert not Review.objects.filter(idea=idea).exists()
 

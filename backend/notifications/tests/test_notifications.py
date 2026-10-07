@@ -27,6 +27,7 @@ something waiting in your queue".
 import pytest
 from django.core import mail
 from django.db.utils import IntegrityError
+from django.utils import timezone
 
 from ideas import services as idea_services
 from ideas.models import Category, Idea
@@ -77,6 +78,9 @@ def idea():
         visibility=Idea.Visibility.PUBLIC,
         submission_context=Idea.SubmissionContext.INDIVIDUAL,
         author=make_user('author@example.com'),
+        # Past `DRAFT`: a draft is its author's alone, so nobody else is linked to it.
+        status=Idea.Status.SUBMITTED,
+        submitted_at=timezone.now(),
     )
 
 
@@ -378,7 +382,6 @@ class TestWhatGoesIn:
             idea_services.IdeaInput(
                 title='Mine',
                 description=DESCRIPTION,
-                visibility=Idea.Visibility.PUBLIC,
                 category_id=Category.objects.create(name='Later').pk,
             ),
             submission_context=Idea.SubmissionContext.INDIVIDUAL,
@@ -496,3 +499,136 @@ def mailoutbox():
     outbox.clear()
     yield outbox
     outbox.clear()
+
+
+# --- where a notification takes you -------------------------------------------------
+
+
+class TestTheActionPath:
+    """
+    The destination is the server's to decide, and these are the rules.
+
+    It is derived from the kind and the ids the row already holds rather than
+    stored, because a stored URL is a second copy of the product's routes that
+    can go stale silently; and it is derived *once*, so the in-app link and any
+    payload built from the same row cannot disagree.
+    """
+
+    def test_a_decision_links_to_the_idea_review_report(self, recipient, idea, mailoutbox):
+        deliver_now(
+            recipients=recipient,
+            kind='idea.platform_approved',
+            title='Platform review completed',
+            body='Your idea is ready.',
+            idea=idea,
+            send_email=False,
+        )
+
+        note = Notification.objects.get(user=recipient)
+        # No report id, so the idea itself - the fallback, and still gated.
+        assert note.action_path == f'/app/ideas/{idea.pk}'
+
+    def test_a_queue_nudge_never_links_to_a_report(self, recipient, idea, mailoutbox):
+        """
+        The distinction `DECISION_KINDS` exists for. A "somebody is waiting for
+        you" notification pointing at an approval report would be nonsense at
+        best and misleading at worst.
+        """
+        deliver_now(
+            recipients=recipient,
+            kind='review.organization_queue',
+            title='An idea is waiting',
+            body='Somebody submitted something.',
+            idea=idea,
+            send_email=False,
+        )
+
+        assert Notification.objects.get(user=recipient).action_path == f'/app/ideas/{idea.pk}'
+
+    def test_an_invitation_has_no_link_because_none_can_be_honest(self, recipient, mailoutbox):
+        """
+        Acceptance needs the plaintext token, and only its digest is stored - so
+        there is nothing this could build. Fabricating a link that cannot work
+        would be worse than having none, so `action_path` is null and the client
+        falls back to the list.
+        """
+        deliver_now(
+            recipients=recipient,
+            kind='invitation.received',
+            title='You have been invited',
+            body='Open the link in your email.',
+            send_email=False,
+        )
+
+        assert Notification.objects.get(user=recipient).action_path is None
+
+    def test_a_message_notification_goes_to_the_conversations(self, recipient, mailoutbox):
+        deliver_now(
+            recipients=recipient,
+            kind='message.received',
+            title='You have a new message',
+            body='Somebody wrote to you.',
+            send_email=False,
+        )
+
+        assert Notification.objects.get(user=recipient).action_path == '/app/messages'
+
+    def test_a_notification_about_an_unreadable_idea_carries_no_link(self, recipient, mailoutbox):
+        """
+        A notification outlives the access it was written under. An author whose
+        account was deactivated, or a reader on a shared device, must not be
+        handed a link to something they can no longer open.
+        """
+        from organizations.services import CreateOrganizationInput, create_organization_for_user
+
+        tenant = create_organization_for_user(
+            make_user('owner@example.com'), CreateOrganizationInput(name='Acme')
+        ).organization
+        idea = Idea.objects.create(
+            title='Secret salary spreadsheet',
+            description='Very private words.',
+            visibility=Idea.Visibility.PRIVATE,
+            submission_context=Idea.SubmissionContext.ORGANIZATION,
+            organization=tenant,
+            author=make_user('author2@example.com'),
+        )
+        deliver_now(
+            recipients=recipient,
+            kind='idea.organization_changes_requested',
+            title='Changes requested',
+            body='Somebody asked for changes.',
+            idea=idea,
+            send_email=False,
+        )
+
+        assert Notification.objects.get(user=recipient).action_path is None
+
+    def test_a_public_idea_is_linked_for_anybody_told_about_it(self, recipient, idea, mailoutbox):
+        deliver_now(
+            recipients=recipient,
+            kind='idea.submitted_to_platform',
+            title='Submitted',
+            body='It is with the platform now.',
+            idea=idea,
+            send_email=False,
+        )
+
+        assert Notification.objects.get(user=recipient).action_path == f'/app/ideas/{idea.pk}'
+
+    def test_the_label_is_the_servers_wording(self, recipient, mailoutbox):
+        """
+        A client rendering "Platform approved" by splitting a dotted string is
+        one `replace` away from being wrong. The words live here.
+        """
+        deliver_now(
+            recipients=recipient,
+            kind='invitation.declined',
+            title='Your invitation was declined',
+            body='Nothing was changed.',
+            send_email=False,
+        )
+
+        note = Notification.objects.get(user=recipient)
+        from notifications.models import NOTIFICATION_LABELS
+
+        assert NOTIFICATION_LABELS[note.kind] == 'Your invitation was declined'

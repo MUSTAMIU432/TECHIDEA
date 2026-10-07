@@ -153,6 +153,12 @@ def can_view_idea(user: User | None, idea: Idea | None) -> bool:
     if user is None or not user.is_active or idea is None:
         return False
 
+    # A draft is the author's alone, whatever audience they have picked for it:
+    # the audience takes effect when the idea is put forward, not while it is
+    # still being written.
+    if idea.status == Idea.Status.DRAFT:
+        return idea.author_id == user.pk
+
     if idea.visibility == Idea.Visibility.PUBLIC:
         # Platform-wide by definition. Still requires an authenticated,
         # active account: this is a signed-in product, not a public board.
@@ -171,12 +177,19 @@ def can_view_idea(user: User | None, idea: Idea | None) -> bool:
     # absent: with no department tier it is author-only, so it falls through to
     # "must be a member of the idea's tenant" being false. See the module
     # docstring.
+    #
+    # Each value is matched against the tenant it actually names, and a value
+    # that does not match the idea's own context reaches nothing. That is the
+    # whole point of `TEAM` being its own value: an organization idea cannot be
+    # read through a team membership and a team idea cannot be read through an
+    # organization one, whichever word an author picked.
     if idea.visibility == Idea.Visibility.ORGANIZATION:
-        if idea.submission_context == Idea.SubmissionContext.TEAM:
-            from teams import authorization as team_authorization
-
-            return team_authorization.is_member_of(user, idea.team_id)
         return authorization.is_member_of(user, idea.organization_id)
+
+    if idea.visibility == Idea.Visibility.TEAM:
+        from teams import authorization as team_authorization
+
+        return team_authorization.is_member_of(user, idea.team_id)
 
     return False
 
@@ -189,18 +202,27 @@ def _visibility_filter(user: User) -> Q:
     purpose. Two implementations of one rule is the failure mode this module
     exists to prevent, so the two are written to be visibly parallel:
     `PUBLIC` is readable by anyone authenticated, an author always sees
-    their own, and `ORGANIZATION` additionally requires membership.
+    their own, and the tenant-scoped values additionally require membership.
+
+    `ORGANIZATION` is scoped to `organization_id`, `TEAM` to `team_id`, and a
+    value that does not match the idea's context reaches nothing - so a team
+    idea cannot be read through an organization membership, nor an organization
+    idea through a team one. `DEPARTMENT` appears nowhere because it is reserved
+    vocabulary with no model behind it: `can_view_idea` above treats it as
+    author-only, and a filter that widened it would be the one place that
+    quietly did not.
     """
-    return (
+    shared = (
         Q(visibility=Idea.Visibility.PUBLIC)
-        | Q(author=user)
         | Q(
             visibility=Idea.Visibility.ORGANIZATION,
             organization_id__in=_organization_ids(user),
         )
-        | Q(visibility=Idea.Visibility.ORGANIZATION, team_id__in=_team_ids(user))
+        | Q(visibility=Idea.Visibility.TEAM, team_id__in=_team_ids(user))
         | platform_reviewer_filter(user)
     )
+    # A draft is the author's alone: the audience takes effect on submission.
+    return Q(author=user) | (shared & ~Q(status=Idea.Status.DRAFT))
 
 
 def _base_queryset() -> QuerySet[Idea]:
@@ -362,24 +384,33 @@ class IdeaFilters:
     """
     Everything a caller may narrow a discovery query by.
 
-    Note what is *not* here: there is no `visibility` field, and no `author_id`,
-    and no free-form field mapping. Those are exactly the arguments that would
-    turn a read into a way of asking for somebody else's rows — `visibility=public`
-    reads like a filter and behaves like a grant. Visibility is decided by
-    `_visibility_filter` and by nothing else; an author filter is dropped for
-    the same reason (nobody needs "ideas by X" in discovery, and it is one more
-    surface to keep honest).
+    **Every field here can only remove rows.** The visibility filter is applied
+    by the caller before any of these run, so narrowing is all a filter can do -
+    there is no argument whose value widens a result, and no free-form field
+    mapping that could smuggle one in.
 
-    `organization_id` is the exception that looks like a grant and is not: it
-    can only ever *narrow*, because `list_discoverable_ideas` refuses it
-    outright unless the caller holds an active membership of that
-    organization.
+    That is why `visibility`, `submission_context` and `mine` are here at all.
+    Each reads like a grant and is not one: `visibility=PUBLIC` returns only
+    ideas the caller could already see *and* that happen to be public, and
+    `mine=True` is the caller's own id rather than an id the caller chose, so it
+    cannot become a way of asking for somebody else's rows. `author_id` as a
+    caller-supplied value is deliberately absent for the reason `mine` exists
+    instead.
+
+    `organization_id` and `team_id` are the two that name a tenant, and each is
+    checked against the caller's own membership before it filters anything: an
+    id they are not a member of yields an empty page, which is also the answer
+    for a tenant that does not exist.
     """
 
     organization_id: object | None = None
+    team_id: object | None = None
     category_id: object | None = None
     status: str | None = None
     search: str | None = None
+    submission_context: str | None = None
+    visibility: str | None = None
+    mine: bool = False
 
 
 def _normalize_id(value: object) -> int | None:
@@ -419,7 +450,9 @@ def _search_filter(search: str | None) -> Q:
     return Q(title__icontains=term) | Q(description__icontains=term)
 
 
-def _apply_filters(queryset: QuerySet[Idea], filters: IdeaFilters) -> QuerySet[Idea]:
+def _apply_filters(
+    queryset: QuerySet[Idea], filters: IdeaFilters, viewer: User | None = None
+) -> QuerySet[Idea]:
     """
     Narrow an already-visibility-filtered queryset.
 
@@ -433,6 +466,10 @@ def _apply_filters(queryset: QuerySet[Idea], filters: IdeaFilters) -> QuerySet[I
     read that as "no ideas in this category" when it means "that category does
     not exist" — an empty page says the same thing and cannot be mistaken for
     data.
+
+    `viewer` is here for exactly one field, `mine`, and it is the *caller's*
+    account rather than a value from the request — which is the difference
+    between "my ideas" and a way of asking for somebody else's.
     """
     queryset = queryset.filter(_search_filter(filters.search))
 
@@ -447,6 +484,23 @@ def _apply_filters(queryset: QuerySet[Idea], filters: IdeaFilters) -> QuerySet[I
         if status not in Idea.Status.values:
             return queryset.none()
         queryset = queryset.filter(status=status)
+
+    if filters.submission_context is not None and str(filters.submission_context).strip():
+        context = str(filters.submission_context).strip().lower()
+        if context not in Idea.SubmissionContext.values:
+            return queryset.none()
+        queryset = queryset.filter(submission_context=context)
+
+    if filters.visibility is not None and str(filters.visibility).strip():
+        visibility = str(filters.visibility).strip().lower()
+        if visibility not in Idea.Visibility.values:
+            return queryset.none()
+        queryset = queryset.filter(visibility=visibility)
+
+    if filters.mine and viewer is not None:
+        # The caller's own id, never one they supplied, so this cannot become
+        # "ideas by X".
+        queryset = queryset.filter(author=viewer)
 
     return queryset
 
@@ -466,10 +520,10 @@ def list_discoverable_ideas(
     `organizationIdeas` and `ideas` both go through, so there is no second
     queryset an unfiltered idea could escape through.
 
-    An `organization_id` filter the caller has no active membership of yields
-    an empty page, not an error and not somebody else's ideas — the same
-    answer as for an organization that does not exist, so the argument cannot
-    be used to probe for either.
+    An `organization_id` or `team_id` filter the caller holds no active
+    membership of yields an empty page, not an error and not somebody else's
+    ideas — the same answer as for a tenant that does not exist, so neither
+    argument can be used to probe for either.
     """
     applied = filters or IdeaFilters()
 
@@ -486,7 +540,17 @@ def list_discoverable_ideas(
             return empty_page(offset, limit)
         queryset = queryset.filter(organization_id=organization_pk)
 
-    queryset = _apply_filters(queryset, applied)
+    if applied.team_id is not None:
+        from teams import authorization as team_authorization
+
+        team_pk = _normalize_id(applied.team_id)
+        if team_pk is None:
+            return empty_page(offset, limit)
+        if team_authorization.get_membership(user, team_pk) is None:
+            return empty_page(offset, limit)
+        queryset = queryset.filter(team_id=team_pk)
+
+    queryset = _apply_filters(queryset, applied, user)
 
     # Ordering: `-pk` as the tie-breaker is not decoration: `created_at` is
     # microsecond-resolution, so two ideas filed in the same instant would

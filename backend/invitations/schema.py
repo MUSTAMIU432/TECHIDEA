@@ -96,6 +96,11 @@ class InvitationPreviewType:
     expired: bool
     accepted: bool
     revoked: bool
+    declined: bool = strawberry.field(
+        description='True when the recipient turned it down. Shown as its own state rather '
+        'than folded into "expired", because the two mean opposite things to the person who '
+        'sent it.'
+    )
 
     @staticmethod
     def from_model(invitation: Invitation) -> 'InvitationPreviewType':
@@ -111,6 +116,7 @@ class InvitationPreviewType:
             expired=not invitation.is_open and invitation.status == Invitation.Status.PENDING,
             accepted=invitation.status == Invitation.Status.ACCEPTED,
             revoked=invitation.status == Invitation.Status.REVOKED,
+            declined=invitation.status == Invitation.Status.DECLINED,
         )
 
 
@@ -278,5 +284,27 @@ class Mutation:
         return AcceptInvitationPayload(
             success=True,
             message=f'You have joined {invitation.tenant_label}.',
+            invitation=InvitationType.from_model(invitation),
+        )
+
+    @strawberry.mutation(
+        description=(
+            'Decline an invitation, closing it without joining. Requires you to be '
+            'signed in with the address the invitation was sent to, for the same '
+            'reason accepting does: a decline is a statement about the invitation, '
+            'so only the person it was sent to may make one.\n\n'
+            'Nothing is created and nothing is removed - a membership only ever '
+            'comes from accepting - so this is safe to press and impossible to '
+            'undo except by asking for another invitation.'
+        )
+    )
+    def decline_invitation(self, info: strawberry.Info, token: str) -> AcceptInvitationPayload:
+        try:
+            invitation = services.decline_invitation(info.context.user, token)
+        except services.InvitationError as exc:
+            return AcceptInvitationPayload(success=False, message=exc.message, field=exc.field)
+        return AcceptInvitationPayload(
+            success=True,
+            message=f'You have declined the invitation to {invitation.tenant_label}.',
             invitation=InvitationType.from_model(invitation),
         )

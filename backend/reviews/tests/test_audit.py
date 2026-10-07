@@ -36,6 +36,7 @@ from reviews import services
 from reviews.models import ReviewCriterionAssessment
 from reviews.tests.platform import (
     grant_platform_reviewer,
+    release_proposal,
     revoke_platform_reviewer,
 )
 
@@ -249,6 +250,7 @@ class TestRecording:
 
         from ideas import go_ahead
 
+        release_proposal(idea)
         go_ahead.confirm_go_ahead(world['author'], idea.pk)
 
         assert trail(idea) == [

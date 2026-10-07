@@ -192,6 +192,17 @@ class Review(models.Model):
         db_index=False,  # Prefix of `reviews_reviewer_created_idx` below.
         help_text='The member accountable for this review.',
     )
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='decided_reviews',
+        help_text=(
+            'Who recorded the decision, when that is not `reviewer`: in a review team any '
+            'member may send changes back, so the person who did is kept.'
+        ),
+    )
     round = models.PositiveSmallIntegerField(
         help_text=(
             "1 for this scope's first review of this idea, then one more per "
@@ -441,6 +452,17 @@ class ReviewAssignment(models.Model):
         related_name='review_assignments',
         db_index=False,  # Prefix of `assignments_reviewer_created_idx` below.
     )
+    team = models.ForeignKey(
+        'ReviewTeam',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='assignments',
+        help_text=(
+            'Set when the idea was routed to a review team. `reviewer` is then the '
+            "team's lead at the time: the one accountable name on the decision."
+        ),
+    )
     assigned_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -631,3 +653,146 @@ class PlatformReviewReport(models.Model):
         if self.team_id is not None and self.team is not None:
             return self.team.name
         return ''
+
+
+class ReviewTeam(models.Model):
+    """
+    A group of platform reviewers who work an idea together.
+
+    **One lead, many contributors.** Every member reads the idea and may send it back
+    to its owner asking for changes or more documents; only the **lead** approves or
+    rejects, so there is always exactly one accountable name on a decision. The lead
+    is always a member (enforced by `reviews.review_teams`), and a team that has been
+    retired (`is_active=False`) keeps its history but cannot be assigned new work.
+
+    Who may *be* a reviewer is not decided here: every member must hold the platform
+    review permission, which `reviews.review_teams` checks when they are added and
+    which the review itself asks again.
+    """
+
+    name = models.CharField(max_length=120, unique=True)
+    lead = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='led_review_teams'
+    )
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['name']
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ReviewTeamMember(models.Model):
+    team = models.ForeignKey(ReviewTeam, on_delete=models.CASCADE, related_name='members')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='review_team_memberships'
+    )
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['created_at', 'pk']
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.UniqueConstraint(fields=['team', 'user'], name='review_team_member_unique'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.user_id} in {self.team_id}'
+
+
+PROPOSAL_STATUS_CHOICES = (
+    ('draft', 'Draft'),
+    ('submitted', 'Submitted to the platform admin'),
+    ('changes_requested', 'Changes requested'),
+    ('released', 'Released to the owner'),
+    ('declined', 'Declined'),
+)
+
+
+class IdeaProposal(models.Model):
+    """
+    The proposal for an approved idea: what the platform would build, written by the review
+    team that approved it.
+
+    **Four hands, none of them the same.** The review team *writes* it (any member edits, the
+    lead submits); a platform admin holding `release_proposals` decides whether it goes to the
+    owner; the owner *reads* it and only then can give the go-ahead; a delivery manager
+    assigns a developer after that. The author of a proposal never approves it, and the owner
+    never edits it.
+
+    One per idea. The content is the same sections a client expects of a proposal; they are
+    plain text on purpose - there is nothing here to download, only a view-only page.
+    """
+
+    idea = models.OneToOneField(Idea, on_delete=models.CASCADE, related_name='proposal')
+    team = models.ForeignKey(
+        ReviewTeam,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='proposals',
+        help_text='The review team that wrote it; empty when a single reviewer did.',
+    )
+    title = models.CharField(max_length=200)
+    executive_summary = models.TextField(blank=True)
+    problem = models.TextField(blank=True)
+    proposed_solution = models.TextField(blank=True)
+    requirements_summary = models.TextField(blank=True)
+    scope = models.TextField(blank=True)
+    deliverables = models.TextField(blank=True)
+    risks = models.TextField(blank=True)
+    assumptions = models.TextField(blank=True)
+    estimated_effort = models.CharField(max_length=120, blank=True)
+    estimated_timeline = models.CharField(max_length=120, blank=True)
+    acceptance_criteria = models.TextField(blank=True)
+
+    status = models.CharField(max_length=20, choices=PROPOSAL_STATUS_CHOICES, default='draft')
+    review_feedback = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+'
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name='+'
+    )
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name='+'
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.CheckConstraint(
+                condition=models.Q(status__in=dict(PROPOSAL_STATUS_CHOICES)),
+                name='idea_proposal_status_is_known',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.title} ({self.status})'
+
+
+class IdeaProposalView(models.Model):
+    """
+    Each time the owner opened the released proposal. Append-only evidence: the page is
+    view-only and watermarked, and this is who looked, and when.
+    """
+
+    proposal = models.ForeignKey(IdeaProposal, on_delete=models.CASCADE, related_name='views')
+    viewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-viewed_at', '-pk']
+
+    def __str__(self) -> str:
+        return f'{self.viewer_id} viewed {self.proposal_id}'

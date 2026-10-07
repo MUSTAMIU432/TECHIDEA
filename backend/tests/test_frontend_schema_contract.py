@@ -131,6 +131,7 @@ SCHEMA_DECLARED_FIELDS = {
         'phoneNumber',
         'isActive',
         'isVerified',
+        'avatarUrl',
     },
     'RoleType': {
         'id',
@@ -255,6 +256,7 @@ def test_the_user_type_exposes_only_public_fields(types_by_name):
         'phoneNumber',
         'isActive',
         'isVerified',
+        'avatarUrl',
     }
     forbidden = ('password', 'secret', 'token', 'credential', 'hash')
     for name in declared:

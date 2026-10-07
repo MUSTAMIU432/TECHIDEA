@@ -172,7 +172,10 @@ TRANSITION_REVIEW_SCOPE: dict[tuple[str, str], str] = {
 FIRST_SUBMISSION_TARGET: dict[str, str] = {
     Idea.SubmissionContext.ORGANIZATION: Idea.Status.SUBMITTED_TO_ORGANIZATION,
     Idea.SubmissionContext.INDIVIDUAL: Idea.Status.SUBMITTED,
-    Idea.SubmissionContext.TEAM: Idea.Status.SUBMITTED,
+    # A team checks its own idea first, exactly as an organization does: the same
+    # stage, the same three statuses (their names say "organization" because that
+    # is the level that came first), a different set of reviewers.
+    Idea.SubmissionContext.TEAM: Idea.Status.SUBMITTED_TO_ORGANIZATION,
 }
 
 # Where an idea comes back to after each track asks for changes. Both are the
@@ -217,7 +220,9 @@ ORGANIZATION_TRACK_STATUSES: frozenset[str] = frozenset(
 # this one. Deliberately about the *idea* and not the caller: the person asking
 # is the author, who is allowed to submit, and the thing they cannot do yet is
 # skip a stage their organization owns.
-CONTEXT_MISMATCH = 'Your organization has to confirm this idea before it can go to the platform.'
+CONTEXT_MISMATCH = (
+    'Your team or organization has to confirm this idea before it can go to the platform.'
+)
 
 
 def context_allows(idea: Idea, to_status: str) -> bool:
@@ -240,16 +245,23 @@ def context_allows(idea: Idea, to_status: str) -> bool:
     if idea is None:
         return False
 
-    is_organization = idea.submission_context == Idea.SubmissionContext.ORGANIZATION
+    has_tenant_stage = idea.submission_context in (
+        Idea.SubmissionContext.ORGANIZATION,
+        Idea.SubmissionContext.TEAM,
+    )
     target = str(to_status or '').strip().lower()
 
-    if not is_organization and (
+    # An individual idea has no team or organization to check it, so it never
+    # enters that stage.
+    if not has_tenant_stage and (
         idea.status in ORGANIZATION_TRACK_STATUSES or target in ORGANIZATION_TRACK_STATUSES
     ):
         return False
 
+    # A team or organization idea may not skip its own stage straight to the
+    # platform: that would make the stage optional.
     if (idea.status, target) == (Idea.Status.DRAFT, Idea.Status.SUBMITTED):
-        return not is_organization
+        return not has_tenant_stage
 
     return True
 
@@ -325,7 +337,8 @@ def _status_label(status: str) -> str:
 
 def is_organization_reviewer(user: User | None, idea: Idea) -> bool:
     """
-    Whether `user` may act as the idea's **organization** reviewer.
+    Whether `user` may act as the idea's **tenant** reviewer: its organization's, or
+    its team's. (Named for the organization, which came first.)
 
     An active member of the idea's own organization holding `idea.review` there,
     who is not the idea's author, and only ever for an idea their organization
@@ -341,15 +354,27 @@ def is_organization_reviewer(user: User | None, idea: Idea) -> bool:
     """
     if user is None or not user.is_active or idea is None:
         return False
-    if idea.submission_context != Idea.SubmissionContext.ORGANIZATION:
-        return False
-    if idea.organization_id is None:
-        return False
     if idea.author_id == getattr(user, 'pk', None):
         return False
 
-    membership = authorization.get_membership(user, idea.organization_id)
-    return authorization.membership_has_permission(membership, authorization.IDEA_REVIEW)
+    if idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
+        if idea.organization_id is None:
+            return False
+        membership = authorization.get_membership(user, idea.organization_id)
+        return authorization.membership_has_permission(membership, authorization.IDEA_REVIEW)
+
+    if idea.submission_context == Idea.SubmissionContext.TEAM:
+        # A team's reviewers: an active member of the idea's own team holding
+        # `team.ideas.review`. Same shape as the organization rule above, through
+        # the team's own authorization module.
+        if idea.team_id is None:
+            return False
+        from teams import authorization as team_authorization
+
+        return team_authorization.can_review_for(user, idea.team_id)
+
+    # An individual idea has nobody to check it before the platform.
+    return False
 
 
 def is_platform_reviewer(user: User | None, idea: Idea | None = None) -> bool:

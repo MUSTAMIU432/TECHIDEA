@@ -204,26 +204,25 @@ class TestCreateIdea:
         with pytest.raises(services.IdeaError):
             services.create_idea(user, 'not-an-id', data())
 
-    def test_visibility_defaults_to_private(self):
-        """Fail closed: a new idea is visible to nobody but its author."""
+    def test_the_audience_is_the_one_the_level_dictates(self):
+        """No choice and no default to fail closed on: the level decides."""
         user = make_user()
         organization, _ = make_organization(owner=user)
 
         idea = services.create_idea(user, organization.pk, data())
 
-        assert idea.visibility == Idea.Visibility.PRIVATE
+        assert idea.visibility == Idea.Visibility.ORGANIZATION
 
-    @pytest.mark.parametrize(
-        'visibility',
-        [Idea.Visibility.PUBLIC, Idea.Visibility.ORGANIZATION],
-    )
-    def test_a_chosen_visibility_is_honoured(self, visibility):
+    @pytest.mark.parametrize('visibility', [Idea.Visibility.PUBLIC, Idea.Visibility.PRIVATE])
+    def test_naming_another_audience_is_refused_rather_than_ignored(self, visibility):
         user = make_user()
         organization, _ = make_organization(owner=user)
 
-        idea = services.create_idea(user, organization.pk, data(visibility=visibility))
+        with pytest.raises(services.IdeaError) as exc_info:
+            services.create_idea(user, organization.pk, data(visibility=visibility))
 
-        assert idea.visibility == visibility
+        assert exc_info.value.field == 'visibility'
+        assert Idea.objects.count() == 0
 
     def test_the_department_visibility_cannot_be_set(self):
         """
@@ -250,13 +249,13 @@ class TestCreateIdea:
 
         assert exc_info.value.field == 'visibility'
 
-    def test_visibility_is_normalized_rather_than_rejected_over_casing(self):
+    def test_naming_the_levels_own_audience_is_accepted_in_any_casing(self):
         user = make_user()
         organization, _ = make_organization(owner=user)
 
-        idea = services.create_idea(user, organization.pk, data(visibility='PUBLIC'))
+        idea = services.create_idea(user, organization.pk, data(visibility='ORGANIZATION'))
 
-        assert idea.visibility == Idea.Visibility.PUBLIC
+        assert idea.visibility == Idea.Visibility.ORGANIZATION
 
     def test_a_category_can_be_chosen(self):
         user = make_user()
@@ -510,14 +509,18 @@ class TestUpdateIdea:
         assert updated.status == Idea.Status.DRAFT
         assert updated.submitted_at is None
 
-    def test_a_visibility_can_be_widened(self):
+    def test_the_audience_cannot_be_widened(self):
         user = make_user()
         organization, _ = make_organization(owner=user)
         idea = make_idea(organization, user)
+        before = idea.visibility
 
-        updated = services.update_idea(user, idea.pk, data(visibility=Idea.Visibility.PUBLIC))
+        with pytest.raises(services.IdeaError) as exc_info:
+            services.update_idea(user, idea.pk, data(visibility=Idea.Visibility.PUBLIC))
 
-        assert updated.visibility == Idea.Visibility.PUBLIC
+        assert exc_info.value.field == 'visibility'
+        idea.refresh_from_db()
+        assert idea.visibility == before
 
 
 # --- submit_idea --------------------------------------------------------------------
@@ -554,7 +557,6 @@ class TestSubmitIdea:
             services.IdeaInput(
                 title='Mine alone',
                 description=MIN_DESCRIPTION,
-                visibility=DIRECT_REVIEWABLE,
                 category_id=make_category().pk,
             ),
             submission_context=Idea.SubmissionContext.INDIVIDUAL,

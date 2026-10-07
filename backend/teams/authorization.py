@@ -8,16 +8,15 @@ X *in this team*", and the answer is derived from the user's ACTIVE
 roles attached to it - the same permission table the organization side uses, so
 "what a role may do" has one definition per code.
 
-**What a team cannot do is the point of this module.** There is deliberately no
-`team.ideas.review` and no `team.ideas.approve`. A team has `team.ideas.submit`
-- any active member may put the team's idea forward - and nothing that could
-confirm it or approve it, because confirmation belongs to an organization
-(`organizations.IDEA_REVIEW`) and approval belongs to the platform
-(`administration.REVIEW_PLATFORM_SUBMISSIONS`). A permission code that does not
-exist cannot be granted to a role, and `teams.services` refuses to attach a
-code the platform has not declared. That is how "the team cannot self-approve"
-is enforced: not by a check somebody could forget to write, but by the absence
-of anything to check.
+**What a team can and cannot decide.** A team's reviewers (`team.ideas.review`,
+held by the Owner role and the Reviewer role) may *verify* a team idea or send it
+back for changes - the same confirm-or-return decision an organization's reviewers
+make, and for the same reason: it is the team saying "this is what we want to put
+forward", not an approval. There is still no `team.ideas.approve`, and none can be
+added: approval belongs to the platform (`administration.REVIEW_PLATFORM_SUBMISSIONS`),
+and a permission code that does not exist cannot be granted to a role
+(`teams.services` refuses to attach a code the platform has not declared). So a
+team can check an idea before the platform sees it, and still cannot approve one.
 
 No client-supplied identity: callers pass the authenticated `User` and the
 team, and this module decides. Nothing here reads a request.
@@ -36,6 +35,9 @@ TEAM_MEMBERS_MANAGE = 'team.members.manage'
 # submission permission, not an approval one: it cannot confirm, and it cannot
 # approve, because neither code exists on a team role.
 TEAM_IDEAS_SUBMIT = 'team.ideas.submit'
+# Verify a team idea, or send it back for changes or more documents. Not an
+# approval: the platform still decides. See the module docstring.
+TEAM_IDEAS_REVIEW = 'team.ideas.review'
 
 ALL_TEAM_PERMISSIONS = (
     TEAM_VIEW,
@@ -43,6 +45,7 @@ ALL_TEAM_PERMISSIONS = (
     TEAM_MEMBERS_VIEW,
     TEAM_MEMBERS_MANAGE,
     TEAM_IDEAS_SUBMIT,
+    TEAM_IDEAS_REVIEW,
 )
 
 # Which system role holds which code, seeded by `teams.seed_team_roles` and
@@ -50,6 +53,8 @@ ALL_TEAM_PERMISSIONS = (
 # only what it needs to take part: see the team, see who is in it, and file.
 ROLE_OWNER_PERMISSIONS = ALL_TEAM_PERMISSIONS
 ROLE_MEMBER_PERMISSIONS = (TEAM_VIEW, TEAM_MEMBERS_VIEW, TEAM_IDEAS_SUBMIT)
+# A Member who is also trusted to check the team's ideas before the platform does.
+ROLE_REVIEWER_PERMISSIONS = (*ROLE_MEMBER_PERMISSIONS, TEAM_IDEAS_REVIEW)
 
 AuthorizationReason = Literal['unauthenticated', 'membership_required', 'forbidden']
 
@@ -174,26 +179,33 @@ def require_permission(
 
 def can_submit_for(user: User | None, team: Team | object) -> bool:
     """
-    Whether `user` may put a team-context idea forward to the platform.
+    Whether `user` holds the standing to submit **for** this team.
 
-    Not a role check and not an ownership check: **any active member of a team
-    may submit that team's idea**, which is the point of "authorized team
-    submission". It deliberately does not ask whether `user` is the author - a
-    team exists precisely so that somebody else can press the button - and it
-    deliberately grants nothing beyond submitting. Confirmation and approval are
-    refused structurally, by the absence of a code to hold.
+    The permission half of the answer, not the whole of it. A team idea is put
+    forward by **its author**, on the same rule as every other context
+    (`ideas.lifecycle.TRANSITIONS` makes `DRAFT -> SUBMITTED` the author's move,
+    and that is the product's shape rather than an accident). This function says
+    the additional thing the author must also hold: they are still an active
+    member of the team the idea belongs to.
+
+    So the two answers are combined in `ideas.services.submission_target`:
+    author *and* `can_submit_for`. The earlier version of this docstring claimed
+    "any active member may submit that team's idea, which is the point of
+    authorized team submission", and the platform did not do that - the lifecycle
+    refused it. The claim was wrong rather than the code, and it is corrected
+    here rather than in the matrix, because the matrix is what the product asked
+    for: an idea is put forward by whoever wrote it, and a team decides nothing.
+
+    Confirmation and approval remain refused structurally, by the absence of a
+    code to hold.
     """
     return has_permission(user, team, TEAM_IDEAS_SUBMIT)
 
 
 def can_review_for(user: User | None, team: Team | object) -> bool:
     """
-    Always `False`, and kept as a function rather than left as an absence.
-
-    The one place a caller might reasonably reach for "can this team review
-    this?", so that the answer is a refusal that explains itself instead of an
-    `AttributeError` or a silent fall-through into some other domain's check. No
-    team role can hold a review permission - see the module docstring - so
-    "a team cannot self-approve" is answerable at the point somebody asks.
+    Whether `user` may verify the team's ideas (an active member holding
+    `team.ideas.review`). Per-idea rules - not being the author, the idea being a
+    team idea in the team's own review stage - are `ideas.lifecycle`'s.
     """
-    return False
+    return has_permission(user, team, TEAM_IDEAS_REVIEW)

@@ -72,7 +72,7 @@ def add_member(organization, user):
     )
 
 
-def make_idea(organization, author, visibility, *, status=Idea.Status.DRAFT, title='An idea'):
+def make_idea(organization, author, visibility, *, status=Idea.Status.SUBMITTED, title='An idea'):
     """
     An idea row, with the category submission requires.
 
@@ -109,7 +109,7 @@ def make_submitted_platform_idea(organization, author, visibility):
     from ideas.services import submit_to_platform
     from reviews.tests.platform import confirm_for_organization
 
-    idea = make_idea(organization, author, visibility)
+    idea = make_idea(organization, author, visibility, status=Idea.Status.DRAFT)
     submit_idea(author, idea.pk)
     idea.refresh_from_db()
     confirm_for_organization(idea)
@@ -130,7 +130,9 @@ def make_private_submitted_idea(tenant):
     can be checked against it. An idea like this can only exist because S3-008
     predates the rule.
     """
-    idea = make_idea(tenant.organization, tenant.author, Idea.Visibility.PRIVATE)
+    idea = make_idea(
+        tenant.organization, tenant.author, Idea.Visibility.PRIVATE, status=Idea.Status.DRAFT
+    )
     # Written directly, and that is the whole point of the helper: the state is
     # now unreachable on purpose. `submit_idea` refuses a private idea, and so
     # would `submit_to_platform`, because a reviewer who could not read it would
@@ -479,6 +481,9 @@ def test_a_former_member_loses_every_membership_gated_operation(client, world):
     a = world['a']
     token = token_for(a.author)
     draft = a.org_idea
+    # This test edits a draft, which the shared fixture no longer is.
+    Idea.objects.filter(pk=draft.pk).update(status=Idea.Status.DRAFT, submitted_at=None)
+    draft.refresh_from_db()
     attachment = attachment_of(draft)
     # Built **before** anyone leaves: submitting needs an active member to do it,
     # and what is under test afterwards is what a former member cannot do - not
@@ -658,7 +663,9 @@ def test_submitting_a_private_idea_does_not_make_it_reviewer_visible(client, wor
     # asks for the organization one; a platform reviewer would be offered this and
     # not the organization one, which is `test_submission_visibility` in the
     # service suite.
-    visible = make_idea(a.organization, a.author, Idea.Visibility.ORGANIZATION)
+    visible = make_idea(
+        a.organization, a.author, Idea.Visibility.ORGANIZATION, status=Idea.Status.DRAFT
+    )
     submit_idea(a.author, visible.pk)
     visible.refresh_from_db()
 

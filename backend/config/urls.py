@@ -22,6 +22,7 @@ from administration.views import admin_download_attachment_view
 from config.views import health
 from graphql_api.views import graphql_view
 from ideas.views import download_attachment_view, upload_attachment_view
+from identity.views import avatar_view, user_avatar_view
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -41,6 +42,9 @@ urlpatterns = [
         download_attachment_view,
         name='idea-attachment-download',
     ),
+    # Profile photos: bytes only, like attachments. See `identity/views.py`.
+    path('account/avatar/', avatar_view, name='account-avatar'),
+    path('users/<int:user_id>/avatar/', user_avatar_view, name='user-avatar'),
     # The administration console's evidence download: a separate endpoint
     # with its own platform-permission check and an audit record per
     # download, sharing the safe-download response with the one above. See

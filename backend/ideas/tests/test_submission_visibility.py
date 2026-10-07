@@ -70,7 +70,6 @@ def world(db):
                 title='Automate the invoice run',
                 description='We key every invoice in by hand, every month.',
                 category_id=category.pk,
-                visibility=visibility,
             ),
         )
 
@@ -81,7 +80,6 @@ def world(db):
                 title='Automate the invoice run',
                 description='We key every invoice in by hand, every month.',
                 category_id=category.pk,
-                visibility=visibility,
             ),
             submission_context=Idea.SubmissionContext.INDIVIDUAL,
         )
@@ -97,11 +95,14 @@ def world(db):
 
 
 class TestSubmission:
-    def test_a_new_idea_is_still_private_by_default(self, world):
-        assert world['draft']().visibility == V.PRIVATE
+    def test_a_new_idea_gets_its_levels_audience(self, world):
+        assert world['draft']().visibility == V.ORGANIZATION
 
     def test_a_private_draft_cannot_be_submitted(self, world):
+        # Not creatable any more (the audience follows the level), so this is a row
+        # from before that change: the rule still has to hold for it.
         idea = world['draft']()
+        Idea.objects.filter(pk=idea.pk).update(visibility=V.PRIVATE)
 
         with pytest.raises(IdeaError) as exc_info:
             services.submit_idea(world['author'], idea.pk)
@@ -173,7 +174,6 @@ class TestSubmission:
                 title=idea.title,
                 description=idea.description,
                 category_id=idea.category_id,
-                visibility=V.ORGANIZATION,
             ),
         )
 
@@ -215,6 +215,7 @@ mutation Submit($id: ID!) { submitIdea(id: $id) { success message field idea { s
 
 def test_submit_idea_over_graphql_says_what_to_do(client, world):
     idea = world['draft']()
+    Idea.objects.filter(pk=idea.pk).update(visibility=V.PRIVATE)  # a row from before the change
     token = issue_access_token(world['author'].pk)[0]
 
     body = client.post(

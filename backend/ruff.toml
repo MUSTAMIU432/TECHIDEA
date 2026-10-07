@@ -39,3 +39,6 @@ known-first-party = ["config", "graphql_api", "identity"]
 # "**/tests/**" covers both the top-level suite and each business-domain
 # app's own tests/ (e.g. identity/tests/).
 "**/tests/**" = ["S101", "S105", "S106"]
+# The journey test reads as the GraphQL operations it sends, one per line; wrapping
+# them would hide the thing being tested.
+"automation/tests/test_api_journey.py" = ["E501"]

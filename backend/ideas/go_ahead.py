@@ -44,7 +44,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ideas.models import Idea
-from reviews.models import PlatformReviewReport
+from reviews.models import IdeaProposal, PlatformReviewReport
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,9 @@ CONFIRMATION_STATEMENT = (
 NOT_READY = 'This idea is not waiting for your confirmation.'
 NOT_THE_OWNER = 'Only the person who submitted this idea can give the go-ahead.'
 NO_REPORT = 'Read the platform review report before deciding.'
+NO_PROPOSAL = (
+    'Your proposal has not been released to you yet. The platform will send it when it is ready.'
+)
 
 
 def can_give_go_ahead(user, idea: Idea) -> bool:
@@ -81,7 +84,10 @@ def can_give_go_ahead(user, idea: Idea) -> bool:
         return False
     if idea.author_id != getattr(user, 'pk', None):
         return False
-    return PlatformReviewReport.objects.filter(idea=idea).exists()
+    return (
+        PlatformReviewReport.objects.filter(idea=idea).exists()
+        and IdeaProposal.objects.filter(idea=idea, status='released').exists()
+    )
 
 
 def report_for(idea: Idea) -> PlatformReviewReport | None:
@@ -132,6 +138,10 @@ def confirm_go_ahead(user, idea_id: object) -> Idea:
             raise IdeaError(NOT_THE_OWNER, reason='forbidden')
         if not PlatformReviewReport.objects.filter(idea=idea).exists():
             raise IdeaError(NO_REPORT, reason='forbidden')
+        # The go-ahead is a decision about the *proposal*: the owner must have been sent one
+        # and can only be answering a proposal an admin released to them.
+        if not IdeaProposal.objects.filter(idea=idea, status='released').exists():
+            raise IdeaError(NO_PROPOSAL, reason='forbidden')
 
         # Resolved *before* the transition, so the notification names the idea
         # by the title it had when it was approved.
@@ -139,6 +149,16 @@ def confirm_go_ahead(user, idea_id: object) -> Idea:
         title = idea.title
 
         idea = lifecycle.apply_owner_go_ahead(user, idea)
+
+        # The delivery team sees the idea at once: its opportunity opens in the same transaction,
+        # so an idea can never be ready for implementation without one.
+        from automation import services as automation_services
+        from automation.authorization import AutomationError
+
+        try:
+            automation_services.open_from_go_ahead(idea)
+        except AutomationError as exc:
+            raise IdeaError(exc.message, reason='forbidden') from None
 
     logger.info('Idea owner gave the go-ahead (idea=%s, owner=%s).', idea_pk, user.pk)
 

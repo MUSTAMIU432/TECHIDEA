@@ -25,6 +25,7 @@ would mean the list and the "may I open this?" answer disagree.
 
 import pytest
 from django.db import transaction
+from django.utils import timezone
 
 from ideas import selectors
 from ideas.models import Category, Idea
@@ -67,8 +68,12 @@ def make_idea(organization, author, **overrides):
         'title': 'An idea',
         'description': 'A description long enough to be useful.',
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 

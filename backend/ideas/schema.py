@@ -305,6 +305,19 @@ class IdeaType:
         review_id = review_selectors.active_review_id_for(self._viewer, self._idea)
         return strawberry.ID(str(review_id)) if review_id is not None else None
 
+    @strawberry.field(
+        description=(
+            'Whether the current viewer may edit this idea right now. Reported by '
+            '`ideas.services.can_edit_idea`, which asks the same questions in the '
+            'same order as `updateIdea` itself - so this field cannot promise an '
+            'edit the server would refuse. A convenience, not a control.'
+        )
+    )
+    def viewer_can_edit(self) -> bool:
+        from ideas import services as idea_services
+
+        return idea_services.can_edit_idea(self._viewer, self._idea)
+
     @staticmethod
     def from_model(idea: Idea, user=None) -> 'IdeaType':
         return IdeaType(
@@ -602,6 +615,14 @@ class IdeaFiltersInput:
     # Free text over the title and description. Bound as a parameter by the
     # ORM, never interpolated.
     search: str | None = None
+    # Ownership and audience, as *narrowing* filters. Each can only remove rows
+    # the caller could already see: `visibility: PUBLIC` returns only ideas that
+    # are both readable by this caller and public, and `mine: true` is the
+    # caller's own id rather than an id they supplied, so it cannot become a way
+    # of asking for somebody else's ideas.
+    submission_context: SubmissionContext | None = None
+    visibility: IdeaVisibility | None = None
+    mine: bool = False
     offset: int = 0
     limit: int | None = None
 
@@ -763,16 +784,23 @@ def _idea_page(info: strawberry.Info, scope: selectors.IdeaFilters, filters) -> 
     `selectors.list_discoverable_ideas`, before this was called.
 
     `scope` is the tenant, and it arrives from the query rather than from the
-    filter input: `organizationIdeas` supplies it, `ideas` supplies nothing and
-    is therefore platform-wide. There is no path where a filter can re-scope a
-    query that has already been scoped.
+    filter input: `organizationIdeas` and `teamIdeas` supply one, `ideas`
+    supplies nothing and is therefore platform-wide. There is no path where a
+    filter can re-scope a query that has already been scoped - which is why the
+    filter input has no tenant argument at all, only the narrowing fields.
     """
     requested = filters or IdeaFiltersInput()
     applied = selectors.IdeaFilters(
         organization_id=scope.organization_id,
+        team_id=scope.team_id,
         category_id=requested.category_id,
         status=requested.status.value if requested.status else None,
         search=requested.search,
+        submission_context=(
+            requested.submission_context.value if requested.submission_context else None
+        ),
+        visibility=requested.visibility.value if requested.visibility else None,
+        mine=requested.mine,
     )
 
     page = selectors.list_discoverable_ideas(
@@ -829,6 +857,27 @@ class Query:
         filters: IdeaFiltersInput | None = None,
     ) -> IdeaPage:
         return _idea_page(info, selectors.IdeaFilters(organization_id=organization_id), filters)
+
+    @strawberry.field(
+        description=(
+            "One team's ideas, newest first. Answers an empty page for a team the "
+            'caller is not an active member of, which is also the answer for a '
+            'team that does not exist - so a team id cannot be used to discover '
+            'other teams.\n\n'
+            'A team is a collaboration boundary rather than a tenant, so this is '
+            '"what my team is putting forward", never a tenant\'s private feed.\n\n'
+            'Each row is still visibility-filtered: a team member sees a team '
+            'idea whose audience is the team, and does not see one that is '
+            'private to its author.'
+        )
+    )
+    def team_ideas(
+        self,
+        info: strawberry.Info,
+        team_id: strawberry.ID,
+        filters: IdeaFiltersInput | None = None,
+    ) -> IdeaPage:
+        return _idea_page(info, selectors.IdeaFilters(team_id=team_id), filters)
 
     @strawberry.field(
         description=(

@@ -77,7 +77,7 @@ from ideas.models import IDEA_STORY_FIELDS, Idea
 from ideas.services import IdeaError
 from identity.models import User
 from organizations.authorization import AuthorizationError
-from reviews import eligibility, platform_review
+from reviews import eligibility, platform_review, review_teams
 from reviews.models import (
     LIFECYCLE_DECISION_CHOICES,
     PlatformReviewReport,
@@ -339,11 +339,18 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
             .filter(pk=review_pk, idea=idea, scope=Review.Scope.PLATFORM)
             .first()
         )
-        if review is None or review.reviewer_id != active_user.pk:
+        team = review_teams.current_team(idea)
+        if review is None or (team is None and review.reviewer_id != active_user.pk):
             # Not a review of this idea, or somebody else's: the same answer, so
             # a guessed id reveals nothing and nobody completes another
-            # reviewer's review.
+            # reviewer's review. (In a review team any member may act on the
+            # round; `team_may_decide` below says what each may decide.)
             raise ReviewError('Review is unavailable.')
+        if not review_teams.team_may_decide(active_user, idea, decision):
+            raise ReviewError(
+                "Only the team's lead can approve or reject. You can send it back to its "
+                'owner asking for changes or more documents.'
+            )
         if review.completed_at is not None:
             raise ReviewError('This review has already been completed.')
         if idea.status != Idea.Status.UNDER_REVIEW:
@@ -359,6 +366,8 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
         review.decision = decision
         review.feedback = feedback
         review.completed_at = timezone.now()
+        if review.reviewer_id != active_user.pk:
+            review.decided_by = active_user
         review.save()
 
         _lifecycle(lambda: lifecycle.apply_review_transition(active_user, idea, decision))

@@ -20,18 +20,30 @@ Two ideas kept apart here, because the product asks for it and it is easy to los
 import strawberry
 
 from notifications import selectors, services
-from notifications.models import Notification
+from notifications.models import NOTIFICATION_LABELS, Notification
 
 
 @strawberry.type(description='One thing the platform told you.')
 class NotificationType:
     id: strawberry.ID
     kind: str
+    label: str = strawberry.field(
+        description='The kind in words, so a client renders the same wording the server does '
+        'instead of splitting a dotted string and hoping it guessed the capitals right.'
+    )
     title: str
     body: str
     idea_id: strawberry.ID | None
     report_id: strawberry.ID | None
     is_read: bool
+    action_path: str | None = strawberry.field(
+        description=(
+            'Where this takes you in the app, decided by the server, or null when '
+            'there is nowhere specific to go. Present so a client never has to '
+            'guess a destination from the kind and an id - and so an '
+            'in-app link and a push payload can be built from one mapping.'
+        )
+    )
     created_at: str
 
     @staticmethod
@@ -39,6 +51,7 @@ class NotificationType:
         return NotificationType(
             id=strawberry.ID(str(notification.pk)),
             kind=notification.kind,
+            label=NOTIFICATION_LABELS.get(notification.kind, notification.kind),
             title=notification.title,
             body=notification.body,
             idea_id=strawberry.ID(str(notification.idea_id)) if notification.idea_id else None,
@@ -46,6 +59,7 @@ class NotificationType:
             if notification.report_id
             else None,
             is_read=notification.is_read_at is not None,
+            action_path=notification.action_path,
             created_at=notification.created_at.isoformat(),
         )
 

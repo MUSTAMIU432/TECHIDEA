@@ -26,6 +26,7 @@ import threading
 
 import pytest
 from django.db import IntegrityError, connections, transaction
+from django.utils import timezone
 
 from ideas import selectors, services
 from ideas.models import Idea, Vote
@@ -75,8 +76,12 @@ def make_idea(organization, author, **overrides):
         'title': 'An idea',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 
@@ -283,19 +288,21 @@ class TestNoLifecycleGate:
         vote = services.vote_for_idea(world['colleague'], idea.pk)
         assert vote.idea_id == idea.pk
 
-    def test_a_draft_can_be_voted_on(self, world):
-        idea = make_idea(world['organization'], world['author'])
-        assert idea.status == Idea.Status.DRAFT
+    def test_a_draft_cannot_be_voted_on_by_a_colleague(self, world):
+        # A draft is the author's alone, so to a colleague it does not exist.
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.DRAFT)
 
-        assert services.vote_for_idea(world['colleague'], idea.pk) is not None
+        with pytest.raises(services.IdeaError):
+            services.vote_for_idea(world['colleague'], idea.pk)
 
     def test_a_vote_does_not_change_the_idea(self, world):
         idea = make_idea(world['organization'], world['author'])
+        status = idea.status
 
         services.vote_for_idea(world['colleague'], idea.pk)
         idea.refresh_from_db()
 
-        assert idea.status == Idea.Status.DRAFT
+        assert idea.status == status
 
 
 # --- duplicates and idempotency -------------------------------------------------------

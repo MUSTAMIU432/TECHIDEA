@@ -467,6 +467,60 @@ def reset_password(raw_token: str, new_password: str) -> User:
     return user
 
 
+class AccountError(Exception):
+    """A refused change to the signed-in user's own account; safe to show verbatim."""
+
+    def __init__(self, message: str, field: str | None = None):
+        super().__init__(message)
+        self.message = message
+        self.field = field
+
+
+def update_profile(user: User, first_name: str, last_name: str, phone_number: str) -> User:
+    """Set the user's name and phone number, validated like registration. Email is not editable."""
+    try:
+        first_name = _require_non_empty(first_name, 'first_name', 'First name is required.')
+        last_name = _require_non_empty(last_name, 'last_name', 'Last name is required.')
+        phone_number = _validate_phone_number(phone_number)
+    except RegistrationError as exc:
+        raise AccountError(exc.message, field=exc.field) from None
+
+    user.first_name = first_name
+    user.last_name = last_name
+    user.phone_number = phone_number
+    user.save(update_fields=['first_name', 'last_name', 'phone_number', 'updated_at'])
+    return user
+
+
+def change_password(
+    user: User, current_password: str, new_password: str, keep_refresh_token: str = ''
+) -> User:
+    """
+    Replace the password of a signed-in user who proves they know the current one.
+
+    Every other session is revoked - the same reasoning as `reset_password` - but
+    the one making the change (`keep_refresh_token`) stays signed in.
+    """
+    from identity.authentication import revoke_other_sessions
+
+    if not user.check_password(current_password or ''):
+        raise AccountError('Your current password is incorrect.', field='current_password')
+    if current_password == new_password:
+        raise AccountError(
+            'Choose a new password that is different from the current one.', field='new_password'
+        )
+    try:
+        _validate_password(new_password, user, AccountError)
+    except AccountError as exc:
+        raise AccountError(exc.message, field='new_password') from None
+
+    with transaction.atomic():
+        user.set_password(new_password)
+        user.save(update_fields=['password', 'updated_at'])
+        revoke_other_sessions(user, keep_refresh_token)
+    return user
+
+
 def request_account_activation(email: str) -> str:
     """
     Email a fresh activation link to `email`, returning the message to show

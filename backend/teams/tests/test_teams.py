@@ -149,16 +149,16 @@ class TestWhatATeamRoleCanHold:
 
             assert exc_info.value.field == 'permissions'
 
-    def test_there_is_no_review_or_approval_permission_to_hold(self):
+    def test_a_team_can_review_but_there_is_no_approval_permission_to_hold(self):
         """
         Written as an assertion about the vocabulary rather than about a refusal,
         because the refusal is the absence of a code: there is nothing for a
-        caller to try, so nothing to test. If somebody adds `team.ideas.approve`
-        to `ALL_TEAM_PERMISSIONS` this fails the day it is added rather than the
-        day it is used.
+        caller to try, so nothing to test. A team's reviewers may verify its ideas
+        (`team.ideas.review`); approval is the platform's, so if somebody adds
+        `team.ideas.approve` this fails the day it is added rather than the day it
+        is used.
         """
         for code in authorization.ALL_TEAM_PERMISSIONS:
-            assert 'review' not in code
             assert 'approve' not in code
 
         assert set(authorization.ALL_TEAM_PERMISSIONS) == {
@@ -167,6 +167,7 @@ class TestWhatATeamRoleCanHold:
             'team.members.view',
             'team.members.manage',
             'team.ideas.submit',
+            'team.ideas.review',
         }
 
     def test_a_custom_team_role_can_hold_any_declared_code(self, team, owner):
@@ -252,7 +253,6 @@ class TestMembership:
             idea_services.IdeaInput(
                 title='Filed together',
                 description=DESCRIPTION,
-                visibility=Idea.Visibility.PUBLIC,
                 category_id=_category().pk,
             ),
             submission_context=Idea.SubmissionContext.TEAM,
@@ -375,7 +375,6 @@ class TestTeamIdeas:
                 idea_services.IdeaInput(
                     title=f'Filed by {author.email}',
                     description=DESCRIPTION,
-                    visibility=Idea.Visibility.PUBLIC,
                     category_id=category.pk,
                 ),
                 submission_context=Idea.SubmissionContext.TEAM,
@@ -395,7 +394,6 @@ class TestTeamIdeas:
                 idea_services.IdeaInput(
                     title='Not yours',
                     description=DESCRIPTION,
-                    visibility=Idea.Visibility.PUBLIC,
                     category_id=_category().pk,
                 ),
                 submission_context=Idea.SubmissionContext.TEAM,
@@ -405,18 +403,17 @@ class TestTeamIdeas:
         assert exc_info.value.reason == 'membership_required'
         assert not Idea.objects.exists()
 
-    def test_a_team_idea_goes_straight_to_the_platform(self, team, owner):
+    def test_a_team_idea_goes_to_its_team_before_the_platform(self, team, owner):
         """
-        No organization stage: a team cannot confirm anything, so the only reviewer
-        an idea can wait for is the platform's. Asserted through the same call the
-        author makes, because that is where the stage is chosen.
+        The team's own reviewers check it first; only after they verify it does the
+        owner publish it to the platform. Asserted through the same call the author
+        makes, because that is where the stage is chosen.
         """
         idea = idea_services.create_idea_in_context(
             owner,
             idea_services.IdeaInput(
-                title='Straight to review',
+                title='Checked by the team first',
                 description=DESCRIPTION,
-                visibility=Idea.Visibility.PUBLIC,
                 category_id=_category().pk,
             ),
             submission_context=Idea.SubmissionContext.TEAM,
@@ -425,23 +422,21 @@ class TestTeamIdeas:
 
         submitted = idea_services.submit_idea(owner, idea.pk)
 
-        assert submitted.status == Idea.Status.SUBMITTED
+        assert submitted.status == Idea.Status.SUBMITTED_TO_ORGANIZATION
         assert submitted.submitted_at is not None
 
-    def test_a_team_cannot_review_its_own_idea(self, team, owner):
+    def test_a_reviewer_cannot_review_their_own_idea(self, team, owner):
         """
-        The claim `can_review_for` exists to answer. Not a role check - there is
-        no code to hold - so this is an assertion that the question has a
-        truthful answer rather than falling through to somebody else's check.
+        The team's reviewers include its Owner, so the author exclusion is what keeps
+        them from verifying what they wrote - for every permission they hold.
         """
-        assert authorization.can_review_for(owner, team) is False
+        assert authorization.can_review_for(owner, team) is True
 
         idea = idea_services.create_idea_in_context(
             owner,
             idea_services.IdeaInput(
-                title='Nobody reviews this at the team',
+                title='Nobody reviews their own',
                 description=DESCRIPTION,
-                visibility=Idea.Visibility.PUBLIC,
                 category_id=_category().pk,
             ),
             submission_context=Idea.SubmissionContext.TEAM,

@@ -28,7 +28,11 @@ from ideas.go_ahead import confirm_go_ahead
 from ideas.models import Category, Idea
 from identity.models import User
 from organizations.models import Membership, MembershipRole, Role
-from reviews.tests.platform import confirm_for_organization, grant_platform_reviewer
+from reviews.tests.platform import (
+    confirm_for_organization,
+    grant_platform_reviewer,
+    release_proposal,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -287,7 +291,6 @@ def individual_idea(world, author=None, **overrides):
     fields = {
         'title': 'An idea of my own',
         'description': DESCRIPTION,
-        'visibility': Idea.Visibility.PUBLIC,
         'category_id': Category.objects.create(name=f'Cat {Category.objects.count() + 1}').pk,
     }
     fields.update(overrides)
@@ -432,6 +435,7 @@ class TestTransitionIdeaMutation:
         assert premature['success'] is False
         assert Idea.objects.get(pk=idea.pk).status == 'approved'
 
+        release_proposal(idea)
         confirm_go_ahead(world['author'], idea.pk)
 
         result = run(
@@ -481,10 +485,11 @@ class TestTransitionIdeaMutation:
 
     def test_an_illegal_transition_is_a_payload(self, gql, world):
         """
-        `DRAFT -> APPROVED`, by somebody who *is* allowed to approve things -
-        so the refusal is about the lifecycle, not about the caller.
+        `SUBMITTED -> APPROVED`, by somebody who *is* allowed to approve things -
+        so the refusal is about the lifecycle, not about the caller. (Not from
+        `DRAFT`: a draft is its author's alone, so the reviewer cannot see it.)
         """
-        idea = make_idea(world['organization'], world['author'])
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
 
         result = run(
             gql,
@@ -497,7 +502,7 @@ class TestTransitionIdeaMutation:
         assert result['success'] is False
         assert result['idea'] is None
         assert 'cannot go from' in result['message']
-        assert Idea.objects.get(pk=idea.pk).status == Idea.Status.DRAFT
+        assert Idea.objects.get(pk=idea.pk).status == Idea.Status.SUBMITTED
 
     def test_a_member_without_the_role_is_refused(self, gql, world):
         idea = make_idea(world['organization'], world['author'], status=Idea.Status.SUBMITTED)
@@ -621,12 +626,18 @@ class TestStatusCannotBeManipulatedDirectly:
         """
         arguments_by_field = _introspect_mutation_arguments(gql)
 
-        # The only place a status may be named is the transition mutation.
+        # The only place an *idea's* status may be named is the transition mutation.
         assert arguments_by_field['transitionIdea'] == {'id', 'to'}
+        # Sprint 4 (`automation`) records the result of something that is not an idea:
+        # a test run, a deployment, an impact record. Each validates the value against
+        # that entity's own edges server-side and moves no idea and no opportunity or
+        # project status - those only move through named actions.
+        records_its_own_result = {'recordTestResult', 'recordDeployment', 'recordImpact'}
         for name, arguments in arguments_by_field.items():
             if name == 'transitionIdea':
                 continue
-            assert 'status' not in arguments, name
+            if name not in records_its_own_result:
+                assert 'status' not in arguments, name
             assert 'to' not in arguments, name
 
     def test_no_write_input_carries_a_status(self):
@@ -684,6 +695,7 @@ class TestAvailableTransitionsField:
         on the ideas that have not - or on their own.
         """
         theirs = platform_approve(world, platform_idea(world))
+        release_proposal(theirs)
         confirm_go_ahead(world['author'], theirs.pk)
         theirs.refresh_from_db()
         assert theirs.status == Idea.Status.READY_FOR_IMPLEMENTATION
@@ -693,6 +705,7 @@ class TestAvailableTransitionsField:
         # self-review rule offers the author nothing, which is what stops a
         # reviewer handing their own approved idea to the developer track.
         mine = platform_approve(world, platform_idea(world, author=world['platform_author']))
+        release_proposal(mine)
         confirm_go_ahead(world['platform_author'], mine.pk)
         mine.refresh_from_db()
         assert mine.status == Idea.Status.READY_FOR_IMPLEMENTATION

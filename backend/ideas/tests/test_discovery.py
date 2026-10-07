@@ -80,8 +80,12 @@ def make_idea(organization, author, **overrides):
         'title': 'An idea',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 
@@ -613,7 +617,7 @@ class TestStatusFilter:
         return make_idea(organization, author, **fields)
 
     def test_it_narrows_to_one_state(self, world):
-        draft = make_idea(world['organization'], world['reader'])
+        draft = make_idea(world['organization'], world['reader'], status=Idea.Status.DRAFT)
         submitted = self._submitted(world['organization'], world['reader'])
 
         page = selectors.list_discoverable_ideas(
@@ -882,7 +886,12 @@ class TestCombinedFilters:
         assert [i.pk for i in page.items] == [match.pk]
 
     def test_category_and_status_together(self, world):
-        draft = make_idea(world['organization'], world['reader'], category=world['support'])
+        draft = make_idea(
+            world['organization'],
+            world['reader'],
+            category=world['support'],
+            status=Idea.Status.DRAFT,
+        )
         submitted = make_idea(
             world['organization'],
             world['reader'],
@@ -982,7 +991,7 @@ class TestCombinedFilters:
 DISCOVERY_QUERY = """
 query Discover($filters: IdeaFiltersInput) {
   ideas(filters: $filters) {
-    items { id title status category { name } }
+    items { id title status authorId category { name } }
     pageInfo { offset limit totalCount hasNextPage hasPreviousPage }
   }
 }
@@ -1117,7 +1126,7 @@ class TestDiscoveryThroughGraphQL:
             status=Idea.Status.SUBMITTED,
             submitted_at=timezone.now(),
         )
-        make_idea(world['organization'], reader)
+        make_idea(world['organization'], reader, status=Idea.Status.DRAFT)
         token = sign_in(client, reader)
 
         page = run(
@@ -1189,7 +1198,9 @@ class TestDiscoveryThroughGraphQL:
             status=Idea.Status.SUBMITTED,
             submitted_at=timezone.now(),
         )
-        make_idea(world['organization'], reader, title='Automate the ledger')
+        make_idea(
+            world['organization'], reader, title='Automate the ledger', status=Idea.Status.DRAFT
+        )
         token = sign_in(client, reader)
 
         page = run(
@@ -1204,11 +1215,17 @@ class TestDiscoveryThroughGraphQL:
 
     def test_no_filter_argument_widens_the_visibility_filter(self, client, gql, world):
         """
-        Every one of these arguments would be refused by the schema as an
-        unknown field, and the assertion is that the idea the caller must not
-        see is absent regardless. If a future change adds a `visibility` or
-        `authorId` filter, this is the test that should stop making sense -
-        which is the point of naming the fields here.
+        The invariant, and the reason the filter names are worth pinning.
+
+        `visibility` and `submissionContext` **are** filter fields now - a reader
+        narrowing a list to "public ideas" or "team ideas" is the ordinary case,
+        and both were added as narrowing filters. What must stay impossible is a
+        filter that *widens*: `visibility: PUBLIC` returns only ideas this
+        caller could already see AND that are public, never the private ones.
+
+        `authorId` is still refused outright, and deliberately so: it would be a
+        caller-chosen id, which is the difference between `mine: true` (the
+        caller's own account) and a way of asking for somebody else's rows.
         """
         reader = world['reader']
         hidden = make_idea(
@@ -1216,6 +1233,12 @@ class TestDiscoveryThroughGraphQL:
             world['colleague'],
             title='Automate the ledger',
             visibility=Idea.Visibility.PRIVATE,
+        )
+        public = make_idea(
+            world['organization'],
+            world['colleague'],
+            title='Automate the payroll run',
+            visibility=Idea.Visibility.PUBLIC,
         )
         token = sign_in(client, reader)
 
@@ -1228,8 +1251,26 @@ class TestDiscoveryThroughGraphQL:
         )
         assert [item['id'] for item in page['items']] != [str(hidden.pk)]
 
-        for field in ('visibility', 'authorId', 'statuses'):
-            response = gql(DISCOVERY_QUERY, {'filters': {field: 'PRIVATE'}}, bearer=token)
+        # A narrowing visibility filter: the public idea is returned, the
+        # private one is still absent, and asking for PUBLIC did not become a
+        # way to read it.
+        public_only = run(
+            gql,
+            DISCOVERY_QUERY,
+            'ideas',
+            {'filters': {'visibility': 'PUBLIC'}},
+            bearer=token,
+        )
+        listed = [item['id'] for item in public_only['items']]
+        assert str(public.pk) in listed
+        assert str(hidden.pk) not in listed
+
+        # `mine` is the caller's own id, never one they supply.
+        mine = run(gql, DISCOVERY_QUERY, 'ideas', {'filters': {'mine': True}}, bearer=token)
+        assert all(item['authorId'] == str(reader.pk) for item in mine['items'])
+
+        for field in ('authorId', 'statuses'):
+            response = gql(DISCOVERY_QUERY, {'filters': {field: str(reader.pk)}}, bearer=token)
             assert 'errors' in response.json(), field
 
     def test_organization_ideas_stays_scoped(self, client, gql, world):

@@ -84,8 +84,12 @@ def make_idea(organization, author, **overrides):
         'title': 'An idea',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 

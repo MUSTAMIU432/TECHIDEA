@@ -31,11 +31,13 @@ from django.conf import settings
 from django.http import HttpRequest, HttpResponse
 
 import identity.authentication as auth_service
+import identity.avatars as avatars
 import identity.services as services
 import identity.throttling as throttling
 from identity.authentication import AuthenticationError
 from identity.models import User
 from identity.services import (
+    AccountError,
     EmailLinkError,
     RegistrationError,
     RegistrationInput,
@@ -90,6 +92,7 @@ class UserType:
     phone_number: str
     is_active: bool
     is_verified: bool
+    avatar_url: str | None = None
 
     @staticmethod
     def from_model(user: User) -> 'UserType':
@@ -101,6 +104,7 @@ class UserType:
             phone_number=user.phone_number,
             is_active=user.is_active,
             is_verified=user.is_verified,
+            avatar_url=avatars.avatar_url(user),
         )
 
 
@@ -210,6 +214,19 @@ class ActionPayload:
     user: UserType | None = None
 
 
+@strawberry.input(description="The signed-in user's editable profile fields.")
+class UpdateProfileInput:
+    first_name: str
+    last_name: str
+    phone_number: str
+
+
+@strawberry.input(description='The current password and the one to replace it with.')
+class ChangePasswordInput:
+    current_password: str
+    new_password: str
+
+
 def _to_camel_case(snake_case_name: str) -> str:
     """`phone_number` -> `phoneNumber`, matching Strawberry's own field-name
     conversion so `RegisterPayload.field` names a field the way the client
@@ -254,6 +271,56 @@ class Query:
 
 @strawberry.type
 class Mutation:
+    @strawberry.mutation(description="Update the signed-in user's name and phone number.")
+    def update_profile(self, info: strawberry.Info, input: UpdateProfileInput) -> ActionPayload:
+        user = info.context.user
+        if user is None:
+            return ActionPayload(success=False, message='Sign in to update your profile.')
+        try:
+            user = services.update_profile(
+                user, input.first_name, input.last_name, input.phone_number
+            )
+        except AccountError as exc:
+            return ActionPayload(
+                success=False,
+                message=exc.message,
+                field=_to_camel_case(exc.field) if exc.field else None,
+            )
+        return ActionPayload(
+            success=True, message='Your profile has been updated.', user=UserType.from_model(user)
+        )
+
+    @strawberry.mutation(
+        description=(
+            "Change the signed-in user's password. Requires the current password. "
+            'Every other device is signed out; this one stays signed in.'
+        )
+    )
+    def change_password(self, info: strawberry.Info, input: ChangePasswordInput) -> ActionPayload:
+        user = info.context.user
+        if user is None:
+            return ActionPayload(success=False, message='Sign in to change your password.')
+        try:
+            throttling.guard_password_change(user.pk)
+            services.change_password(
+                user,
+                input.current_password,
+                input.new_password,
+                keep_refresh_token=_read_refresh_cookie(info.context.request),
+            )
+        except ThrottledError as exc:
+            return ActionPayload(success=False, message=str(exc))
+        except AccountError as exc:
+            return ActionPayload(
+                success=False,
+                message=exc.message,
+                field=_to_camel_case(exc.field) if exc.field else None,
+            )
+        return ActionPayload(
+            success=True,
+            message='Your password has been changed. Other devices have been signed out.',
+        )
+
     @strawberry.mutation(
         description=(
             'Register a new platform account and email it an activation link. '

@@ -164,8 +164,12 @@ def make_idea(organization, author, **overrides):
         'title': 'Automate the invoice run',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 
@@ -1117,9 +1121,9 @@ query Comments($ideaId: ID!) {
         from graphql_api.schema import schema
 
         sdl = str(schema)
+        # Proposals belong to Sprint 4 (`automation`) and now exist; the developer
+        # marketplace is a later phase and must still be absent.
         for name in (
-            'createProposal',
-            'proposals(',
             'developerProfile',
             'matchDevelopers',
         ):

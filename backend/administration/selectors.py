@@ -19,6 +19,13 @@ and review feedback are only returned under `INSPECT_IDEA_CONTENT` (see
 the GraphQL adapter can redact without re-deciding, and the searches below
 never match on content the caller could not read.
 
+**`INSPECT_IDEA_CONTENT` is also what gates a private message body**, because a
+message is the one thing in the platform a person wrote *for named people*
+rather than for the platform. Everything else the console shows about teams,
+invitations, messages and notifications is metadata about the platform and is
+under `ACCESS_CONSOLE` alone; see the notes on those four sections at the end of
+this module.
+
 Performance
 -----------
 Every list is paged with `ideas.pagination.paginate` (bounded by
@@ -56,9 +63,13 @@ from administration.models import AdminAuditEntry
 from ideas.models import Attachment, Category, Comment, Idea, IdeaTransition, Vote
 from ideas.pagination import Page, empty_page, paginate
 from identity.models import RefreshSession, User
+from invitations.models import Invitation
+from messaging.models import Message, MessageParticipant, MessageThread
+from notifications.models import Notification
 from organizations.models import Membership, MembershipRole, Organization, Role
 from organizations.services import DEFAULT_OWNER_ROLE_SLUG, REVIEWER_ROLE_SLUG
 from reviews.models import Review
+from teams.models import Team, TeamMembership, TeamMembershipRole, TeamRole
 
 RECENT_ACTIVITY_LIMIT = 10
 USER_AUDIT_LIMIT = 20
@@ -756,3 +767,379 @@ def list_audit_entries(
     if target_id is not None:
         queryset = queryset.filter(target_id=str(target_id))
     return paginate(queryset, offset=offset, limit=limit)
+
+
+# --- teams, invitations, messages, notifications ---------------------------------
+#
+# The collaboration set (`teams`, `invitations`, `messaging`, `notifications`)
+# read here for the same reason the tenant domains above do: an administrator
+# has to be able to see that a team exists, who was invited to it, that two
+# people are talking and that somebody was told something - and the member-facing
+# reads cannot answer any of those, because every one of them is scoped to the
+# caller. Nothing here loosens those scopes: this module asks `require_admin`
+# first, exactly as above, and reads across tenants only after that.
+#
+# **Two rules these four surfaces share.**
+#
+# 1. *Metadata is not content.* A team's name, an invitation's address, who is in
+#    a conversation and when it was last active are facts about the platform, and
+#    an administrator who cannot see them cannot investigate anything. They are
+#    under `ACCESS_CONSOLE`.
+# 2. *Anything a member wrote is content.* A message body is the one place in
+#    this group where a person wrote something meant for named people, so it is
+#    behind `INSPECT_IDEA_CONTENT` and the adapter reports `contentRestricted`
+#    rather than returning an empty string that reads like an empty message.
+#    Idea titles follow the rule the rest of the console uses: every title under
+#    that permission, PUBLIC ideas' titles otherwise.
+
+
+def _active_member_count(field: str) -> Coalesce:
+    """A correlated count of one team's *active* memberships."""
+    return Coalesce(
+        Subquery(
+            TeamMembership.objects.filter(
+                **{field: OuterRef('pk')}, status=TeamMembership.Status.ACTIVE
+            )
+            .order_by()
+            .values(field)
+            .annotate(total=Count('*'))
+            .values('total')[:1],
+            output_field=IntegerField(),
+        ),
+        0,
+    )
+
+
+def _team_queryset() -> QuerySet[Team]:
+    return (
+        Team.objects.select_related('owner')
+        .annotate(
+            member_count=_active_member_count('team'),
+            # Inactive rows are kept so a team does not re-invite somebody who
+            # declined; an administrator asking "how many people has this team ever
+            # had" needs both numbers, and the console is where that question is
+            # legitimate.
+            inactive_member_count=Coalesce(
+                Subquery(
+                    TeamMembership.objects.filter(
+                        team=OuterRef('pk'), status=TeamMembership.Status.INACTIVE
+                    )
+                    .order_by()
+                    .values('team')
+                    .annotate(total=Count('*'))
+                    .values('total')[:1],
+                    output_field=IntegerField(),
+                ),
+                0,
+            ),
+            idea_count=_count_of(Idea, 'team'),
+            invitation_count=_count_of(Invitation, 'team'),
+        )
+        .order_by('name', 'pk')
+    )
+
+
+def list_teams(user: User | None, search: str | None = None, *, offset=0, limit=None) -> Page[Team]:
+    """Every team on the platform, by name. Empty for a non-administrator."""
+    if _capabilities(user) is None:
+        return empty_page(offset, limit)
+
+    queryset = _team_queryset()
+    search = (search or '').strip()
+    if search:
+        queryset = queryset.filter(
+            Q(name__icontains=search)
+            | Q(slug__icontains=search)
+            | Q(owner__email__icontains=search)
+        )
+    return paginate(queryset, offset=offset, limit=limit)
+
+
+@dataclass(frozen=True)
+class TeamDetail:
+    team: Team
+    roles: list[TeamRole]
+    members: list[TeamMembership]
+    ideas_by_status: list[StatusCount]
+
+
+def get_team(user: User | None, team_id: object) -> TeamDetail | None:
+    """
+    One team with its roles and its full membership - active and inactive, the
+    way `get_organization` shows memberships, because a team that keeps its rows
+    is a fact an administrator can otherwise not see.
+    """
+    if _capabilities(user) is None:
+        return None
+    normalized_id = _normalize_id(team_id)
+    if normalized_id is None:
+        return None
+
+    team = _team_queryset().filter(pk=normalized_id).first()
+    if team is None:
+        return None
+
+    roles = list(
+        TeamRole.objects.filter(team=team)
+        .annotate(
+            holder_count=Count(
+                'membership_roles',
+                filter=Q(membership_roles__membership__status=TeamMembership.Status.ACTIVE),
+            )
+        )
+        .prefetch_related('role_permissions__permission')
+        .order_by('-is_system', 'name')
+    )
+    members = list(
+        TeamMembership.objects.filter(team=team)
+        .select_related('user')
+        .prefetch_related(
+            Prefetch(
+                'membership_roles',
+                queryset=TeamMembershipRole.objects.select_related('role').order_by('role__name'),
+            )
+        )
+        .order_by('user__email', 'pk')
+    )
+    by_status = dict(
+        Idea.objects.filter(team=team)
+        .order_by()
+        .values_list('status')
+        .annotate(total=Count('pk'))
+        .values_list('status', 'total')
+    )
+    return TeamDetail(
+        team=team,
+        roles=roles,
+        members=members,
+        ideas_by_status=[
+            StatusCount(status=value, count=by_status.get(value, 0))
+            for value, _label in Idea.Status.choices
+        ],
+    )
+
+
+def list_team_invitations(
+    user: User | None, team_id: object, *, offset=0, limit=None
+) -> Page[Invitation]:
+    """One team's invitations, newest first. Empty for a non-administrator."""
+    if _capabilities(user) is None:
+        return empty_page(offset, limit)
+    normalized_id = _normalize_id(team_id)
+    if normalized_id is None:
+        return empty_page(offset, limit)
+    queryset = _invitation_queryset().filter(team_id=normalized_id)
+    return paginate(queryset, offset=offset, limit=limit)
+
+
+@dataclass(frozen=True)
+class InvitationFilters:
+    """Narrowing only: `scope`, `status` and the tenant ids can each remove rows, never add them."""
+
+    scope: str | None = None
+    status: str | None = None
+    organization_id: object = None
+    team_id: object = None
+
+
+def _invitation_queryset() -> QuerySet[Invitation]:
+    return Invitation.objects.select_related(
+        'organization', 'team', 'invited_by', 'accepted_by'
+    ).order_by('-created_at', '-pk')
+
+
+def list_invitations(
+    user: User | None, filters: InvitationFilters | None = None, *, offset=0, limit=None
+) -> Page[Invitation]:
+    """
+    Every invitation the platform has sent, newest first.
+
+    **No token, and no way to reconstruct one.** `Invitation` stores only the
+    SHA-256 digest, so this cannot leak a usable credential even by accident -
+    which is why there is no `adminInvitationToken` field to redact instead.
+    """
+    if _capabilities(user) is None:
+        return empty_page(offset, limit)
+
+    queryset = _invitation_queryset()
+    filters = filters or InvitationFilters()
+    if filters.scope:
+        queryset = queryset.filter(scope=filters.scope)
+    if filters.status:
+        queryset = queryset.filter(status=filters.status)
+    if filters.organization_id is not None:
+        queryset = queryset.filter(organization_id=_normalize_id(filters.organization_id))
+    if filters.team_id is not None:
+        queryset = queryset.filter(team_id=_normalize_id(filters.team_id))
+    return paginate(queryset, offset=offset, limit=limit)
+
+
+def _thread_queryset() -> QuerySet[MessageThread]:
+    return (
+        MessageThread.objects.select_related('idea', 'started_by')
+        .annotate(
+            message_count=_count_of(Message, 'thread'),
+            participant_count=_count_of(MessageParticipant, 'thread'),
+            # An unread count is per reader, so there is no platform-wide number to
+            # report. What is countable is how many participants have not opened it,
+            # which is the closest honest aggregate: it says a conversation is going
+            # unread by somebody, not by whom.
+            stale_participant_count=Coalesce(
+                Subquery(
+                    MessageParticipant.objects.filter(
+                        thread=OuterRef('pk'),
+                        last_read_at__lt=OuterRef('latest_message_at'),
+                    )
+                    .order_by()
+                    .values('thread')
+                    .annotate(total=Count('*'))
+                    .values('total')[:1],
+                    output_field=IntegerField(),
+                ),
+                0,
+            ),
+        )
+        .order_by('-latest_message_at', '-pk')
+    )
+
+
+@dataclass(frozen=True)
+class MessageThreadListing:
+    page: Page[MessageThread]
+    capabilities: AdminCapabilities
+
+
+def list_message_threads(
+    user: User | None,
+    search: str | None = None,
+    *,
+    anchored: bool | None = None,
+    offset=0,
+    limit=None,
+) -> MessageThreadListing:
+    """
+    Every conversation on the platform, most recently active first.
+
+    `search` matches the subject, the starter's address and the **idea title
+    only when the caller may read it** - the same rule as everywhere else in the
+    console, so searching cannot confirm a private idea's title.
+    """
+    capabilities = _capabilities(user)
+    if capabilities is None:
+        return MessageThreadListing(
+            page=empty_page(offset, limit), capabilities=AdminCapabilities()
+        )
+
+    queryset = _thread_queryset()
+    search = (search or '').strip()
+    if search:
+        # The starter's address is metadata, so it always matches. The subject
+        # does not: `messaging.services.start_thread` defaults an anchored
+        # thread's subject to its idea's title, so matching a subject would let
+        # a search confirm a title the caller may not read. Under the content
+        # permission every subject matches; without it, only an *unanchored*
+        # thread's subject is genuinely the writer's own words.
+        match = Q(started_by__email__icontains=search)
+        if capabilities.can_inspect_idea_content:
+            match |= Q(subject__icontains=search)
+        else:
+            match |= Q(idea__isnull=True, subject__icontains=search)
+        queryset = queryset.filter(match | _content_search(search, capabilities, prefix='idea__'))
+    if anchored is True:
+        queryset = queryset.filter(idea__isnull=False)
+    elif anchored is False:
+        queryset = queryset.filter(idea__isnull=True)
+    return MessageThreadListing(
+        page=paginate(queryset, offset=offset, limit=limit), capabilities=capabilities
+    )
+
+
+@dataclass(frozen=True)
+class MessageThreadDetail:
+    thread: MessageThread
+    capabilities: AdminCapabilities
+    participants: list[MessageParticipant]
+
+
+def get_message_thread(user: User | None, thread_id: object) -> MessageThreadDetail | None:
+    """One conversation with its participants. Null for a non-administrator."""
+    capabilities = _capabilities(user)
+    if capabilities is None:
+        return None
+    normalized_id = _normalize_id(thread_id)
+    if normalized_id is None:
+        return None
+
+    thread = _thread_queryset().filter(pk=normalized_id).first()
+    if thread is None:
+        return None
+    participants = list(
+        MessageParticipant.objects.filter(thread=thread)
+        .select_related('user')
+        .order_by('user__email', 'pk')
+    )
+    return MessageThreadDetail(thread=thread, capabilities=capabilities, participants=participants)
+
+
+def list_thread_messages(
+    user: User | None, thread_id: object, *, offset=0, limit=None
+) -> tuple[Page[Message], AdminCapabilities]:
+    """
+    One conversation's messages, oldest first, with the caller's capabilities.
+
+    The bodies are returned whole: redaction is the adapter's job, because only
+    it knows the type shape the UI renders, and returning a blank body from here
+    would make an empty message indistinguishable from a withheld one in every
+    other caller too.
+    """
+    capabilities = _capabilities(user)
+    if capabilities is None:
+        return empty_page(offset, limit), AdminCapabilities()
+
+    normalized_id = _normalize_id(thread_id)
+    if normalized_id is None:
+        return empty_page(offset, limit), capabilities
+
+    queryset = (
+        Message.objects.filter(thread_id=normalized_id)
+        .select_related('sender', 'thread')
+        .order_by('created_at', 'pk')
+    )
+    return paginate(queryset, offset=offset, limit=limit), capabilities
+
+
+@dataclass(frozen=True)
+class NotificationFilters:
+    kind: str | None = None
+    unread_only: bool = False
+
+
+def list_notifications(
+    user: User | None,
+    filters: NotificationFilters | None = None,
+    *,
+    offset=0,
+    limit=None,
+) -> tuple[Page[Notification], AdminCapabilities]:
+    """
+    Every notification the platform has sent, newest first.
+
+    A notification is something **the platform** wrote - never anything a user
+    wrote - so unlike a message body it is metadata under `ACCESS_CONSOLE`. The
+    idea it points at still is not: the adapter applies the same title rule as
+    everywhere else.
+    """
+    capabilities = _capabilities(user)
+    if capabilities is None:
+        return empty_page(offset, limit), AdminCapabilities()
+
+    queryset = Notification.objects.select_related('user', 'idea')
+    filters = filters or NotificationFilters()
+    if filters.kind:
+        queryset = queryset.filter(kind=filters.kind)
+    if filters.unread_only:
+        queryset = queryset.filter(is_read_at__isnull=True)
+    return (
+        paginate(queryset.order_by('-created_at', '-pk'), offset=offset, limit=limit),
+        capabilities,
+    )

@@ -12,6 +12,7 @@ import json
 import pytest
 from django.core.files.storage import storages
 from django.test import Client
+from django.utils import timezone
 
 from ideas.models import Attachment, Idea
 from identity.models import User
@@ -75,8 +76,12 @@ def make_idea(organization, author, **overrides):
         'title': 'Automate the invoice run',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 

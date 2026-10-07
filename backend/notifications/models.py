@@ -50,6 +50,28 @@ NOTIFICATION_KIND_CHOICES = (
     ('idea.platform_rejected', 'The platform did not approve your idea'),
     ('idea.platform_approved', 'Platform review completed'),
     ('idea.owner_go_ahead', 'Your idea is ready for implementation'),
+    # --- automation delivery (Sprint 4) ----------------------------------------
+    ('proposal.submitted', 'A proposal is waiting for your decision'),
+    ('proposal.changes_requested', 'Your proposal was sent back'),
+    ('proposal.released', 'Your proposal is ready to read'),
+    ('proposal.declined', 'Your idea will not be developed'),
+    ('delivery.go_ahead_received', 'An approved idea is waiting for a developer'),
+    ('automation.opportunity_created', 'An automation opportunity was opened'),
+    ('automation.requirements_ready', 'Requirements are ready'),
+    ('automation.proposal_submitted', 'A proposal was submitted'),
+    ('automation.proposal_changes_requested', 'Changes were requested on a proposal'),
+    ('automation.ready_for_assignment', 'An opportunity is ready for assignment'),
+    ('automation.opportunity_assigned', 'An opportunity was assigned'),
+    ('automation.project_created', 'A project was created'),
+    ('automation.project_started', 'A project has started'),
+    ('automation.ready_for_uat', 'A project is ready for acceptance testing'),
+    ('automation.testing_failed', 'A required test failed'),
+    ('automation.uat_passed', 'Acceptance testing passed'),
+    ('automation.uat_failed', 'Acceptance testing failed'),
+    ('automation.deployment_completed', 'A deployment completed'),
+    ('automation.milestone_completed', 'A milestone was completed'),
+    ('automation.project_completed', 'A project was completed'),
+    ('automation.impact_recorded', 'Impact was recorded'),
     # --- the review queues -----------------------------------------------------
     ('review.assigned', 'An idea was assigned to you'),
     ('review.organization_queue', 'An idea is waiting for organization review'),
@@ -57,6 +79,7 @@ NOTIFICATION_KIND_CHOICES = (
     # --- invitations and messaging ---------------------------------------------
     ('invitation.received', 'You have been invited'),
     ('invitation.accepted', 'Your invitation was accepted'),
+    ('invitation.declined', 'Your invitation was declined'),
     ('message.received', 'You have a new message'),
 )
 
@@ -74,6 +97,64 @@ DECISION_KINDS = frozenset(
         'idea.owner_go_ahead',
     }
 )
+
+
+#: Where a notification of each kind takes you, as a path **inside the frontend**.
+#:
+#: Stored nowhere on purpose. The destination is a fact about the product's
+#: routes, and a second copy in the database is a second thing that can go stale
+#: when a route is renamed - so it is derived here, from the kind and the ids the
+#: row already carries, and the same mapping is used for the in-app link and for
+#: any push payload built from the same row. One mapping, two channels.
+#:
+#: `None` means "there is nowhere specific to go", and the client falls back to
+#: the notifications list. That is a real answer and not a gap: an invitation for
+#: an address with no account, or a notification about something that no longer
+#: exists, has no page to open.
+NOTIFICATION_LABELS = {
+    'idea.organization_changes_requested': 'Changes requested by your organization',
+    'idea.organization_confirmed': 'Your organization confirmed your idea',
+    'idea.submitted_to_platform': 'Your idea was submitted to the platform',
+    'idea.platform_changes_requested': 'The platform asked for changes',
+    'idea.platform_rejected': 'The platform did not approve your idea',
+    'idea.platform_approved': 'Platform review completed',
+    'idea.owner_go_ahead': 'Your idea is ready for implementation',
+    'proposal.submitted': 'A proposal is waiting for your decision',
+    'proposal.changes_requested': 'Your proposal was sent back',
+    'proposal.released': 'Your proposal is ready to read',
+    'proposal.declined': 'Your idea will not be developed',
+    'delivery.go_ahead_received': 'An approved idea is waiting for a developer',
+    'automation.opportunity_created': 'An automation opportunity was opened',
+    'automation.requirements_ready': 'Requirements are ready',
+    'automation.proposal_submitted': 'A proposal was submitted',
+    'automation.proposal_changes_requested': 'Changes were requested on a proposal',
+    'automation.ready_for_assignment': 'An opportunity is ready for assignment',
+    'automation.opportunity_assigned': 'An opportunity was assigned',
+    'automation.project_created': 'A project was created',
+    'automation.project_started': 'A project has started',
+    'automation.ready_for_uat': 'A project is ready for acceptance testing',
+    'automation.testing_failed': 'A required test failed',
+    'automation.uat_passed': 'Acceptance testing passed',
+    'automation.uat_failed': 'Acceptance testing failed',
+    'automation.deployment_completed': 'A deployment completed',
+    'automation.milestone_completed': 'A milestone was completed',
+    'automation.project_completed': 'A project was completed',
+    'automation.impact_recorded': 'Impact was recorded',
+    'review.assigned': 'An idea was assigned to you',
+    'review.organization_queue': 'An idea is waiting for organization review',
+    'review.platform_queue': 'An idea is waiting for platform review',
+    'invitation.received': 'You have been invited',
+    'invitation.accepted': 'Your invitation was accepted',
+    'invitation.declined': 'Your invitation was declined',
+    'message.received': 'You have a new message',
+}
+
+#: The paths themselves. Kept apart from the labels above so this module holds
+#: no routing vocabulary and a rename is one edit in this one table.
+NOTIFICATIONS_PATH = '/app/notifications'
+IDEA_PATH = '/app/ideas'
+IDEA_REPORT_PATH = '/app/ideas/{idea_id}/report'
+MESSAGES_PATH = '/app/messages'
 
 
 class Notification(models.Model):
@@ -155,6 +236,40 @@ class Notification(models.Model):
 
     def __str__(self) -> str:
         return f'{self.kind} -> {self.user_id}'
+
+    @property
+    def action_path(self) -> str | None:
+        """
+        The in-app destination for this notification, or `None`.
+
+        Derived from the kind and the ids the row already holds, so it cannot
+        disagree with the row and needs no column to fall out of date. The rules
+        are deliberately conservative:
+
+        - A notification carrying a `report` goes to that idea's report page -
+          the one place a decision is spelled out. `DECISION_KINDS` is the gate,
+          so a queue nudge cannot send somebody to an approval report.
+        - A notification carrying an `idea` goes to that idea, **only when this
+          recipient may actually read it**. A notification outlives the access
+          it was written under: an author who was removed from an organization,
+          or a deactivated account reading on a shared device, must not be handed
+          a link to something they can no longer open.
+        - Everything else - an invitation, a message, a queue nudge - goes to the
+          list, or nowhere at all. In particular **an invitation notification has
+          no accept link**: acceptance needs the plaintext token, which exists
+          only in the email because only its digest is stored, so there is
+          nothing here that could honestly produce one.
+        """
+        if self.report_id is not None and self.kind in DECISION_KINDS:
+            return IDEA_REPORT_PATH.format(idea_id=self.idea_id)
+        if self.idea_id is not None:
+            from ideas import selectors as idea_selectors
+
+            if idea_selectors.can_view_idea(self.user, self.idea):
+                return f'{IDEA_PATH}/{self.idea_id}'
+        if self.kind == 'message.received':
+            return MESSAGES_PATH
+        return None
 
     @property
     def is_read(self) -> bool:

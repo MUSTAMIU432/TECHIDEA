@@ -39,7 +39,11 @@ from organizations.services import (
 )
 from reviews import organization_review, platform_review
 from reviews import services as review_services
-from reviews.tests.platform import confirm_for_organization, grant_platform_reviewer
+from reviews.tests.platform import (
+    confirm_for_organization,
+    grant_platform_reviewer,
+    release_proposal,
+)
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
 DESCRIPTION = 'A description long enough to be usable.'
@@ -115,7 +119,6 @@ def file_idea(user, context, *, organization=None, team=None, title='An idea'):
         services.IdeaInput(
             title=title,
             description=DESCRIPTION,
-            visibility=Idea.Visibility.PUBLIC,
             category_id=Category.objects.get_or_create(name='Journeys')[0].pk,
         ),
         submission_context=context,
@@ -172,6 +175,7 @@ class TestTheIndividualJourney:
 
         from ideas.go_ahead import confirm_go_ahead
 
+        release_proposal(idea)
         confirm_go_ahead(author, idea.pk)
         assert (
             lifecycle.transition_idea(
@@ -204,37 +208,42 @@ class TestTheIndividualJourney:
 
 @pytest.mark.django_db
 class TestTheTeamJourney:
-    def test_it_reaches_the_platform_in_one_move(self, author, platform_reviewer):
+    def test_it_is_checked_by_the_team_then_published_by_the_owner(self, author, platform_reviewer):
         """
-        A team is a collaboration boundary, not a tenant: it can put an idea
-        forward but it cannot validate one, so there is no stage for the team to
-        validate and the idea goes straight to the platform.
+        A team checks its own idea first, exactly as an organization does: the
+        author submits, the team's reviewer verifies, and only then does the author
+        publish it to the platform. A team still cannot *approve* anything.
         """
-        from teams import authorization as team_authorization
+        from reviews.tests.platform import team_reviewer_for
 
         owner = make_user('team-owner@example.com')
         team = make_team(owner=owner)
-        team_authorization.get_membership(owner, team)
+        reviewer = team_reviewer_for(team)
 
-        # The author files for the team without being in it; a team member files
-        # for it, which is the case that needs membership.
         idea = file_idea(owner, Idea.SubmissionContext.TEAM, team=team)
         assert (idea.organization_id, idea.team_id) == (None, team.pk)
 
-        assert services.submit_idea(owner, idea.pk).status == Idea.Status.SUBMITTED
+        assert services.submit_idea(owner, idea.pk).status == Idea.Status.SUBMITTED_TO_ORGANIZATION
+        idea.refresh_from_db()
+        review = organization_review.start_organization_review(reviewer, idea.pk)
+        organization_review.complete_organization_review(
+            reviewer,
+            organization_review.CompleteOrganizationReviewInput(
+                idea_id=idea.pk, review_id=review.pk, decision='confirmed', feedback='Good.'
+            ),
+        )
+        assert services.submit_to_platform(owner, idea.pk).status == Idea.Status.SUBMITTED
         assert decide(platform_reviewer, idea, 'approved').decision == 'approved'
 
-    def test_a_team_idea_cannot_be_confirmed_by_the_team(self, author, platform_reviewer):
+    def test_the_author_cannot_confirm_their_own_team_idea(self, author, platform_reviewer):
         """
-        The stage that organization ideas have and team ideas do not. Refused by
-        the absence of anything to do it with, so this asserts the states the team
-        context can never be in.
+        Confirmation belongs to the team's reviewers; the author is offered
+        submission only, and holds no way round their own team's stage.
         """
         team = make_team(owner=author)
         idea = file_idea(author, Idea.SubmissionContext.TEAM, team=team)
 
         for target in (
-            Idea.Status.SUBMITTED_TO_ORGANIZATION,
             Idea.Status.ORGANIZATION_CONFIRMED,
             Idea.Status.ORGANIZATION_CHANGES_REQUESTED,
         ):
@@ -242,7 +251,8 @@ class TestTheTeamJourney:
             assert target not in lifecycle.available_transitions(author, idea)
 
         services.submit_idea(author, idea.pk)
-        assert lifecycle.is_organization_reviewer(team.owner, idea) is False
+        idea.refresh_from_db()
+        assert lifecycle.is_organization_reviewer(author, idea) is False
 
 
 @pytest.mark.django_db

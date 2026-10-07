@@ -377,7 +377,7 @@ class TestUpdateTheStory:
         idea = services.create_idea(
             world['author'],
             world['acme'].pk,
-            IdeaInput(title='T', visibility='organization', performed_by='Staff'),
+            IdeaInput(title='T', performed_by='Staff'),
         )
 
         with pytest.raises(IdeaError, match='Idea is unavailable'):
@@ -396,7 +396,6 @@ class TestUpdateTheStory:
                 title='T',
                 description=DESCRIPTION,
                 category_id=world['finance'].pk,
-                visibility='organization',
             ),
         )
         services.submit_idea(world['author'], idea.pk)
@@ -430,7 +429,6 @@ class TestSubmissionRuleIsUnchanged:
                 title='T',
                 description=DESCRIPTION,
                 category_id=world['finance'].pk,
-                visibility='organization',
             ),
         )
 
@@ -447,7 +445,6 @@ class TestSubmissionRuleIsUnchanged:
         [
             ({'description': 'Too short'}, 'at least 20 characters'),
             ({'category_id': None}, 'Choose a category'),
-            ({'visibility': 'private'}, 'A private idea cannot be reviewed'),
         ],
     )
     def test_a_full_story_does_not_stand_in_for_the_required_fields(
@@ -457,7 +454,6 @@ class TestSubmissionRuleIsUnchanged:
             'title': 'T',
             'description': DESCRIPTION,
             'category_id': world['finance'].pk,
-            'visibility': 'organization',
             'current_process': 'A long and detailed account of what happens today.',
             'desired_outcome': 'Something better.',
             **overrides,
@@ -515,7 +511,7 @@ class TestGraphQL:
         assert Idea.objects.count() == 0
 
     def test_update_through_the_api(self, client, world):
-        created = create_via_api(client, world, visibility='PRIVATE')
+        created = create_via_api(client, world)
         fields = {
             'title': 'Payment forms are re-typed by hand',
             'description': DESCRIPTION,
@@ -559,6 +555,12 @@ class TestGraphQL:
 class TestReadingTheStory:
     def test_an_organization_idea_is_readable_by_a_colleague(self, client, world):
         created = create_via_api(client, world, visibility='ORGANIZATION')
+        # A draft is its author's alone; the audience applies once it is submitted.
+        from django.utils import timezone
+
+        Idea.objects.filter(pk=created['idea']['id']).update(
+            status=Idea.Status.SUBMITTED, submitted_at=timezone.now()
+        )
 
         idea = run(
             client, IDEA_QUERY, 'idea', {'id': created['idea']['id']}, user=world['colleague']
@@ -575,8 +577,8 @@ class TestReadingTheStory:
 
         assert idea is None
 
-    def test_a_private_idea_is_not_readable_by_a_colleague(self, client, world):
-        created = create_via_api(client, world, visibility='PRIVATE')
+    def test_a_draft_is_not_readable_by_a_colleague(self, client, world):
+        created = create_via_api(client, world)
 
         idea = run(
             client, IDEA_QUERY, 'idea', {'id': created['idea']['id']}, user=world['colleague']
@@ -585,7 +587,7 @@ class TestReadingTheStory:
         assert idea is None
 
     def test_an_anonymous_caller_reads_nothing(self, client, world):
-        created = create_via_api(client, world, visibility='PUBLIC')
+        created = create_via_api(client, world)
 
         assert run(client, IDEA_QUERY, 'idea', {'id': created['idea']['id']}) is None
 

@@ -472,6 +472,18 @@ def logout(raw_refresh_token: str) -> None:
     )
 
 
+def revoke_other_sessions(user: User, keep_raw_refresh_token: str = '') -> None:
+    """
+    Revoke every live refresh session of `user` except the one backing
+    `keep_raw_refresh_token`, so changing a password signs out every other
+    device but not the one it was changed from.
+    """
+    sessions = RefreshSession.objects.filter(user=user, revoked_at__isnull=True)
+    if keep_raw_refresh_token:
+        sessions = sessions.exclude(token_hash=_hash_refresh_token(keep_raw_refresh_token))
+    sessions.update(revoked_at=timezone.now())
+
+
 def get_authenticated_user(request: HttpRequest) -> User | None:
     """
     Resolve the authenticated User from `request`'s `Authorization: Bearer

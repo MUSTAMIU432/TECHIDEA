@@ -210,17 +210,19 @@ class TestEditingWhileChangesAreRequested:
 
         assert idea.description == REVISED
 
-    def test_a_draft_may_still_change_visibility(self, world):
+    def test_a_draft_cannot_change_its_audience_either(self, world):
+        """The audience follows the level, so there is nothing to change at any stage."""
         draft = Idea.objects.create(
             organization=world['acme'],
             author=world['author'],
             title='Draft',
-            visibility=Idea.Visibility.PRIVATE,
+            visibility=Idea.Visibility.ORGANIZATION,
         )
 
-        idea = idea_services.update_idea(world['author'], draft.pk, edit(visibility='organization'))
+        with pytest.raises(idea_services.IdeaError) as exc_info:
+            idea_services.update_idea(world['author'], draft.pk, edit(visibility='public'))
 
-        assert idea.visibility == Idea.Visibility.ORGANIZATION
+        assert exc_info.value.field == 'visibility'
 
     @pytest.mark.parametrize(
         'status',

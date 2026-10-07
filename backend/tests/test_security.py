@@ -240,7 +240,10 @@ def test_production_cors_is_restricted_to_the_configured_origins():
         # *which paths* may be called cross-origin, and that list is asserted
         # path by path below and in `tests/test_cors.py`. The origin allow-list
         # above is unchanged, so this widens no origin.
-        'CORS_URLS_REGEX': r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/)',
+        'CORS_URLS_REGEX': (
+            r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/'
+            r'|/account/avatar/|/users/\d+/avatar/)'
+        ),
         'CSRF_TRUSTED_ORIGINS': ['https://app.example.test'],
     }
 

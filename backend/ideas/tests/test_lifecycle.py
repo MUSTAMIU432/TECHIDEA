@@ -149,7 +149,6 @@ def individual_idea(world, author=None, **overrides):
     fields = {
         'title': 'An idea of my own',
         'description': DESCRIPTION,
-        'visibility': Idea.Visibility.PUBLIC,
         'category_id': Category.objects.create(name=f'Cat {Category.objects.count() + 1}').pk,
     }
     fields.update(overrides)
@@ -623,7 +622,12 @@ class TestTheSubmissionContextGate:
         row about a journey that was never legal. Both write paths ask
         `context_allows`, not just the public transition.
         """
-        teamless_individual = individual_idea(world, visibility=Idea.Visibility.ORGANIZATION)
+        # An individual idea has no organization to name, so `ORGANIZATION`
+        # visibility is no longer a legal audience for one and the default
+        # `PUBLIC` is used here. The point of the test is the *review* gate, not
+        # the audience: `create_idea` refuses the impossible combination, which
+        # `TestVisibilityMatchesTheContext` pins directly.
+        teamless_individual = individual_idea(world)
         with pytest.raises(services.IdeaError):
             lifecycle.apply_review_transition(
                 world['platform_reviewer'],

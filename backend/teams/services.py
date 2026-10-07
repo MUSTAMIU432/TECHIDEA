@@ -50,10 +50,16 @@ MAX_TEAM_DESCRIPTION_LENGTH = 2000
 # `services` and the frontend's role picker cannot disagree about the vocabulary.
 OWNER_ROLE_SLUG = 'owner'
 MEMBER_ROLE_SLUG = 'member'
+REVIEWER_ROLE_SLUG = 'reviewer'
 
 SYSTEM_ROLES: tuple[tuple[str, str, str], ...] = (
     (OWNER_ROLE_SLUG, 'Owner', 'Can manage the team, its members and its ideas.'),
     (MEMBER_ROLE_SLUG, 'Member', 'Can see the team and file ideas for it.'),
+    (
+        REVIEWER_ROLE_SLUG,
+        'Reviewer',
+        "Can verify the team's ideas, or send them back for changes or more documents.",
+    ),
 )
 
 
@@ -157,6 +163,7 @@ def seed_team_roles(team: Team) -> dict[str, TeamRole]:
     granted = {
         OWNER_ROLE_SLUG: authorization.ROLE_OWNER_PERMISSIONS,
         MEMBER_ROLE_SLUG: authorization.ROLE_MEMBER_PERMISSIONS,
+        REVIEWER_ROLE_SLUG: authorization.ROLE_REVIEWER_PERMISSIONS,
     }
 
     roles: dict[str, TeamRole] = {}
@@ -297,3 +304,42 @@ def leave_team(user: User | None, team: Team | object) -> None:
         membership.save()
 
     logger.info('Team membership ended (team=%s, user=%s).', resolved.pk, active_user.pk)
+
+
+@transaction.atomic
+def set_member_reviewer(
+    actor: User | None, team: Team | object, member_user_id: object, enabled: bool
+) -> TeamMembership:
+    """
+    Make a member of `team` one of its reviewers, or take that back.
+
+    A team's Owner decides who checks its ideas - `team.members.manage` is the
+    gate, so an ordinary member cannot appoint themselves - and the Reviewer role
+    is the only thing this changes: it adds or removes that one role and leaves
+    every other role the member holds alone. The idea's author is never a
+    reviewer of their own idea whatever they hold, which `ideas.lifecycle`
+    enforces where it matters.
+    """
+    active = _require_active_user(actor)
+    team_id = authorization._team_id(team)
+    if team_id is None or not authorization.has_permission(
+        active, team_id, authorization.TEAM_MEMBERS_MANAGE
+    ):
+        raise TeamError('You cannot change who reviews for this team.', reason='forbidden')
+    try:
+        member_pk = int(str(member_user_id))
+    except (TypeError, ValueError):
+        raise TeamError('That person is not on this team.', field='member') from None
+
+    membership = TeamMembership.objects.filter(
+        team_id=team_id, user_id=member_pk, status=TeamMembership.Status.ACTIVE
+    ).first()
+    if membership is None:
+        raise TeamError('That person is not on this team.', field='member')
+
+    role = seed_team_roles(Team.objects.get(pk=team_id))[REVIEWER_ROLE_SLUG]
+    if enabled:
+        TeamMembershipRole.objects.get_or_create(membership=membership, role=role)
+    else:
+        TeamMembershipRole.objects.filter(membership=membership, role=role).delete()
+    return membership

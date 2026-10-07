@@ -114,6 +114,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     # `validate_phone_number` validator for any value that IS supplied.
     phone_number = models.CharField(max_length=20, blank=True, validators=[validate_phone_number])
 
+    avatar_key = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='Storage key of the profile photo (see identity.avatars); empty for none.',
+    )
     is_active = models.BooleanField(
         default=True,
         help_text='Unset to deactivate an account without deleting it.',

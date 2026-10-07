@@ -28,6 +28,7 @@ from django.core.exceptions import ValidationError
 from django.db import connection
 from django.db.utils import IntegrityError
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 
 from ideas.models import Category, Idea
 from identity.models import User
@@ -80,6 +81,9 @@ def public_idea(category):
         visibility=Idea.Visibility.PUBLIC,
         submission_context=Idea.SubmissionContext.INDIVIDUAL,
         author=make_user('author@example.com'),
+        # Past `DRAFT`, or nobody but the author could read it.
+        status=Idea.Status.SUBMITTED,
+        submitted_at=timezone.now(),
     )
 
 
@@ -214,6 +218,8 @@ class TestStartingAThread:
             visibility=Idea.Visibility.PUBLIC,
             submission_context=Idea.SubmissionContext.INDIVIDUAL,
             author=sender,
+            status=Idea.Status.SUBMITTED,
+            submitted_at=timezone.now(),
         )
 
         first = thread_between(sender, recipient, idea=public_idea)

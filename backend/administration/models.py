@@ -62,6 +62,17 @@ ADMIN_AUDIT_ACTION_CHOICES = (
     ('platform_review.rejected', 'Platform review rejected'),
     ('report.generated', 'Platform review report generated'),
     ('idea.owner_go_ahead', 'Idea owner gave go-ahead'),
+    # Who may review, and in which team (the review-team phase).
+    ('reviewer.granted', 'Platform reviewer created'),
+    ('reviewer.revoked', 'Platform reviewer removed'),
+    ('review_team.created', 'Review team created'),
+    ('review_team.updated', 'Review team changed'),
+    ('review_team.assigned', 'Idea assigned to a review team'),
+    # The proposal a review team writes after approval, and the admin's decision on it.
+    ('proposal.submitted', 'Proposal submitted to the platform admin'),
+    ('proposal.changes_requested', 'Proposal sent back to the review team'),
+    ('proposal.released', 'Proposal released to its owner'),
+    ('proposal.declined', 'Proposal declined'),
 )
 
 ADMIN_AUDIT_RESULT_CHOICES = (
@@ -116,6 +127,15 @@ class AdminAuditEntry(models.Model):
             PLATFORM_REVIEW_REJECTED,
             REPORT_GENERATED,
             IDEA_OWNER_GO_AHEAD,
+            REVIEWER_GRANTED,
+            REVIEWER_REVOKED,
+            REVIEW_TEAM_CREATED,
+            REVIEW_TEAM_UPDATED,
+            REVIEW_TEAM_ASSIGNED,
+            PROPOSAL_SUBMITTED,
+            PROPOSAL_CHANGES_REQUESTED,
+            PROPOSAL_RELEASED,
+            PROPOSAL_DECLINED,
         ) = ADMIN_AUDIT_ACTION_CHOICES
 
     class Result(models.TextChoices):
@@ -176,6 +196,18 @@ class AdminAuditEntry(models.Model):
             (
                 'assign_platform_reviewers',
                 'Can assign and remove the platform reviewer of a submission',
+            ),
+            # Creating reviewers and forming review teams is a different power from
+            # routing work to them, so the two can be held by different people.
+            (
+                'manage_reviewers',
+                'Can create and remove platform reviewers and form review teams',
+            ),
+            # The admin who decides whether an idea's proposal goes to its owner. Held
+            # by neither reviewers (who write it) nor owners (who read it).
+            (
+                'release_proposals',
+                "Can approve a review team's proposal and release it to the idea owner",
             ),
         ]
         constraints: ClassVar[list[models.BaseConstraint]] = [

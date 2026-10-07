@@ -103,7 +103,13 @@ def can_review(user: User | None, idea: Idea | None) -> bool:
     """
     if idea is None:
         return False
-    return selectors.can_view_idea(user, idea) and lifecycle.is_platform_reviewer(user, idea)
+    if not (selectors.can_view_idea(user, idea) and lifecycle.is_platform_reviewer(user, idea)):
+        return False
+    # An idea routed to a review team is worked by that team's members, and by nobody
+    # else on the platform; an unrouted one is open to any reviewer, as it always was.
+    from reviews import review_teams
+
+    return review_teams.team_may_review(user, idea)
 
 
 def can_organization_review(user: User | None, idea: Idea | None) -> bool:

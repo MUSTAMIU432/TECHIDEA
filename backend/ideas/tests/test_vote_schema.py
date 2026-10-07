@@ -22,6 +22,7 @@ import json
 
 import pytest
 from django.test import Client
+from django.utils import timezone
 
 from ideas.models import Category, Idea, Vote
 from identity.models import User
@@ -156,8 +157,12 @@ def make_idea(organization, author, **overrides):
         'title': 'Automate the invoice run',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 
@@ -559,7 +564,7 @@ mutation CreateIdea($input: CreateIdeaInput!) {
         idea and is counted from the idea, which is the whole content of this
         test: a wrong count on a real vote.
         """
-        idea = make_idea(world['organization'], world['author'])
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.DRAFT)
         Vote.objects.create(idea=idea, user=world['colleague'])
 
         result = run(
@@ -590,6 +595,7 @@ mutation UpdateIdea($input: UpdateIdeaInput!) {{
             world['organization'],
             world['author'],
             category=Category.objects.create(name='Finance Ops'),
+            status=Idea.Status.DRAFT,
         )
         Vote.objects.create(idea=idea, user=world['author'])
 
@@ -689,9 +695,9 @@ class TestSchemaSurface:
         from graphql_api.schema import schema
 
         sdl = str(schema)
+        # Proposals belong to Sprint 4 (`automation`) and now exist; the developer
+        # marketplace is a later phase and must still be absent.
         for name in (
-            'createProposal',
-            'proposals(',
             'developerProfile',
             'matchDevelopers',
         ):

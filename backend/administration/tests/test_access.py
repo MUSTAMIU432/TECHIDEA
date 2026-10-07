@@ -181,15 +181,12 @@ class TestWhoIsAnAdministrator:
         assert detail['feedback'] is None
         assert detail['submissionSnapshot'] is None
 
-        # And in the activity feed, where a title is withheld for anything that
-        # was not PUBLIC - a public idea's title is shown to any console user,
-        # because a signed-in member could read it anyway and redaction would be
-        # theatre. Asserted against the specific ideas rather than "all null",
-        # because that is the rule.
+        # And in the activity feed, where every title is withheld: there is no public
+        # audience any more, so no idea is one a signed-in member could read anyway.
         overview = gql(OVERVIEW, user=reviewer)['adminOverview']
         titles = {item['ideaId']: item['ideaTitle'] for item in overview['recentActivity']}
         assert titles[str(world['org_idea'].pk)] is None
-        assert titles[str(world['public_idea'].pk)] == 'Public invoice run'
+        assert titles[str(world['public_idea'].pk)] is None
 
     def test_anonymous_requests_get_nothing(self, gql, world):
         assert not any(gql(CAPABILITIES)['adminCapabilities'].values())

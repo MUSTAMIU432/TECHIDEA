@@ -235,10 +235,22 @@ class TestIdeaLifecycleVocabulary:
             'organization',
         ]
 
-    def test_visibility_vocabulary_is_exactly_the_four_levels(self):
+    def test_visibility_vocabulary_is_exactly_the_five_levels(self):
+        """
+        Five, and the list is pinned because it is a contract three places rely
+        on: the selectable set per context in `ideas.services`, the read filter in
+        `ideas.selectors`, and the frontend's own label map.
+
+        `team` exists because ownership and audience are separate facts and a
+        team idea needs to say "my team" in a word that does not belong to a
+        different kind of tenant. `department` is still reserved vocabulary with
+        no model behind it, which is why it is in this list and in none of the
+        selectable ones.
+        """
         assert list(Idea.Visibility.values) == [
             'public',
             'organization',
+            'team',
             'department',
             'private',
         ]

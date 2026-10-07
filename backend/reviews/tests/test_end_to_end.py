@@ -440,13 +440,10 @@ class TestMembership:
 def test_flow_new_idea_to_approval(platform, django_capture_on_commit_callbacks):
     api = platform
 
-    # Draft, saved with the default visibility: private, and not yet submittable.
+    # A new draft is filed at the organization level, so it carries that level's
+    # audience from the start - there is nothing to widen before submitting.
     idea_id = draft_idea(api)
-    refused = api.run(SUBMIT_IDEA, {'id': idea_id}, 'author')['submitIdea']
-    assert refused['success'] is False
-    assert 'private idea cannot be reviewed' in refused['message']
 
-    # Save the draft with a reviewable visibility, then submit.
     saved = api.run(
         UPDATE_IDEA,
         {
@@ -456,7 +453,6 @@ def test_flow_new_idea_to_approval(platform, django_capture_on_commit_callbacks)
                     'title': 'Automate the invoice run',
                     'description': 'We key every invoice in by hand, every month.',
                     'categoryId': api.category_id,
-                    'visibility': 'ORGANIZATION',
                 },
             }
         },

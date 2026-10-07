@@ -182,6 +182,13 @@ PASSWORD_RESET_REQUEST_PER_CLIENT = ThrottlePolicy(
 # per-client limit but for a cheaper operation, hence a higher number.
 PASSWORD_RESET_PER_CLIENT = ThrottlePolicy('password_reset.client', limit=30, window_seconds=900)
 
+# Changing a password while signed in, per account. Unlike a reset this checks
+# the *current* password, so it is a guessing surface for anyone holding a
+# stolen access token; the same budget as login's per-account limit.
+PASSWORD_CHANGE_PER_ACCOUNT = ThrottlePolicy(
+    'password_change.account', limit=10, window_seconds=900
+)
+
 # Account activation (spending a token), per client address. Same reasoning as
 # the reset limit above and the same order of magnitude; kept as a separate
 # policy rather than shared because the two flows have genuinely different
@@ -396,6 +403,11 @@ def guard_password_reset(request) -> None:
     escape the limit by presenting a different (invalid) one.
     """
     _guard(PASSWORD_RESET_PER_CLIENT, _client_address(request))
+
+
+def guard_password_change(user_id: object) -> None:
+    """Admit or refuse one `changePassword` attempt by the signed-in account."""
+    _guard(PASSWORD_CHANGE_PER_ACCOUNT, str(user_id))
 
 
 def guard_activation(request) -> None:

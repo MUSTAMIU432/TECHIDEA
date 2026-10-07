@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from django.db import transaction
 from django.utils import timezone
 
-from ideas import lifecycle
+from ideas import lifecycle, services
 from ideas import selectors as idea_selectors
 from ideas.models import Idea
 from reviews import eligibility
@@ -317,14 +317,15 @@ def _notify_author(idea_id: int, decision: str) -> None:
     if idea is None:
         return
 
+    noun = services.tenant_noun(idea)
     if decision == Review.Decision.CHANGES_REQUESTED:
         notification_services.deliver(
             recipients=idea.author,
             kind='idea.organization_changes_requested',
-            title=f'"{idea.title}" needs changes before {idea.tenant_label} can submit it',
+            title=f'"{idea.title}" needs changes before your {noun} can submit it',
             body=(
-                'Your organization asked for changes. Review the feedback, edit the idea, '
-                'then resubmit it to your organization.'
+                f'Your {noun} asked for changes or more documents. Read the feedback, '
+                f'update the idea and add what was asked for, then resubmit it to your {noun}.'
             ),
             idea=idea,
         )
@@ -333,9 +334,9 @@ def _notify_author(idea_id: int, decision: str) -> None:
     notification_services.deliver(
         recipients=idea.author,
         kind='idea.organization_confirmed',
-        title=f'Your organization confirmed "{idea.title}"',
+        title=f'Your {noun} confirmed "{idea.title}"',
         body=(
-            'Your organization confirmed this idea. Review it once more, then submit it '
+            f'Your {noun} confirmed this idea. Review it once more, then submit it '
             'to the platform when you are ready.'
         ),
         idea=idea,
@@ -384,4 +385,36 @@ def organization_queue_for(user, organization_id: object | None = None) -> list[
             # organization that does not exist.
             return []
 
+    return list(queryset.order_by('submitted_at', 'pk'))
+
+
+def team_queue_for(user, team_id: object) -> list[Idea]:
+    """
+    The team ideas waiting for `user` to verify, oldest first.
+
+    Empty unless `user` is one of that team's reviewers, and never contains their
+    own ideas - the same two properties the organization queue has, for the same
+    reasons. Only team-context ideas in the team's own review stage appear.
+    """
+    from teams import authorization as team_authorization
+
+    if user is None or not user.is_active:
+        return []
+    try:
+        normalized = int(str(team_id))
+    except (TypeError, ValueError):
+        return []
+    if not team_authorization.can_review_for(user, normalized):
+        return []
+
+    queryset = (
+        Idea.objects.filter(
+            idea_selectors._visibility_filter(user),
+            status=Idea.Status.SUBMITTED_TO_ORGANIZATION,
+            submission_context=Idea.SubmissionContext.TEAM,
+            team_id=normalized,
+        )
+        .exclude(author=user)
+        .select_related('author', 'organization', 'team', 'category')
+    )
     return list(queryset.order_by('submitted_at', 'pk'))

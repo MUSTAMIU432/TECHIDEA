@@ -116,7 +116,6 @@ def submitted_idea(
             title=title,
             description=DESCRIPTION,
             category_id=category.pk,
-            visibility=visibility,
             current_process='We copy numbers by hand.',
         ),
     )
@@ -198,9 +197,7 @@ def world():
     private_idea = idea_services.create_idea(
         author,
         acme.pk,
-        idea_services.IdeaInput(
-            title=PRIVATE_TITLE, description='Very private words.', visibility='private'
-        ),
+        idea_services.IdeaInput(title=PRIVATE_TITLE, description='Very private words.'),
     )
 
     admin = make_user('admin@platform.example', first_name='Pat', last_name='Admin')

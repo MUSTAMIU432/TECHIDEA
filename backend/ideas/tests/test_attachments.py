@@ -25,6 +25,7 @@ protects, in the order it would break:
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DatabaseError
+from django.utils import timezone
 
 from ideas import attachments as attachment_rules
 from ideas import selectors, services, storage
@@ -75,8 +76,12 @@ def make_idea(organization, author, **overrides):
         'title': 'An idea',
         'description': DESCRIPTION,
         'visibility': Idea.Visibility.ORGANIZATION,
+        'status': Idea.Status.SUBMITTED,
+        'submitted_at': timezone.now(),
     }
     fields.update(overrides)
+    if fields.get('status') == Idea.Status.DRAFT:
+        fields['submitted_at'] = None
     return Idea.objects.create(**fields)
 
 
@@ -263,7 +268,7 @@ class TestUploadAttachment:
 @pytest.mark.django_db
 class TestNoLifecycleGate:
     def test_a_draft_can_have_evidence_attached(self, world):
-        idea = make_idea(world['organization'], world['author'])
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.DRAFT)
         assert idea.status == Idea.Status.DRAFT
 
         assert services.upload_attachment(world['author'], idea.pk, pdf_file()) is not None
@@ -280,7 +285,7 @@ class TestNoLifecycleGate:
         assert attachment.idea_id == idea.pk
 
     def test_uploading_does_not_change_the_idea(self, world):
-        idea = make_idea(world['organization'], world['author'])
+        idea = make_idea(world['organization'], world['author'], status=Idea.Status.DRAFT)
 
         services.upload_attachment(world['author'], idea.pk, pdf_file())
         idea.refresh_from_db()

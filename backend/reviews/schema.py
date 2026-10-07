@@ -446,6 +446,18 @@ class PlatformTrackQuery:
 
     @strawberry.field(
         description=(
+            'Team ideas waiting for the caller to verify, oldest first. Empty unless the '
+            "caller is one of that team's reviewers, and never includes their own ideas."
+        )
+    )
+    def team_review_queue(self, info: strawberry.Info, team_id: strawberry.ID) -> list[IdeaType]:
+        return [
+            IdeaType.from_model(idea, info.context.user)
+            for idea in organization_review.team_queue_for(info.context.user, team_id)
+        ]
+
+    @strawberry.field(
+        description=(
             'Submissions waiting for **platform** review: the ones nobody has '
             'picked up first, then the ones already under review. For a platform '
             'reviewer only.\n\n'

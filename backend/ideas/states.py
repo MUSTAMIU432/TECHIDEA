@@ -241,11 +241,15 @@ def stages_for(idea: Idea) -> tuple[Stage, ...]:
     """
     The progress steps to draw for this idea.
 
-    Only an organization-context idea has the organization steps; an individual
-    or team idea is not shown two steps it will never reach, because a progress
-    bar that can never complete is worse than a shorter honest one.
+    An organization or team idea has the check-first steps (its organization's or
+    team's review); an individual idea is not shown two steps it will never reach,
+    because a progress bar that can never complete is worse than a shorter honest
+    one.
     """
-    if idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
+    if idea.submission_context in (
+        Idea.SubmissionContext.ORGANIZATION,
+        Idea.SubmissionContext.TEAM,
+    ):
         return STAGES_FOR_ORGANIZATION_CONTEXT
     return STAGES_FOR_DIRECT_CONTEXT
 
@@ -403,6 +407,17 @@ def _can_review_on_platform(user, idea: Idea, capabilities) -> bool:
     return platform_review.can_review(user, idea)
 
 
+def _for_level(text: str, idea: Idea) -> str:
+    """
+    The same words for the idea's level: the stage that checks an idea first is the
+    organization's or the team's, and the status names say 'organization' because
+    that level came first. A team's idea reads 'team'.
+    """
+    if idea is not None and idea.submission_context == Idea.SubmissionContext.TEAM:
+        return text.replace('Organization', 'Team').replace('organization', 'team')
+    return text
+
+
 def summarize(
     user, idea: Idea, *, capabilities: 'ActionCapabilities | None' = None
 ) -> IdeaStateSummary:
@@ -430,12 +445,12 @@ def summarize(
 
     return IdeaStateSummary(
         status=idea.status,
-        label=friendly_label(idea.status),
-        short_label=SHORT_LABELS.get(idea.status, friendly_label(idea.status)),
+        label=_for_level(friendly_label(idea.status), idea),
+        short_label=_for_level(SHORT_LABELS.get(idea.status, friendly_label(idea.status)), idea),
         tone=tone_for(idea.status),
         stage=STATUS_STAGE.get(idea.status, Stage.CREATED),
         primary_action=action,
-        primary_action_label=ACTION_LABELS.get(action, ''),
+        primary_action_label=_for_level(ACTION_LABELS.get(action, ''), idea),
         is_locked=idea.is_locked,
         is_terminal=is_terminal(idea.status),
     )

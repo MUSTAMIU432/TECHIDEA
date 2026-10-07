@@ -102,6 +102,19 @@ def _record(
     )
 
 
+def record_event(
+    actor: User | None,
+    action: str,
+    target_type: str,
+    target_id: object,
+    label: str = '',
+    *,
+    metadata: dict | None = None,
+) -> AdminAuditEntry:
+    """Write one audit entry for an operation owned by another app (review teams)."""
+    return _record(actor, action, _Target(target_type, target_id, label), metadata=metadata or {})
+
+
 def _authorize(user: User | None, permission: str, action: str) -> User:
     try:
         return authorization.require_admin(user, permission)

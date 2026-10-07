@@ -18,6 +18,13 @@ is identical. An invitation is:
 - **Expiring.** `expires_at`, checked on acceptance, not only on issue.
 - **Revocable.** `PENDING -> REVOKED`, and a revoked invitation is refused on
   the same path as an expired one.
+- **Declinable, by the recipient only.** `PENDING -> DECLINED`, with the
+  decliner and the moment recorded. A decline is the recipient's own act and
+  only theirs: it is bound to the account whose address matches, the same rule
+  acceptance has, because a decline is as much a statement about the invitation
+  as an acceptance is. Declining creates **no membership and deactivates none** -
+  there is nothing to undo, because nothing was ever written; what it does is
+  close the invitation, which is the honest record of a decision somebody made.
 
 `scope` says which of the two tenants it names, and `clean` enforces that the
 named tenant matches: exactly one of `organization`/`team` is set, and it is the
@@ -44,6 +51,7 @@ INVITATION_STATUS_CHOICES = (
     ('accepted', 'Accepted'),
     ('expired', 'Expired'),
     ('revoked', 'Revoked'),
+    ('declined', 'Declined'),
 )
 
 INVITATION_SCOPE_CHOICES = (
@@ -65,7 +73,7 @@ class Invitation(models.Model):
     """
 
     class Status(models.TextChoices):
-        (PENDING, ACCEPTED, EXPIRED, REVOKED) = INVITATION_STATUS_CHOICES
+        (PENDING, ACCEPTED, EXPIRED, REVOKED, DECLINED) = INVITATION_STATUS_CHOICES
 
     class Scope(models.TextChoices):
         (ORGANIZATION, TEAM) = INVITATION_SCOPE_CHOICES
@@ -119,6 +127,19 @@ class Invitation(models.Model):
     )
     accepted_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    # Who declined, and when. Recorded for the same reason `accepted_by` is: a
+    # declined invitation is a decision somebody made, and an inviter asking
+    # "did they turn it down, or did the link rot?" deserves an answer. It is
+    # `PROTECT` like the other actor columns - a decision should not be
+    # rewritten by an account being deactivated.
+    declined_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='declined_invitations',
+        null=True,
+        blank=True,
+    )
+    declined_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -154,6 +175,15 @@ class Invitation(models.Model):
                     | ~Q(status='accepted')
                 ),
                 name='invitation_accepted_iff_recorded',
+            ),
+            # The same pairing for a decline, so `declined` can never mean
+            # "somebody said no" without saying who and when.
+            models.CheckConstraint(
+                condition=(
+                    Q(status='declined', declined_by__isnull=False, declined_at__isnull=False)
+                    | ~Q(status='declined')
+                ),
+                name='invitation_declined_iff_recorded',
             ),
         ]
         indexes: ClassVar[list[models.Index]] = [

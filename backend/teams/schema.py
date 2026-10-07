@@ -190,6 +190,29 @@ class Mutation:
             return TeamMembershipPayload(success=False, message=exc.message, field=exc.field)
         return TeamMembershipPayload(success=True, message='You have left the team.')
 
+    @strawberry.mutation(
+        description=(
+            "Make a member one of the team's reviewers, or take that back. Only a "
+            "member who can manage the team's members may do it. Reviewers verify "
+            "the team's ideas, or send them back for changes or more documents."
+        )
+    )
+    def set_team_reviewer(
+        self,
+        info: strawberry.Info,
+        team_id: strawberry.ID,
+        user_id: strawberry.ID,
+        is_reviewer: bool,
+    ) -> TeamMembershipPayload:
+        try:
+            services.set_member_reviewer(info.context.user, team_id, user_id, is_reviewer)
+        except services.TeamError as exc:
+            return TeamMembershipPayload(success=False, message=exc.message, field=exc.field)
+        return TeamMembershipPayload(
+            success=True,
+            message='Reviewer added.' if is_reviewer else 'Reviewer removed.',
+        )
+
 
 def _as_int(value: object) -> int:
     try:

@@ -299,7 +299,7 @@ class TestIdeas:
         ('filters', 'expected'),
         [
             ({'status': 'APPROVED'}, {'Public invoice run'}),
-            ({'visibility': 'PRIVATE'}, {PRIVATE_TITLE}),
+            ({'status': 'DRAFT'}, {PRIVATE_TITLE}),
             ({'search': 'payroll'}, {'Organization payroll'}),
             ({'search': 'author@acme'}, None),  # every idea: author email matches
         ],
@@ -362,16 +362,16 @@ class TestIdeas:
 class TestPrivateContentIsRedacted:
     """An administrator with ACCESS_CONSOLE alone sees metadata, never non-public content."""
 
-    def test_titles_of_non_public_ideas_are_withheld_in_the_list(self, gql, world):
+    def test_every_title_is_withheld_in_the_list(self, gql, world):
+        """
+        There is no public audience, so no idea is one that a signed-in member could
+        read anyway - which is the only thing that ever justified showing a title.
+        """
         page = gql(IDEAS, user=world['limited_admin'])['adminIdeas']
 
-        by_visibility = {item['visibility']: item for item in page['items']}
         assert page['pageInfo']['totalCount'] == 4
-        assert by_visibility['PUBLIC']['title'] == 'Public invoice run'
-        assert by_visibility['PUBLIC']['contentRestricted'] is False
-        assert by_visibility['PRIVATE']['title'] is None
-        assert by_visibility['PRIVATE']['contentRestricted'] is True
-        assert by_visibility['ORGANIZATION']['title'] is None
+        assert all(item['title'] is None for item in page['items'])
+        assert all(item['contentRestricted'] is True for item in page['items'])
 
     def test_search_cannot_confirm_a_restricted_title(self, gql, world):
         page = gql(IDEAS, {'filters': {'search': 'salary'}}, user=world['limited_admin'])
@@ -396,12 +396,12 @@ class TestPrivateContentIsRedacted:
         assert restricted['contentRestricted'] is True
         assert len(detail['transitions']) == 5
 
-    def test_a_public_idea_is_readable_but_its_evidence_and_feedback_are_not(self, gql, world):
+    def test_a_platform_approved_idea_still_withholds_its_content_and_feedback(self, gql, world):
         detail = gql(IDEA, {'id': world['public_idea'].pk}, user=world['limited_admin'])[
             'adminIdea'
         ]
-        assert detail['title'] == 'Public invoice run'
-        assert detail['content']['description']
+        assert detail['title'] is None
+        assert detail['content'] is None
         assert detail['attachments'] == []
         assert _platform_round(detail['reviews'])['feedback'] is None
 
@@ -412,7 +412,7 @@ class TestPrivateContentIsRedacted:
         )['adminOverview']
         titles = {item['ideaId']: item['ideaTitle'] for item in overview['recentActivity']}
         assert titles[str(world['open_idea'].pk)] is None
-        assert titles[str(world['public_idea'].pk)] == 'Public invoice run'
+        assert titles[str(world['public_idea'].pk)] is None
 
     def test_review_snapshots_are_withheld(self, gql, world):
         # `.get()` would be ambiguous now: an idea this old has both an

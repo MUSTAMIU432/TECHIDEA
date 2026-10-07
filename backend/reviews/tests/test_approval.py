@@ -35,6 +35,7 @@ from reviews.models import Review, ReviewCriterionAssessment
 from reviews.tests.platform import (
     grant_platform_reviewer,
     make_submitted,
+    release_proposal,
     revoke_platform_reviewer,
 )
 
@@ -180,8 +181,11 @@ class TestApproval:
         services.complete_review(world['reviewer'], approve(open_review))
 
         assert {model._meta.label for model in apps.get_models()} == before
-        assert not any('opportunit' in label.lower() for label in before)
-        assert not any('proposal' in label.lower() for label in before)
+        # Approval opens nothing in the delivery lifecycle: an opportunity exists only
+        # after the owner's go-ahead, and only by someone creating it.
+        from automation.models import AutomationOpportunity
+
+        assert not AutomationOpportunity.objects.exists()
         # Approval stops at APPROVED; nothing moves the idea further.
         assert Idea.objects.get(pk=world['idea'].pk).status == Idea.Status.APPROVED
 
@@ -348,6 +352,7 @@ class TestState:
     def test_the_hand_off_reaches_automation_only_after_the_go_ahead(self, world, open_review):
         """The Sprint 4 boundary: go-ahead, then the automation-opportunity move."""
         services.complete_review(world['reviewer'], approve(open_review))
+        release_proposal(world['idea'])
         ready = go_ahead.confirm_go_ahead(world['author'], world['idea'].pk)
 
         assert ready.status == Idea.Status.READY_FOR_IMPLEMENTATION

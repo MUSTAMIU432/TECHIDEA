@@ -242,6 +242,7 @@ def invite_to_organization(
             invited_by=active_user,
         )
         _send_invitation_email(invitation, raw_token)
+        _notify_recipient(invitation.pk)
 
     logger.info(
         'Organization invitation created (organization=%s, invitation=%s, role=%s).',
@@ -313,6 +314,7 @@ def invite_to_team(
             invited_by=active_user,
         )
         _send_invitation_email(invitation, raw_token)
+        _notify_recipient(invitation.pk)
 
     logger.info(
         'Team invitation created (team=%s, invitation=%s, role=%s).',
@@ -393,6 +395,107 @@ def revoke_invitation(user: User | None, invitation_id: object) -> Invitation:
     return invitation
 
 
+def decline_invitation(user: User | None, raw_token: str) -> Invitation:
+    """
+    Decline an invitation addressed to `user`.
+
+    The recipient's own act and only theirs. The address rule is the same one
+    acceptance has: a signed-in account whose address is not the invitation's is
+    refused rather than allowed to decline somebody else's invitation, because
+    a decline is a statement *about* the invitation - "I do not want this" - and
+    letting any account write one would turn the field into a way of denying
+    another person their place.
+
+    **Nothing is created and nothing is deactivated.** A membership only ever
+    comes from acceptance, so there is no membership row to undo here; what the
+    decline writes is the invitation's own terminal state, with who and when.
+    That is the whole record, and it is the record an inviter is asking for when
+    they wonder whether a link went stale or was turned down.
+
+    Refuses anything that is not `PENDING`, with the same message acceptance
+    uses for a spent token, so declining cannot be used to probe the state of an
+    invitation nobody can act on. After the commit the inviter is told, and
+    never inside this transaction - the same rule as every other notification.
+    """
+    active_user = _require_active_user(user)
+
+    if not raw_token or not str(raw_token).strip():
+        raise InvitationError('This invitation is not valid any more.')
+
+    invitation = get_invitation_for_token(raw_token)
+    if invitation is None or invitation.status != Invitation.Status.PENDING:
+        raise InvitationError('This invitation is not valid any more.')
+
+    if invitation.expires_at <= timezone.now():
+        # Marked expired in its own transaction, exactly as acceptance does, so a
+        # link that simply rotted does not keep saying "waiting to be accepted"
+        # in somebody's list - and so the two agree about what a stale link is.
+        Invitation.objects.filter(pk=invitation.pk, status=Invitation.Status.PENDING).update(
+            status=Invitation.Status.EXPIRED
+        )
+        raise InvitationError('This invitation has expired.')
+
+    # Refuse *before* the claim, exactly as acceptance does: an address mismatch
+    # must not be able to burn the invitation for its real recipient.
+    if invitation.email != active_user.email:
+        raise InvitationError(
+            'This invitation was sent to a different email address.',
+            reason='forbidden',
+        )
+
+    with transaction.atomic():
+        claimed = (
+            Invitation.objects.filter(pk=invitation.pk, status=Invitation.Status.PENDING)
+            .filter(email=active_user.email)
+            .update(
+                status=Invitation.Status.DECLINED,
+                declined_by=active_user,
+                declined_at=timezone.now(),
+            )
+        )
+        if not claimed:
+            # Accepted, revoked or expired between the read and here.
+            raise InvitationError('This invitation is not valid any more.')
+        invitation.refresh_from_db()
+
+    _notify_inviter_of_decline(invitation.pk)
+
+    logger.info('Invitation declined (invitation=%s, actor=%s).', invitation.pk, active_user.pk)
+    return invitation
+
+
+def _notify_inviter_of_decline(invitation_id: int) -> None:
+    """
+    Tell the inviter the invitation was turned down.
+
+    Same reasoning as `_notify_inviter`, and the same reason it is not the
+    recipient's notification: an outstanding invitation sits in the inviter's
+    list looking live, and a decline is one of only two things that ends it.
+    Before this existed, a decline had no notification at all and the inviter
+    learned about it by noticing.
+    """
+    from notifications import services as notification_services
+
+    invitation = (
+        Invitation.objects.filter(pk=invitation_id)
+        .select_related('invited_by', 'declined_by', 'organization', 'team')
+        .first()
+    )
+    if invitation is None or invitation.invited_by_id == invitation.declined_by_id:
+        return
+
+    notification_services.deliver(
+        recipients=invitation.invited_by,
+        kind='invitation.declined',
+        title=(
+            f'{invitation.declined_by.first_name} declined the invitation to '
+            f'{invitation.tenant_label}'
+        ),
+        body='Nothing was changed. You can send another invitation if you like.',
+        send_email=True,
+    )
+
+
 def _normalize_pk(value: object) -> int:
     try:
         return int(str(value))
@@ -460,6 +563,50 @@ def accept_invitation(user: User | None, raw_token: str) -> Invitation:
             status=Invitation.Status.EXPIRED
         )
         raise InvitationError('This invitation has expired.') from None
+
+
+def _notify_recipient(invitation_id: int) -> None:
+    """
+    Tell a recipient who already has an account that they have been invited.
+
+    **Only when the address belongs to an account.** An invitation is addressed to
+    an email, and most of the time that address has never signed in - the email
+    *is* the notification for those. But when the recipient already has an
+    account, the invitation should also be waiting in their app: a person with a
+    session open has no reason to be told twice, and a signed-out reader who is
+    told nothing in-app cannot tell an invitation they declined from one that
+    quietly expired.
+
+    No token, and no accept link. `acceptInvitation` needs the plaintext token,
+    which exists in exactly one place - the invitation email - because only its
+    digest is stored. So this notification says what happened and where to look,
+    and the link in it is the notifications list. Fabricating a link that cannot
+    work would be worse than not having one.
+    """
+    from notifications import services as notification_services
+
+    invitation = (
+        Invitation.objects.filter(pk=invitation_id)
+        .select_related('organization', 'team', 'invited_by')
+        .first()
+    )
+    if invitation is None or invitation.status != Invitation.Status.PENDING:
+        return
+
+    recipient = User.objects.filter(email=invitation.email, is_active=True).first()
+    if recipient is None or recipient.pk == invitation.invited_by_id:
+        return
+
+    tenant_kind = 'organization' if invitation.scope == Invitation.Scope.ORGANIZATION else 'team'
+    notification_services.deliver(
+        recipients=recipient,
+        kind='invitation.received',
+        title=f'You have been invited to join {invitation.tenant_label}',
+        body=(
+            f'{invitation.invited_by.first_name} invited you to this {tenant_kind} as '
+            f'{invitation.role_slug}. Open the link in your email to accept or decline.'
+        ),
+    )
 
 
 def _notify_inviter(invitation_id: int) -> None:

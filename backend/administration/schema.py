@@ -31,6 +31,14 @@ that looks like an empty answer. Review feedback, criteria and snapshots are
 behind `INSPECT_IDEA_CONTENT` whatever the visibility - review history is not
 public because an idea is (`reviews.selectors.list_idea_reviews`).
 
+The same permission also gates a **private message body**, for the same reason
+it gates review feedback: it is the one place on the platform where a person
+wrote something meant for named people rather than for the platform. Everything
+else the console reports about teams, invitations, conversations and
+notifications is metadata about the platform itself, and is under
+`ACCESS_CONSOLE` alone. Nothing anywhere in this schema exposes an invitation
+token: only its digest is stored, so there is no field to redact.
+
 No type here carries a password, a hash, a token, a session or an external
 identity's subject. `signInMethods` names providers, and "password" only as
 the fact that one is set.
@@ -56,10 +64,14 @@ from ideas.schema import (
     PageInfo,
 )
 from identity.models import User
+from invitations.models import Invitation
+from messaging.models import Message, MessageThread
+from notifications.models import Notification
 from organizations.models import Membership, Organization, Role
 from reviews import eligibility
 from reviews.models import Review
 from reviews.schema import CriterionAssessmentType, ReviewDecision, ReviewScope
+from teams.models import Team, TeamMembership, TeamRole
 
 AdminAuditAction = strawberry.enum(AdminAuditEntry.Action, name='AdminAuditAction')
 AdminAuditResult = strawberry.enum(AdminAuditEntry.Result, name='AdminAuditResult')
@@ -95,6 +107,9 @@ class AdminCapabilitiesType:
     can_manage_user_accounts: bool
     can_manage_organization_roles: bool
     can_manage_categories: bool
+    can_assign_platform_reviewers: bool
+    can_manage_reviewers: bool
+    can_release_proposals: bool
 
     @staticmethod
     def from_capabilities(capabilities: AdminCapabilities) -> 'AdminCapabilitiesType':
@@ -104,6 +119,9 @@ class AdminCapabilitiesType:
             can_manage_user_accounts=capabilities.can_manage_user_accounts,
             can_manage_organization_roles=capabilities.can_manage_organization_roles,
             can_manage_categories=capabilities.can_manage_categories,
+            can_assign_platform_reviewers=capabilities.can_assign_platform_reviewers,
+            can_manage_reviewers=capabilities.can_manage_reviewers,
+            can_release_proposals=capabilities.can_release_proposals,
         )
 
 
@@ -789,6 +807,315 @@ class AdminCategoryType:
         )
 
 
+# --- teams, invitations, messages, notifications ------------------------------------
+#
+# Four read-only surfaces over the collaboration set, in the same shape as the
+# ones above: paged, filtered in the database, authorized by
+# `administration.selectors` before anything is read.
+#
+# **What is metadata and what is content.** A team's name, an invitation's
+# address, who is in a conversation and when it was last active are facts about
+# the platform, and they are under `ACCESS_CONSOLE`. A **message body** is the
+# one thing here a person wrote for named people rather than for the platform, so
+# it is behind `INSPECT_IDEA_CONTENT` like idea content is, and the types say
+# `contentRestricted` rather than returning an empty body that would read as an
+# empty message. Idea titles follow the rule the rest of the console uses: every
+# title under that permission, PUBLIC ideas' titles otherwise.
+
+
+def _idea_title(idea: Idea | None, capabilities: AdminCapabilities) -> str | None:
+    """One idea's title, or null when the caller may not read it."""
+    if idea is None:
+        return None
+    return idea.title if authorization.may_see_idea_content(capabilities, idea.visibility) else None
+
+
+@strawberry.type(description='A team, as the console lists it.')
+class AdminTeamType:
+    id: strawberry.ID
+    name: str
+    slug: str
+    description: str
+    owner: AdminPersonType
+    member_count: int
+    inactive_member_count: int
+    idea_count: int
+    invitation_count: int
+    created_at: str
+
+    @staticmethod
+    def fields_from(team: Team) -> dict:
+        return {
+            'id': strawberry.ID(str(team.pk)),
+            'name': team.name,
+            'slug': team.slug,
+            'description': team.description,
+            'owner': AdminPersonType.from_model(team.owner),
+            'member_count': team.member_count,
+            'inactive_member_count': team.inactive_member_count,
+            'idea_count': team.idea_count,
+            'invitation_count': team.invitation_count,
+            'created_at': team.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def from_model(team: Team) -> 'AdminTeamType':
+        return AdminTeamType(**AdminTeamType.fields_from(team))
+
+
+@strawberry.type(description='One page of teams.')
+class AdminTeamPage:
+    items: list[AdminTeamType]
+    page_info: PageInfo
+
+
+@strawberry.type(description="One of a team's roles and how many active members hold it.")
+class AdminTeamRoleType:
+    id: strawberry.ID
+    name: str
+    slug: str
+    description: str
+    is_system: bool
+    permissions: list[str]
+    holder_count: int
+
+    @staticmethod
+    def from_model(role: TeamRole) -> 'AdminTeamRoleType':
+        return AdminTeamRoleType(
+            id=strawberry.ID(str(role.pk)),
+            name=role.name,
+            slug=role.slug,
+            description=role.description,
+            is_system=role.is_system,
+            permissions=[item.permission.code for item in role.role_permissions.all()],
+            holder_count=role.holder_count,
+        )
+
+
+@strawberry.type(description="One person's place in a team, active or not, with its roles.")
+class AdminTeamMemberType:
+    id: strawberry.ID
+    status: str
+    joined_at: str
+    user: AdminPersonType
+    user_is_active: bool
+    roles: list[AdminRoleRefType]
+
+    @staticmethod
+    def from_model(membership: TeamMembership) -> 'AdminTeamMemberType':
+        return AdminTeamMemberType(
+            id=strawberry.ID(str(membership.pk)),
+            status=membership.status,
+            joined_at=membership.created_at.isoformat(),
+            user=AdminPersonType.from_model(membership.user),
+            user_is_active=membership.user.is_active,
+            roles=[
+                AdminRoleRefType.from_model(item.role) for item in membership.membership_roles.all()
+            ],
+        )
+
+
+@strawberry.type(
+    description='One team in detail, with its roles and its full membership. The membership '
+    'is here rather than behind a second query because a team is a handful of people by '
+    'definition - it is a collaboration boundary, not a tenant.'
+)
+class AdminTeamDetailType(AdminTeamType):
+    roles: list[AdminTeamRoleType]
+    members: list[AdminTeamMemberType]
+    ideas_by_status: list[AdminStatusCountType]
+
+
+@strawberry.type(
+    description='One invitation. Carries no token: only the digest is stored, so there is '
+    'nothing here that could be replayed.'
+)
+class AdminInvitationType:
+    id: strawberry.ID
+    scope: str
+    status: str
+    is_open: bool = strawberry.field(
+        description='Pending and not past its expiry - whether this one could still be accepted.'
+    )
+    email: str
+    role_slug: str
+    tenant_id: strawberry.ID | None
+    tenant_name: str
+    invited_by: AdminPersonType
+    accepted_by: AdminPersonType | None
+    created_at: str
+    expires_at: str
+    accepted_at: str | None
+
+    @staticmethod
+    def from_model(invitation: Invitation) -> 'AdminInvitationType':
+        tenant = (
+            invitation.organization_id
+            if invitation.scope == Invitation.Scope.ORGANIZATION
+            else invitation.team_id
+        )
+        return AdminInvitationType(
+            id=strawberry.ID(str(invitation.pk)),
+            scope=invitation.scope,
+            status=invitation.status,
+            is_open=invitation.is_open,
+            email=invitation.email,
+            role_slug=invitation.role_slug,
+            tenant_id=strawberry.ID(str(tenant)) if tenant else None,
+            tenant_name=invitation.tenant_label,
+            invited_by=AdminPersonType.from_model(invitation.invited_by),
+            accepted_by=(
+                AdminPersonType.from_model(invitation.accepted_by)
+                if invitation.accepted_by_id
+                else None
+            ),
+            created_at=invitation.created_at.isoformat(),
+            expires_at=invitation.expires_at.isoformat(),
+            accepted_at=_iso(invitation.accepted_at),
+        )
+
+
+@strawberry.type(description='One page of invitations across the platform.')
+class AdminInvitationPage:
+    items: list[AdminInvitationType]
+    page_info: PageInfo
+
+
+@strawberry.type(
+    description='Something the platform told somebody. Written by the platform, never by a user.'
+)
+class AdminNotificationType:
+    id: strawberry.ID
+    kind: str
+    title: str
+    body: str
+    recipient: AdminPersonType
+    is_read: bool
+    idea_id: strawberry.ID | None
+    idea_title: str | None
+    report_id: strawberry.ID | None
+    created_at: str
+
+    @staticmethod
+    def from_model(
+        notification: Notification, capabilities: AdminCapabilities
+    ) -> 'AdminNotificationType':
+        return AdminNotificationType(
+            id=strawberry.ID(str(notification.pk)),
+            kind=notification.kind,
+            title=notification.title,
+            body=notification.body,
+            recipient=AdminPersonType.from_model(notification.user),
+            is_read=notification.is_read_at is not None,
+            idea_id=strawberry.ID(str(notification.idea_id)) if notification.idea_id else None,
+            idea_title=_idea_title(notification.idea, capabilities),
+            report_id=(
+                strawberry.ID(str(notification.report_id)) if notification.report_id else None
+            ),
+            created_at=notification.created_at.isoformat(),
+        )
+
+
+@strawberry.type(description='One page of notifications across the platform.')
+class AdminNotificationPage:
+    items: list[AdminNotificationType]
+    page_info: PageInfo
+
+
+@strawberry.type(description='A conversation, as the console lists it. Metadata only.')
+class AdminMessageThreadType:
+    id: strawberry.ID
+    subject: str | None = strawberry.field(
+        description='Null when the thread is anchored to an idea the caller may not read: '
+        "`start_thread` defaults the subject to that idea's title, so a thread subject can "
+        'be an idea title.'
+    )
+    idea_id: strawberry.ID | None
+    idea_title: str | None = strawberry.field(
+        description='Null when the idea is not PUBLIC and the administrator does not hold '
+        'the content-inspection permission, or when the thread is not anchored to one.'
+    )
+    started_by: AdminPersonType
+    participant_count: int
+    message_count: int
+    stale_participant_count: int = strawberry.field(
+        description='Participants who have not read the latest message. Not an unread count: '
+        'that is per reader, and the console has no reader.'
+    )
+    latest_message_at: str
+    created_at: str
+    content_restricted: bool = strawberry.field(
+        description="True when the caller may not read message bodies. The conversation's "
+        'existence and shape are still shown.'
+    )
+
+    @staticmethod
+    def fields_from(thread: MessageThread, capabilities: AdminCapabilities) -> dict:
+        # The subject and the title are the same leak twice: `messaging.services
+        # .start_thread` defaults a thread's subject to the idea's title, so a
+        # subject can be a private idea's title. Redacted together, because
+        # redacting one and not the other would leave the answer in the other.
+        idea_readable = thread.idea is None or authorization.may_see_idea_content(
+            capabilities, thread.idea.visibility
+        )
+        return {
+            'id': strawberry.ID(str(thread.pk)),
+            'subject': thread.subject if idea_readable else None,
+            'idea_id': strawberry.ID(str(thread.idea_id)) if thread.idea_id else None,
+            'idea_title': _idea_title(thread.idea, capabilities),
+            'started_by': AdminPersonType.from_model(thread.started_by),
+            'participant_count': thread.participant_count,
+            'message_count': thread.message_count,
+            'stale_participant_count': thread.stale_participant_count,
+            'latest_message_at': thread.latest_message_at.isoformat(),
+            'created_at': thread.created_at.isoformat(),
+            'content_restricted': not capabilities.can_inspect_idea_content,
+        }
+
+    @staticmethod
+    def from_model(
+        thread: MessageThread, capabilities: AdminCapabilities
+    ) -> 'AdminMessageThreadType':
+        return AdminMessageThreadType(**AdminMessageThreadType.fields_from(thread, capabilities))
+
+
+@strawberry.type(description='One page of conversations across the platform.')
+class AdminMessageThreadPage:
+    items: list[AdminMessageThreadType]
+    page_info: PageInfo
+
+
+@strawberry.type(description='One conversation in detail, with its participants.')
+class AdminMessageThreadDetailType(AdminMessageThreadType):
+    participants: list[AdminPersonType]
+
+
+@strawberry.type(description='One message. The body is content, and may be withheld.')
+class AdminMessageType:
+    id: strawberry.ID
+    sender: AdminPersonType
+    body: str | None = strawberry.field(
+        description='Null when the caller lacks the content-inspection permission.'
+    )
+    created_at: str
+
+    @staticmethod
+    def from_model(message: Message, capabilities: AdminCapabilities) -> 'AdminMessageType':
+        return AdminMessageType(
+            id=strawberry.ID(str(message.pk)),
+            sender=AdminPersonType.from_model(message.sender),
+            body=message.body if capabilities.can_inspect_idea_content else None,
+            created_at=message.created_at.isoformat(),
+        )
+
+
+@strawberry.type(description="One page of a conversation's messages.")
+class AdminMessagePage:
+    items: list[AdminMessageType]
+    page_info: PageInfo
+    content_restricted: bool
+
+
 # --- queries -----------------------------------------------------------------------
 
 
@@ -1028,6 +1355,170 @@ class Query:
         )
         return AdminAuditPage(
             items=[AdminAuditEntryType.from_model(entry) for entry in page.items],
+            page_info=_page_info(page),
+        )
+
+    # --- teams, invitations, messages, notifications ---------------------------------
+    #
+    # Read-only. The collaboration domains have no administrative operation - a
+    # membership is only ever created by accepting an invitation, a message
+    # belongs to its participants, and neither is the console's to change - so
+    # these four fields are the whole of what the console does with them.
+
+    @strawberry.field(
+        description='Teams across the platform, by name. Empty for a non-administrator.'
+    )
+    def admin_teams(
+        self,
+        info: strawberry.Info,
+        search: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminTeamPage:
+        page = selectors.list_teams(info.context.user, search, offset=offset, limit=limit)
+        return AdminTeamPage(
+            items=[AdminTeamType.from_model(team) for team in page.items],
+            page_info=_page_info(page),
+        )
+
+    @strawberry.field(
+        description='One team with its roles and its full membership, active and inactive. '
+        'Null for a non-administrator.'
+    )
+    def admin_team(self, info: strawberry.Info, id: strawberry.ID) -> AdminTeamDetailType | None:
+        detail = selectors.get_team(info.context.user, id)
+        if detail is None:
+            return None
+        return AdminTeamDetailType(
+            **AdminTeamType.fields_from(detail.team),
+            roles=[AdminTeamRoleType.from_model(role) for role in detail.roles],
+            members=[AdminTeamMemberType.from_model(member) for member in detail.members],
+            ideas_by_status=_status_counts(detail.ideas_by_status),
+        )
+
+    @strawberry.field(
+        description="One team's invitations, newest first. Empty for a non-administrator."
+    )
+    def admin_team_invitations(
+        self,
+        info: strawberry.Info,
+        team_id: strawberry.ID,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminInvitationPage:
+        page = selectors.list_team_invitations(
+            info.context.user, team_id, offset=offset, limit=limit
+        )
+        return AdminInvitationPage(
+            items=[AdminInvitationType.from_model(item) for item in page.items],
+            page_info=_page_info(page),
+        )
+
+    @strawberry.field(description='Invitations across the platform, newest first.')
+    def admin_invitations(
+        self,
+        info: strawberry.Info,
+        scope: str | None = None,
+        status: str | None = None,
+        organization_id: strawberry.ID | None = None,
+        team_id: strawberry.ID | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminInvitationPage:
+        page = selectors.list_invitations(
+            info.context.user,
+            selectors.InvitationFilters(
+                scope=scope,
+                status=status,
+                organization_id=organization_id,
+                team_id=team_id,
+            ),
+            offset=offset,
+            limit=limit,
+        )
+        return AdminInvitationPage(
+            items=[AdminInvitationType.from_model(item) for item in page.items],
+            page_info=_page_info(page),
+        )
+
+    @strawberry.field(
+        description='Private conversations across the platform, most recently active first. '
+        'Message bodies are not returned here, and never without the content-inspection '
+        'permission.'
+    )
+    def admin_message_threads(
+        self,
+        info: strawberry.Info,
+        search: str | None = None,
+        anchored: bool | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminMessageThreadPage:
+        listing = selectors.list_message_threads(
+            info.context.user, search, anchored=anchored, offset=offset, limit=limit
+        )
+        return AdminMessageThreadPage(
+            items=[
+                AdminMessageThreadType.from_model(thread, listing.capabilities)
+                for thread in listing.page.items
+            ],
+            page_info=_page_info(listing.page),
+        )
+
+    @strawberry.field(
+        description='One conversation and its participants. Null for a non-administrator.'
+    )
+    def admin_message_thread(
+        self, info: strawberry.Info, id: strawberry.ID
+    ) -> AdminMessageThreadDetailType | None:
+        detail = selectors.get_message_thread(info.context.user, id)
+        if detail is None:
+            return None
+        return AdminMessageThreadDetailType(
+            **AdminMessageThreadType.fields_from(detail.thread, detail.capabilities),
+            participants=[AdminPersonType.from_model(link.user) for link in detail.participants],
+        )
+
+    @strawberry.field(
+        description="One conversation's messages, oldest first. Bodies need the "
+        'content-inspection permission; without it they are null and the page says so.'
+    )
+    def admin_thread_messages(
+        self,
+        info: strawberry.Info,
+        thread_id: strawberry.ID,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminMessagePage:
+        page, capabilities = selectors.list_thread_messages(
+            info.context.user, thread_id, offset=offset, limit=limit
+        )
+        return AdminMessagePage(
+            items=[AdminMessageType.from_model(item, capabilities) for item in page.items],
+            page_info=_page_info(page),
+            content_restricted=not capabilities.can_inspect_idea_content,
+        )
+
+    @strawberry.field(
+        description='Every notification the platform has sent, newest first. These are the '
+        "platform's own words; nothing a user wrote is stored here."
+    )
+    def admin_notifications(
+        self,
+        info: strawberry.Info,
+        kind: str | None = None,
+        unread_only: bool = False,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminNotificationPage:
+        page, capabilities = selectors.list_notifications(
+            info.context.user,
+            selectors.NotificationFilters(kind=kind, unread_only=unread_only),
+            offset=offset,
+            limit=limit,
+        )
+        return AdminNotificationPage(
+            items=[AdminNotificationType.from_model(item, capabilities) for item in page.items],
             page_info=_page_info(page),
         )
 

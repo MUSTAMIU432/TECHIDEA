@@ -198,7 +198,7 @@ def create_complete_via_api(gql, ada, **overrides):
     return result
 
 
-def create_via_api(gql, ada, **overrides):
+def create_via_api(gql, ada, *, expect_success=True, **overrides):
     result = run(
         gql,
         CREATE_IDEA,
@@ -212,7 +212,8 @@ def create_via_api(gql, ada, **overrides):
         },
         bearer=ada['token'],
     )
-    assert result['success'] is True, result
+    if expect_success:
+        assert result['success'] is True, result
     return result
 
 
@@ -249,10 +250,12 @@ class TestCreateIdeaMutation:
         assert idea.author_id == ada['user'].pk
         assert idea.organization_id == ada['organization'].pk
 
-    def test_the_new_idea_is_private_by_default(self, gql, ada):
+    def test_the_new_idea_gets_its_levels_audience(self, gql, ada):
         result = create_via_api(gql, ada)
 
-        assert result['idea']['visibility'] == 'PRIVATE'
+        # An organization idea is seen by its organization (once it is submitted;
+        # as a draft it is the author's alone).
+        assert result['idea']['visibility'] == 'ORGANIZATION'
 
     def test_the_payload_reports_the_state_the_frontend_renders(self, gql, ada):
         result = create_via_api(gql, ada)
@@ -262,10 +265,11 @@ class TestCreateIdeaMutation:
         assert result['idea']['authorId'] == str(ada['user'].pk)
         assert result['idea']['organizationId'] == str(ada['organization'].pk)
 
-    def test_a_chosen_visibility_is_honoured(self, gql, ada):
-        result = create_via_api(gql, ada, visibility='ORGANIZATION')
+    def test_naming_another_audience_is_refused(self, gql, ada):
+        result = create_via_api(gql, ada, visibility='PUBLIC', expect_success=False)
 
-        assert result['idea']['visibility'] == 'ORGANIZATION'
+        assert result['success'] is False
+        assert result['field'] == 'visibility'
 
     def test_the_reserved_department_visibility_is_refused(self, gql, ada):
         result = run(
@@ -471,7 +475,7 @@ class TestUpdateIdeaMutation:
             status=Membership.Status.ACTIVE,
         )
         token = sign_in(client, colleague)
-        theirs = create_via_api(gql, ada, visibility='PRIVATE')['idea']
+        theirs = create_via_api(gql, ada)['idea']
 
         unknown = run(
             gql,
@@ -653,8 +657,8 @@ class TestQueries:
 
         assert result['id'] == created['id']
 
-    def test_a_colleague_does_not_see_a_private_idea(self, gql, client, ada):
-        created = create_via_api(gql, ada, visibility='PRIVATE')['idea']
+    def test_a_colleague_does_not_see_a_draft(self, gql, client, ada):
+        created = create_via_api(gql, ada)['idea']
         colleague = make_user('colleague@example.com')
         Membership.objects.create(
             user=colleague,
@@ -667,6 +671,12 @@ class TestQueries:
 
     def test_a_colleague_sees_an_organization_idea(self, gql, client, ada):
         created = create_via_api(gql, ada, visibility='ORGANIZATION')['idea']
+        # A draft is its author's alone; the audience applies once it is submitted.
+        from django.utils import timezone
+
+        Idea.objects.filter(pk=created['id']).update(
+            status=Idea.Status.SUBMITTED, submitted_at=timezone.now()
+        )
         colleague = make_user('colleague@example.com')
         Membership.objects.create(
             user=colleague,

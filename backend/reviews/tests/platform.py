@@ -138,8 +138,11 @@ def submit(idea):
     """
     from ideas.services import submit_idea, submit_to_platform
 
-    if idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
-        # An organization idea is validated by its organization before the
+    if idea.submission_context in (
+        Idea.SubmissionContext.ORGANIZATION,
+        Idea.SubmissionContext.TEAM,
+    ):
+        # An organization or team idea is validated by its organization before the
         # platform ever sees it, so "submitted to the platform" is three moves:
         # to the organization, confirmed by an organization reviewer, then on.
         # Walking all three is the point - a fixture that skipped the
@@ -170,6 +173,37 @@ def submit(idea):
     return idea
 
 
+def team_reviewer_for(team):
+    """
+    An account holding the team's Reviewer role, created once per team.
+
+    Through the *team* mechanism (`teams.TeamMembershipRole`), the counterpart of
+    `organization_reviewer_for`.
+    """
+    from identity.models import User
+    from teams.models import TeamMembership, TeamMembershipRole, TeamRole
+    from teams.services import REVIEWER_ROLE_SLUG
+
+    email = f'team-reviewer+{team.pk}@tests.example'
+    user = User.objects.filter(email=email).first()
+    if user is not None:
+        return user
+
+    user = User.objects.create_user(
+        email=email,
+        first_name='Team',
+        last_name='Reviewer',
+        phone_number='+255700000002',
+        password='a-strong-unique-pass-1',
+    )
+    membership = TeamMembership.objects.create(team=team, user=user)
+    TeamMembershipRole.objects.create(
+        membership=membership,
+        role=TeamRole.objects.get(team=team, slug=REVIEWER_ROLE_SLUG),
+    )
+    return user
+
+
 def confirm_for_organization(idea, confirmer=None):
     """
     Have `idea`'s organization confirm it, and return the organization review.
@@ -191,7 +225,12 @@ def confirm_for_organization(idea, confirmer=None):
     """
     from reviews import organization_review
 
-    confirmer = confirmer or organization_reviewer_for(idea.organization)
+    if confirmer is None:
+        confirmer = (
+            team_reviewer_for(idea.team)
+            if idea.submission_context == Idea.SubmissionContext.TEAM
+            else organization_reviewer_for(idea.organization)
+        )
     review = organization_review.start_organization_review(confirmer, idea.pk)
     return organization_review.complete_organization_review(
         confirmer,
@@ -342,3 +381,42 @@ def _revoke(user, code: str) -> None:
     ).first()
     if permission is not None:
         user.user_permissions.remove(permission)
+
+
+def release_proposal(idea):
+    """
+    Give `idea` a proposal its owner can act on: written by the reviewer who approved it, already
+    released by an admin. For tests whose subject is what comes *after* the go-ahead - the go-ahead
+    is refused without one, and the proposal flow itself is tested in `test_proposals.py`.
+    """
+    from django.utils import timezone
+
+    from reviews.models import IdeaProposal, Review
+
+    review = (
+        Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM, decision='approved')
+        .order_by('-completed_at', '-pk')
+        .first()
+    )
+    writer = review.reviewer if review else idea.author
+    now = timezone.now()
+    proposal, _ = IdeaProposal.objects.update_or_create(
+        idea=idea,
+        defaults={
+            'title': idea.title,
+            'executive_summary': 'Automate it.',
+            'problem': idea.description,
+            'proposed_solution': 'A small tool.',
+            'requirements_summary': '- Track every payment',
+            'scope': 'The process described.',
+            'deliverables': 'The tool.',
+            'estimated_timeline': '4 weeks',
+            'acceptance_criteria': 'It works.',
+            'status': 'released',
+            'created_by': writer,
+            'submitted_by': writer,
+            'submitted_at': now,
+            'decided_at': now,
+        },
+    )
+    return proposal

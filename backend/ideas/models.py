@@ -212,6 +212,7 @@ IDEA_SUBMISSION_CONTEXT_CHOICES = (
 IDEA_VISIBILITY_CHOICES = (
     ('public', 'Public'),
     ('organization', 'Organization'),
+    ('team', 'Team'),
     ('department', 'Department'),
     ('private', 'Private'),
 )
@@ -345,6 +346,11 @@ class Idea(models.Model):
         - `PUBLIC`: any authenticated user of the platform, in any
           organization. The idea is discoverable and readable platform-wide.
         - `ORGANIZATION`: any active member of the idea's organization.
+        - `TEAM`: any active member of the idea's **team**. Only meaningful for
+          a `TEAM`-context idea, and the reason this value exists rather than
+          reusing `ORGANIZATION`: ownership and audience are separate facts, and
+          a team idea whose audience is its own members should not have to say
+          so with a word that belongs to a different kind of tenant.
         - `DEPARTMENT`: any active member of the idea's organization who is
           also in the author's department. **Not yet enforceable** - the
           platform has no Department model, so the value is reserved and
@@ -356,11 +362,17 @@ class Idea(models.Model):
         `ideas/selectors.py` on top of `organizations.authorization`. The
         frontend may narrow what it shows, but that is presentation, never
         the control.
+
+        **Visibility never changes ownership.** A `PUBLIC` team idea is still
+        owned by its team; who may read it is a separate question from who it
+        belongs to, and the two are stored in separate columns precisely so
+        that neither can quietly become the other.
         """
 
         (
             PUBLIC,
             ORGANIZATION,
+            TEAM,
             DEPARTMENT,
             PRIVATE,
         ) = IDEA_VISIBILITY_CHOICES

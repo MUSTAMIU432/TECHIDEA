@@ -103,7 +103,6 @@ def build_tenant(name, category):
                 title=title,
                 description='A description long enough to be submitted.',
                 category_id=category.pk,
-                visibility=visibility,
             ),
         )
         idea_services.submit_idea(author, created.pk)
@@ -540,7 +539,6 @@ def one_tenant(db):
             title='Automate the invoice run',
             description='A description long enough to be submitted.',
             category_id=Category.objects.create(name='Finance').pk,
-            visibility=Idea.Visibility.ORGANIZATION,
         ),
     )
     idea_services.submit_idea(author, idea.pk)

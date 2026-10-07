@@ -184,17 +184,22 @@ MAX_TITLE_LENGTH = Idea._meta.get_field('title').max_length
 # the caller would have no way to know the last line was lost.
 MAX_COMMENT_LENGTH = 2000
 
-# `DEPARTMENT` is reserved vocabulary (see `Idea.Visibility`) with no
-# Department model behind it, so nothing could honour it. Accepting it would
-# mean storing an idea its author believes is department-scoped while every
-# reader of this code treats it as private or, later, organization-wide.
-# Refusing it is the fail-closed choice; the value becomes selectable the day
-# the department tier does.
-SELECTABLE_VISIBILITIES = (
-    Idea.Visibility.PUBLIC,
-    Idea.Visibility.ORGANIZATION,
-    Idea.Visibility.PRIVATE,
-)
+# **The audience of an idea is not a choice; it follows the level it is filed at.**
+#
+# An individual idea is visible to its author (and, once submitted, to the
+# platform's reviewers); a team idea to the team's members; an organization idea
+# to the organization's members. There is no "everyone" - an idea never reaches
+# people outside the tenant it belongs to except through the platform review
+# track, which has its own read grant (`selectors.platform_reviewer_filter`).
+#
+# Kept as a column rather than computed on read, because every read path already
+# filters on it and a stored value keeps those queries index-friendly. The
+# service is the only writer and always writes the value below.
+AUDIENCE_BY_CONTEXT = {
+    Idea.SubmissionContext.INDIVIDUAL: Idea.Visibility.PRIVATE,
+    Idea.SubmissionContext.TEAM: Idea.Visibility.TEAM,
+    Idea.SubmissionContext.ORGANIZATION: Idea.Visibility.ORGANIZATION,
+}
 
 
 def _require_active_user(user: User | None) -> User:
@@ -379,22 +384,21 @@ def _resolve_category(category_id: object | None) -> Category | None:
     return category
 
 
-def _resolve_visibility(visibility: str | None) -> str | None:
+def _resolve_visibility(visibility: str | None, context: str) -> str:
     """
-    The visibility to store, or `None` to keep the model default.
+    The audience to store for an idea at `context` level.
 
-    Case-normalized, because the value arrives from a GraphQL enum or a
-    `<select>` and neither is worth rejecting over casing - but validated
-    against the *selectable* set rather than the full enum, so `department`
-    cannot be stored by sending it directly.
+    Always the one the level dictates. A client that names an audience is not
+    ignored: naming a *different* one is refused, in words about the level, so a
+    caller that believes it is making an idea public finds out instead of getting
+    a private one back. Case-normalized because the value arrives from a GraphQL
+    enum.
     """
-    if visibility is None or not str(visibility).strip():
-        return None
-
-    normalized = str(visibility).strip().lower()
-    if normalized not in SELECTABLE_VISIBILITIES:
-        raise IdeaError('Choose who can see this idea.', field='visibility')
-    return normalized
+    audience = AUDIENCE_BY_CONTEXT[context]
+    named = str(visibility).strip().lower() if visibility is not None else ''
+    if named and named != audience:
+        raise IdeaError(AUDIENCE_FOLLOWS_LEVEL[context], field='visibility')
+    return audience
 
 
 # The states in which the author may edit an idea's content (S3-005): while it
@@ -422,6 +426,29 @@ EDITABLE_STATUSES = frozenset(
 )
 
 
+def can_edit_idea(user: User | None, idea: Idea | None) -> bool:
+    """
+    Whether `user` may edit `idea` right now - the predicate form of
+    `_load_editable_idea`, for the client to ask instead of inferring.
+
+    It answers by attempting the same refusals in the same order and reporting
+    which one applied, so `viewerCanEdit` cannot disagree with `updateIdea`: a
+    field that said yes for an idea the server would refuse would be worse than
+    no field, because a client would offer a button and then report a failure.
+
+    Deliberately a *convenience*. Every check here is repeated by
+    `update_idea`; nothing is authorized by this function, and hiding a control
+    is not a security property.
+    """
+    if idea is None:
+        return False
+    try:
+        _load_editable_idea(_require_active_user(user), idea.pk)
+    except IdeaError:
+        return False
+    return True
+
+
 def _load_editable_idea(user: User, idea_id: object) -> Idea:
     """
     The idea identified by `idea_id`, if `user` may edit it right now.
@@ -441,13 +468,32 @@ def _load_editable_idea(user: User, idea_id: object) -> Idea:
     if idea is None or idea.author_id != user.pk:
         raise IdeaError('Idea is unavailable.', reason='forbidden')
 
-    # Membership is re-checked on every write, not only at creation: leaving
-    # an organization has to take the ability to write into it with you.
-    if authorization.get_membership(user, idea.organization_id) is None:
-        raise IdeaError(
-            'You must be an active member of this organization to work with ideas here.',
-            reason='membership_required',
-        )
+    # Standing in the idea's tenant is re-checked on every write, not only at
+    # creation: leaving has to take the ability to write into that tenant with
+    # you. **One branch per context**, because the three proofs differ - an
+    # organization membership, a team membership, or nothing at all, since an
+    # individual idea's author *is* its tenant.
+    #
+    # This used to ask for an organization membership unconditionally, which
+    # meant a team or individual idea could not be edited by anybody, its author
+    # included: `organization_id` is null for those two, and a null tenant is not
+    # a membership. The branch is what `lifecycle._require_tenant_standing`
+    # already used, and the two must agree - otherwise one of them refuses an
+    # operation the other allows.
+    if idea.submission_context == Idea.SubmissionContext.TEAM:
+        from teams import authorization as team_authorization
+
+        if not team_authorization.is_member_of(user, idea.team_id):
+            raise IdeaError(
+                'You must be an active member of this team to work with this idea.',
+                reason='membership_required',
+            )
+    elif idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
+        if authorization.get_membership(user, idea.organization_id) is None:
+            raise IdeaError(
+                'You must be an active member of this organization to work with ideas here.',
+                reason='membership_required',
+            )
 
     if idea.status not in EDITABLE_STATUSES:
         # The S2-002 wording is kept: the frontend shows it verbatim, and it
@@ -481,31 +527,40 @@ def _load_editable_idea(user: User, idea_id: object) -> Idea:
 REVIEWABLE_VISIBILITIES = frozenset({Idea.Visibility.ORGANIZATION, Idea.Visibility.PUBLIC})
 
 SUBMISSION_VISIBILITY_MESSAGE = (
-    'A private idea cannot be reviewed. Share it with your organization or make '
-    'it public before submitting.'
+    'An organization idea has to be visible to its organization so its reviewers '
+    'can read it before it is submitted.'
 )
 
-# The same rule for an idea that belongs to no organization. An individual or team
-# idea has no organization to widen to, so `ORGANIZATION` visibility means "visible
-# to my team" - which the *organization* reviewer still cannot read, because they
-# review only their own organization's ideas. So for those two contexts only a
-# `PUBLIC` submission can reach a reviewer, and the message says so in the
-# author's terms rather than naming a visibility value.
-DIRECT_CONTEXT_VISIBILITY_MESSAGE = (
-    'An idea you submit on your own, or for a team, is reviewed by the platform. '
-    'Make it public so platform reviewers can read it before submitting.'
-)
+# The refusal for naming an audience the idea's level does not have. Written per
+# level, in the author's terms, because the fix is one sentence.
+AUDIENCE_FOLLOWS_LEVEL = {
+    Idea.SubmissionContext.INDIVIDUAL: (
+        'An individual idea is seen only by you until it reaches the platform. '
+        'File it at team or organization level to share it with people.'
+    ),
+    Idea.SubmissionContext.TEAM: (
+        'A team idea is seen by your team. There is no wider audience; the '
+        'platform reviews it once you submit it.'
+    ),
+    Idea.SubmissionContext.ORGANIZATION: (
+        'An organization idea is seen by your organization. There is no wider '
+        'audience; the platform reviews it once your organization has confirmed it.'
+    ),
+}
 
 
 def _validate_submission_visibility(idea: Idea) -> None:
-    """The visibility a submission needs, which depends on who will review it."""
-    if idea.submission_context == Idea.SubmissionContext.ORGANIZATION:
-        if idea.visibility not in REVIEWABLE_VISIBILITIES:
-            raise IdeaError(SUBMISSION_VISIBILITY_MESSAGE)
-        return
+    """
+    The visibility a submission needs: organization reviewers must be able to read it.
 
-    if idea.visibility != Idea.Visibility.PUBLIC:
-        raise IdeaError(DIRECT_CONTEXT_VISIBILITY_MESSAGE)
+    An individual or team idea has no such constraint - its reviewers are the
+    platform's, who read a submission through `platform_reviewer_filter`
+    whatever audience the author chose.
+    """
+    if idea.submission_context != Idea.SubmissionContext.ORGANIZATION:
+        return
+    if idea.visibility not in REVIEWABLE_VISIBILITIES:
+        raise IdeaError(SUBMISSION_VISIBILITY_MESSAGE)
 
 
 def _validate_for_submission(idea: Idea) -> None:
@@ -648,7 +703,7 @@ def create_idea_in_context(
     description = _validate_description(data.description)
     story = _validate_story(data)
     category = _resolve_category(data.category_id)
-    visibility = _resolve_visibility(data.visibility)
+    visibility = _resolve_visibility(data.visibility, context)
 
     return Idea.objects.create(
         organization=organization,
@@ -712,14 +767,10 @@ def update_idea(user: User | None, idea_id: object, data: IdeaInput) -> Idea:
         setattr(idea, name, value)
     idea.category = _resolve_category(data.category_id)
 
-    visibility = _resolve_visibility(data.visibility)
-    if visibility and visibility != idea.visibility:
-        if idea.status != Idea.Status.DRAFT:
-            raise IdeaError(
-                'Who can see an idea is fixed once it has been submitted.',
-                field='visibility',
-            )
-        idea.visibility = visibility
+    # The audience follows the idea's level, which never changes, so there is
+    # nothing to edit here; a value that disagrees with it is still refused.
+    if data.visibility is not None:
+        _resolve_visibility(data.visibility, idea.submission_context)
 
     # `save()` runs `full_clean()`, so the model's own invariants - the
     # status/`submitted_at` pairing included - hold on this write path too.
@@ -759,7 +810,10 @@ def submission_target(user: User | None, idea: Idea) -> str:
     if target is None:
         raise IdeaError('Only a draft can be edited.', reason='forbidden')
 
-    if idea.submission_context == Idea.SubmissionContext.TEAM and target == Idea.Status.SUBMITTED:
+    if idea.submission_context == Idea.SubmissionContext.TEAM and target in (
+        Idea.Status.SUBMITTED,
+        Idea.Status.SUBMITTED_TO_ORGANIZATION,
+    ):
         from teams import authorization as team_authorization
 
         if not team_authorization.can_submit_for(user, idea.team_id):
@@ -824,8 +878,9 @@ def _notify_the_reviewers_waiting_on(idea: Idea) -> None:
     if idea.status == Idea.Status.SUBMITTED_TO_ORGANIZATION:
         recipients = organization_reviewers_for(idea)
         kind = 'review.organization_queue'
-        title = f'"{idea.title}" is waiting for your organization'
-        body = 'A member has submitted an idea for your organization to review.'
+        noun = tenant_noun(idea)
+        title = f'"{idea.title}" is waiting for your {noun}'
+        body = f'A member has submitted an idea for your {noun} to review.'
     elif idea.status == Idea.Status.SUBMITTED:
         recipients = platform_reviewers()
         kind = 'review.platform_queue'
@@ -856,19 +911,42 @@ def _notify_the_reviewers_waiting_on(idea: Idea) -> None:
     )
 
 
+def tenant_noun(idea: Idea) -> str:
+    """The word for the body that checks this idea first: 'team' or 'organization'."""
+    return 'team' if idea.submission_context == Idea.SubmissionContext.TEAM else 'organization'
+
+
 def organization_reviewers_for(idea: Idea) -> list[User]:
-    """The active reviewers of the idea's organization, if it has one."""
+    """
+    The active people who check this idea before the platform: its team's reviewers
+    for a team idea, its organization's reviewers for an organization one, nobody for
+    an individual idea. (Named for the organization, which came first.)
+    """
+    if idea.submission_context == Idea.SubmissionContext.TEAM:
+        if idea.team_id is None:
+            return []
+        from teams import authorization as team_authorization
+        from teams.models import TeamMembership
+
+        members = TeamMembership.objects.filter(
+            team_id=idea.team_id, status=TeamMembership.Status.ACTIVE
+        ).select_related('user')
+        return [
+            m.user
+            for m in members
+            if m.user.is_active and team_authorization.can_review_for(m.user, idea.team_id)
+        ]
+
     if idea.organization_id is None:
         return []
 
+    from organizations import authorization as organization_authorization
     from organizations.models import Membership
     from organizations.services import IDEA_REVIEW
 
     memberships = Membership.objects.filter(
         organization_id=idea.organization_id, status=Membership.Status.ACTIVE
     ).select_related('user')
-
-    from organizations import authorization as organization_authorization
 
     return [
         membership.user
@@ -919,7 +997,18 @@ def submit_to_platform(user: User | None, idea_id: object) -> Idea:
     """
     from ideas import lifecycle
 
-    moved = lifecycle.transition_idea(user, idea_id, Idea.Status.SUBMITTED)
+    active_user = _require_active_user(user)
+    idea = selectors.get_idea(active_user, idea_id)
+    if idea is not None and idea.submission_context == Idea.SubmissionContext.TEAM:
+        from teams import authorization as team_authorization
+
+        if not team_authorization.can_submit_for(active_user, idea.team_id):
+            raise IdeaError(
+                'You do not have permission to submit this idea for your team.',
+                reason='forbidden',
+            )
+
+    moved = lifecycle.transition_idea(active_user, idea_id, Idea.Status.SUBMITTED)
     _notify_the_reviewers_waiting_on(moved)
     return moved
 

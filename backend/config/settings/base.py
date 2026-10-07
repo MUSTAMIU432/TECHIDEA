@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'invitations',
     'notifications',
     'messaging',
+    'automation',
     # Platform administration (the internal console): reads and changes the
     # domains above through their own rules, so it comes after all of them.
     'administration',
@@ -357,7 +358,7 @@ STORAGES = {
 
 # The hard ceiling on one uploaded file, enforced server-side in
 # `ideas.attachments.validate_size` before anything is read into storage - a
-# client-side check is a courtesy, never the boundary. 50 MB fits the evidence
+# client-side check is a courtesy, never the boundary. 200 MB fits the evidence
 # this domain is actually given (a scanned document, a photo of a whiteboard, an
 # exported spreadsheet with its supporting tabs) without letting one idea's
 # evidence become a liability.
@@ -369,7 +370,10 @@ STORAGES = {
 # unauthorized caller before the body is parsed at all. A deployment still wants
 # a limit at its proxy: nothing here stops a web server reading bytes off a
 # socket.
-ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=50 * 1024 * 1024)
+ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=200 * 1024 * 1024)
+
+# Profile photos and other pictures: 100 MB. Enforced in `identity.avatars`.
+AVATAR_MAX_UPLOAD_BYTES = env.int('AVATAR_MAX_UPLOAD_BYTES', default=100 * 1024 * 1024)
 
 
 # CORS
@@ -394,7 +398,10 @@ ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=50 
 # The allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a
 # wildcard).
 
-CORS_URLS_REGEX = r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/)'
+CORS_URLS_REGEX = (
+    r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/'
+    r'|/account/avatar/|/users/\d+/avatar/)'
+)
 # Explicit so a stray setting elsewhere can never open the API to every origin.
 CORS_ALLOW_ALL_ORIGINS = False
 # Sprint 1 (S1-003): the refresh-token cookie requires the browser to send
