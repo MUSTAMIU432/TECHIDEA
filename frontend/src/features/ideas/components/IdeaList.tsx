@@ -1,7 +1,6 @@
 import { useState } from 'react'
 
 import { useAuth } from '../../identity/auth/AuthContext'
-import { useOrganization } from '../../organizations/context/useOrganization'
 import { SpinnerIcon } from '../../identity/components/icons'
 import type { Idea, IdeaFilters, IdeaStatus } from '../api/ideasApi'
 import { useCategories } from '../hooks/useCategories'
@@ -34,13 +33,15 @@ interface OpenSection {
 }
 
 /**
- * The organization's ideas, narrowed by the filters above them, and what can
- * be done with them.
+ * Every idea the reader may see - their own, their teams' and their
+ * organizations' - narrowed by the filters above them, and what can be done
+ * with them. No organization has to be chosen first: an individual idea
+ * belongs to no organization at all.
  *
  * Three rules shape this component:
  *
  * - **The list comes from the server already filtered.** Every read goes
- *   through `organizationIdeas`, which applies the tenant rule, the
+ *   through `ideas`, which applies the tenant rule, the
  *   visibility rule and the discovery filters server-side; this component
  *   never filters a list to decide what somebody may see, because that is the
  *   one thing a client cannot be trusted with. It does arrange a list for
@@ -109,7 +110,6 @@ export function IdeaList({
   submittingTarget?: IdeaStatus | null
 }) {
   const { user } = useAuth()
-  const { activeOrganization, status: organizationStatus } = useOrganization()
   /*
     Which section is open, if any - **at most one on the whole page**, and it is
     one value rather than one flag per section per idea.
@@ -133,11 +133,7 @@ export function IdeaList({
   */
   const [openSection, setOpenSection] = useState<OpenSection | null>(null)
   const { categories } = useCategories()
-  const { ideas, pageInfo, loading, error } = useIdeaDiscovery(
-    activeOrganization?.id ?? null,
-    filters,
-    reloadToken,
-  )
+  const { ideas, pageInfo, loading, error } = useIdeaDiscovery(filters, reloadToken)
   // Seeded from the ideas the list was just given, so the vote controls render
   // the server's numbers on the first paint - no per-idea request, and nothing
   // to reload when a vote changes.
@@ -148,8 +144,6 @@ export function IdeaList({
     return openSection !== null && openSection.ideaId === ideaId && openSection.section === section
   }
 
-  if (organizationStatus === 'loading') return <LoadingPanel />
-
   if (error) {
     return (
       <div className="rounded-xl border border-red-200 bg-red-50 p-5" role="alert">
@@ -159,21 +153,14 @@ export function IdeaList({
     )
   }
 
-  // Checked *before* the "not fetched yet" guard below, and the order matters:
-  // with no organization there is nothing to fetch, so no request is ever made
-  // and the loading guard would spin indefinitely.
-  if (!activeOrganization) {
-    return (
-      <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5">
-        <p className="text-sm font-semibold text-gray-900">No organization selected</p>
-        <p className="mt-1 text-sm leading-6 text-gray-600">
-          Ideas belong to an organization, so choose one first.
-        </p>
-      </div>
-    )
-  }
-
-  const filtersActive = Boolean(filters.search || filters.categoryId || filters.status)
+  const filtersActive = Boolean(
+    filters.search ||
+    filters.categoryId ||
+    filters.status ||
+    filters.submissionContext ||
+    filters.visibility ||
+    filters.mine,
+  )
   // `pageInfo === null` is "no answer yet"; `loading` afterwards is a refresh
   // under a filter that is already different from the rows on screen.
   const firstLoad = pageInfo === null

@@ -17,8 +17,7 @@ import { useOrganization } from '../../organizations/context/useOrganization'
  */
 vi.mock('../../ideas/api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
-  ideasRequest: vi.fn(async () => ({ items: [], pageInfo: emptyPageInfo() })),
-  organizationIdeasRequest: vi.fn(async () => ({
+  ideasRequest: vi.fn(async () => ({
     items: [],
     pageInfo: emptyPageInfo(),
   })),

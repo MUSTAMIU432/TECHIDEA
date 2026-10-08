@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { giveGoAheadRequest } from '../../ideas/api/ideasApi'
 import {
   proposalStateRequest,
   recordProposalViewRequest,
   type IdeaProposal,
   type ViewReceipt,
 } from '../api/proposalsApi'
+import { OwnerDecisionForm } from './OwnerDecisionForm'
 import { ProposalSections } from './ProposalSections'
 import { ProtectedView } from './ProtectedView'
 
@@ -107,70 +107,11 @@ export function ProposalReadPage() {
         </ProtectedView>
       </div>
 
-      <GoAhead ideaId={ideaId} />
+      <OwnerDecisionForm ideaId={ideaId} proposal={proposal} />
 
       <Link to={`/app/ideas/${ideaId}`} className="mt-8 inline-block font-semibold text-brand-700">
         Back to the idea
       </Link>
-    </section>
-  )
-}
-
-function GoAhead({ ideaId }: { ideaId: string }) {
-  const [state, setState] = useState<'idle' | 'working' | 'done'>('idle')
-  const [message, setMessage] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function give() {
-    setState('working')
-    setError(null)
-    try {
-      const result = await giveGoAheadRequest(ideaId)
-      if (result.success) {
-        setMessage(result.message)
-        setState('done')
-      } else {
-        setError(result.message)
-        setState('idle')
-      }
-    } catch {
-      setError('We could not reach the server, so nothing has changed. Please try again.')
-      setState('idle')
-    }
-  }
-
-  return (
-    <section
-      aria-label="Your decision"
-      className="mt-6 rounded-xl border border-brand-200 bg-brand-50 p-5"
-    >
-      <h2 className="text-base font-semibold text-brand-900">Your decision</h2>
-      {state === 'done' ? (
-        <output className="mt-2 block text-sm text-brand-800">
-          {message ?? 'Thank you. A developer will be assigned.'}
-        </output>
-      ) : (
-        <>
-          <p className="mt-2 text-sm leading-6 text-brand-900">
-            Read the proposal carefully. If it is what you want built, give your go-ahead: that is
-            what hands it to the delivery team, who will assign a developer. It is yours to say, and
-            nobody else’s.
-          </p>
-          {error && (
-            <p role="alert" className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
-              {error}
-            </p>
-          )}
-          <button
-            type="button"
-            disabled={state === 'working'}
-            onClick={() => void give()}
-            className="mt-4 inline-flex h-11 items-center rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {state === 'working' ? 'Recording…' : 'Give the go-ahead'}
-          </button>
-        </>
-      )}
     </section>
   )
 }

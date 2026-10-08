@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { ProposalAnswerCard } from '../../proposals/components/ProposalAnswerSummary'
 import { cancelOpportunity, updateOpportunity, type Opportunity } from '../api/automationApi'
 import { label } from '../utils/labels'
 import { useOutcome } from '../utils/useOutcome'
@@ -24,6 +25,8 @@ export function OverviewTab({
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
       <div className="space-y-5">
+        {/* The owner's terms for going ahead, read before assigning and building. */}
+        <ProposalAnswerCard ideaId={opportunity.ideaId} title="What the owner asked for" />
         <section className={cardClass} aria-labelledby="ov-problem">
           <h3 id="ov-problem" className="text-base font-bold text-gray-900">
             The problem

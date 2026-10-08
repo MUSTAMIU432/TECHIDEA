@@ -17,9 +17,11 @@ export const FULL_ADMIN: AdminCapabilities = {
   canManageUserAccounts: true,
   canManageOrganizationRoles: true,
   canManageCategories: true,
+  canReviewPlatformSubmissions: false,
   canAssignPlatformReviewers: true,
   canManageReviewers: true,
   canReleaseProposals: true,
+  canManagePlatformRoles: true,
 }
 
 export const READ_ONLY_ADMIN: AdminCapabilities = {

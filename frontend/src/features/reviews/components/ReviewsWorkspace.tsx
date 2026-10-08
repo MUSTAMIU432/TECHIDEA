@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { ideaRequest, type Idea } from '../../ideas/api/ideasApi'
@@ -8,7 +8,12 @@ import { IdeaStory } from '../../ideas/components/IdeaStory'
 import { IdeaPagination } from '../../ideas/components/IdeaPagination'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
-import { startReviewRequest, type ReviewMutationResult } from '../api/reviewsApi'
+import { changeResponsesRequest, type ChangeResponse } from '../api/changeResponsesApi'
+import {
+  platformReviewQueueRequest,
+  startReviewRequest,
+  type ReviewMutationResult,
+} from '../api/reviewsApi'
 import { useCanReview } from '../hooks/useCanReview'
 import { useReviewQueue } from '../hooks/useReviewQueue'
 import { formatDate } from '../utils/reviewLabels'
@@ -32,7 +37,7 @@ import { ReviewHistory } from './ReviewHistory'
  * card's "Continue review" link points. The same link opens a stalled review
  * (its reviewer can no longer review it) for another reviewer to take over.
  */
-export function ReviewsWorkspace() {
+export function ReviewsWorkspace({ quiet = false }: { quiet?: boolean } = {}) {
   const { user } = useAuth()
   const { activeOrganization } = useOrganization()
   const organizationId = activeOrganization?.id ?? null
@@ -41,6 +46,8 @@ export function ReviewsWorkspace() {
   const [selected, setSelected] = useState<Idea | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
+  // Held here rather than in the panel, so hiding the details carries to the next idea.
+  const [detailsOpen, setDetailsOpen] = useState(true)
   const [searchParams] = useSearchParams()
   const linkedIdeaId = searchParams.get('idea')
 
@@ -98,6 +105,9 @@ export function ReviewsWorkspace() {
     setReloadToken((token) => token + 1)
   }
 
+  // A platform reviewer has their own queue on this page; telling them they do not review
+  // in an organization would read as "you are not a reviewer".
+  if (quiet && canReview !== true) return null
   if (organizationId === null) {
     return <Panel>Choose an organization to see its review queue.</Panel>
   }
@@ -142,8 +152,13 @@ export function ReviewsWorkspace() {
         </output>
       )}
 
-      <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,1fr)]">
-        <div className="rounded-2xl border border-gray-200 bg-white p-4">
+      {/*
+        The queue on top, the selected idea underneath at full width. Side by side,
+        a short queue was stretched to the height of a long idea and left a column
+        of empty space; stacked, the queue is only as tall as its cards.
+      */}
+      <div className="mt-5 space-y-5">
+        <div className="rounded-2xl border border-gray-200 bg-white p-3">
           {error ? (
             <p role="alert" className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
@@ -177,7 +192,10 @@ export function ReviewsWorkspace() {
             </div>
           ) : (
             <>
-              <ul aria-label="Ideas waiting for review" className="divide-y divide-gray-100">
+              <ul
+                aria-label="Ideas waiting for review"
+                className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3"
+              >
                 {ideas.map((idea) => (
                   <li key={idea.id}>
                     <button
@@ -187,7 +205,7 @@ export function ReviewsWorkspace() {
                         setNotice(null)
                         setSelected(idea)
                       }}
-                      className="w-full rounded-lg px-3 py-3 text-left hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 aria-pressed:bg-brand-50"
+                      className="h-full w-full rounded-xl border border-gray-200 px-4 py-3 text-left transition-colors hover:border-brand-200 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 aria-pressed:border-brand-300 aria-pressed:bg-brand-50"
                     >
                       <span className="block text-sm font-semibold text-gray-900">
                         {idea.title}
@@ -214,32 +232,54 @@ export function ReviewsWorkspace() {
         </div>
 
         {selected ? (
-          <ReviewContext
-            // A new idea, or the same idea in a new state, is a new panel:
-            // no half-typed decision survives into it.
-            key={`${selected.id}:${selected.status}`}
-            idea={selected}
-            viewerId={user?.id ?? null}
-            onChanged={handleChanged}
-          />
+          <SelectedIdea key={selected.id}>
+            <ReviewContext
+              // A new idea, or the same idea in a new state, is a new panel:
+              // no half-typed decision survives into it.
+              key={`${selected.id}:${selected.status}`}
+              idea={selected}
+              viewerId={user?.id ?? null}
+              onChanged={handleChanged}
+              detailsOpen={detailsOpen}
+              onToggleDetails={() => setDetailsOpen((open) => !open)}
+              onClose={() => setSelected(null)}
+            />
+          </SelectedIdea>
         ) : (
-          <Panel>Select an idea to see its details and review history.</Panel>
+          <Panel inline>Select an idea to see its details and review history.</Panel>
         )}
       </div>
     </section>
   )
 }
 
+/**
+ * One idea under review: its details, the review controls and its history.
+ *
+ * The details (description, problem story, evidence) can be hidden, so a reviewer working
+ * through many ideas keeps the decision in view instead of scrolling past the story each
+ * time. Whether they are shown is held by the workspace, not here, so the choice carries
+ * from one idea to the next; the start button and the decision form are never hidden.
+ */
 function ReviewContext({
   idea,
   viewerId,
   onChanged,
+  detailsOpen,
+  onToggleDetails,
+  onClose,
 }: {
   idea: Idea
   viewerId: string | null
   onChanged: (result: ReviewMutationResult) => void
+  detailsOpen: boolean
+  onToggleDetails: () => void
+  onClose: () => void
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(true)
+  const detailsId = `review-details-${idea.id}`
+  const historyId = `review-history-${idea.id}`
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   // The server offers a start on an idea already under review only when its
@@ -270,13 +310,32 @@ function ReviewContext({
       aria-labelledby="review-context-heading"
       className="rounded-2xl border border-gray-200 bg-white p-5"
     >
-      <h3 id="review-context-heading" className="text-lg font-semibold text-gray-900">
-        {idea.title}
-      </h3>
-      <p className="mt-1 text-xs text-gray-500">
-        {idea.category?.name ?? 'Uncategorised'}
-        {idea.submittedAt ? ` · submitted ${formatDate(idea.submittedAt)}` : ''}
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 id="review-context-heading" className="text-lg font-semibold text-gray-900">
+            {idea.title}
+          </h3>
+          <p className="mt-1 text-xs text-gray-500">
+            {idea.category?.name ?? 'Uncategorised'}
+            {idea.submittedAt ? ` · submitted ${formatDate(idea.submittedAt)}` : ''}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={detailsOpen}
+            aria-controls={detailsId}
+            onClick={onToggleDetails}
+            className={TOGGLE_CLASSES}
+          >
+            {detailsOpen ? 'Hide details' : 'Show details'}
+          </button>
+          <button type="button" onClick={onClose} className={TOGGLE_CLASSES}>
+            Close
+          </button>
+        </div>
+      </div>
+      <OwnerResponse ideaId={idea.id} />
       {idea.viewerCanStartReview && (
         <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-brand-50 px-3 py-2">
           <p className="text-sm text-brand-800">
@@ -299,27 +358,41 @@ function ReviewContext({
           {startError}
         </p>
       )}
-      <p className="mt-4 whitespace-pre-line text-sm leading-6 text-gray-700">{idea.description}</p>
-      {/* What happens today, who it affects, what better looks like - in the
-          author's words, so the review starts from the problem, not a guess. */}
-      <IdeaStory story={idea} />
+      {detailsOpen ? (
+        <div id={detailsId}>
+          <p className="mt-4 whitespace-pre-line text-sm leading-6 text-gray-700">
+            {idea.description}
+          </p>
+          {/* What happens today, who it affects, what better looks like - in the
+              author's words, so the review starts from the problem, not a guess. */}
+          <IdeaStory story={idea} />
 
-      {/*
-        The evidence panel is a disclosure of its own here rather than a cell of
-        a card's action bar: this is one idea, not a list, so there is no row
-        of sibling actions to sit level with. The same icon and wording as the
-        bar, so the two places it appears are recognisably the same thing.
-      */}
-      <div className="mt-5 border-t border-gray-100 pt-4">
-        <CardDisclosureButton
-          icon={<PaperclipIcon size="sm" />}
-          label="Supporting evidence"
-          hideLabel="Hide supporting evidence"
-          open={evidenceOpen}
-          onToggle={() => setEvidenceOpen((o) => !o)}
-        />
-        <IdeaAttachments idea={idea} open={evidenceOpen} />
-      </div>
+          {/*
+            The evidence panel is a disclosure of its own here rather than a cell of
+            a card's action bar: this is one idea, not a list, so there is no row
+            of sibling actions to sit level with. The same icon and wording as the
+            bar, so the two places it appears are recognisably the same thing.
+          */}
+          <div className="mt-5 border-t border-gray-100 pt-4">
+            <CardDisclosureButton
+              icon={<PaperclipIcon size="sm" />}
+              label="Supporting evidence"
+              hideLabel="Hide supporting evidence"
+              open={evidenceOpen}
+              onToggle={() => setEvidenceOpen((o) => !o)}
+            />
+            <IdeaAttachments idea={idea} open={evidenceOpen} />
+          </div>
+        </div>
+      ) : (
+        // Collapsed: two lines of the description, enough to recognise the idea.
+        <p
+          id={detailsId}
+          className="mt-3 line-clamp-2 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-600"
+        >
+          {idea.description}
+        </p>
+      )}
 
       {idea.viewerActiveReviewId !== null && (
         <section aria-label="Your review" className="mt-5 border-t border-gray-100 pt-4">
@@ -332,17 +405,278 @@ function ReviewContext({
         </section>
       )}
 
-      <h4 className="mt-5 text-sm font-semibold text-gray-900">Review history</h4>
-      <div className="mt-2">
-        <ReviewHistory ideaId={idea.id} viewerId={viewerId} />
+      <div className="mt-5 flex items-center justify-between gap-2 border-t border-gray-100 pt-4">
+        <h4 className="text-sm font-semibold text-gray-900">Review history</h4>
+        <button
+          type="button"
+          aria-expanded={historyOpen}
+          aria-controls={historyId}
+          onClick={() => setHistoryOpen((open) => !open)}
+          className={TOGGLE_CLASSES}
+        >
+          {historyOpen ? 'Hide history' : 'Show history'}
+        </button>
       </div>
+      {historyOpen && (
+        <div id={historyId} className="mt-2">
+          <ReviewHistory ideaId={idea.id} viewerId={viewerId} />
+        </div>
+      )}
     </article>
   )
 }
 
-function Panel({ children }: { children: React.ReactNode }) {
+/**
+ * The **platform** review queue: submissions from every organization, team and individual
+ * that have reached the platform, for a platform reviewer.
+ *
+ * Not tenant-scoped, unlike the organization queue beside it, so it does not follow the
+ * organization switcher. The list is the server's (`platformReviewQueue`, nothing a
+ * reviewer could not decide, their own ideas excluded); picking one opens the same review
+ * panel - start, rate, decide - and every operation is authorized again by the server,
+ * including that an idea routed to a review team is worked only by that team.
+ */
+export function PlatformReviewWorkspace() {
+  const { user } = useAuth()
+  const [selected, setSelected] = useState<Idea | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+  // Held here rather than in the panel, so hiding the details carries to the next idea.
+  const [detailsOpen, setDetailsOpen] = useState(true)
+  // Each answer remembers which load it answers, so a refresh keeps the last list on
+  // screen until the new one arrives and a stale failure is not shown as current.
+  const [answer, setAnswer] = useState<{ token: number; ideas: Idea[] } | null>(null)
+  const [failedToken, setFailedToken] = useState<number | null>(null)
+  const [searchParams] = useSearchParams()
+  const linkedIdeaId = searchParams.get('idea')
+  const ideas = answer?.ideas ?? null
+  const error = failedToken === reloadToken ? 'We could not load the platform review queue.' : null
+
+  useEffect(() => {
+    let cancelled = false
+    const token = reloadToken
+    platformReviewQueueRequest()
+      .then((queue) => {
+        if (!cancelled) setAnswer({ token, ideas: queue })
+      })
+      .catch(() => {
+        if (!cancelled) setFailedToken(token)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [reloadToken])
+
+  useEffect(() => {
+    if (linkedIdeaId === null) return
+    let cancelled = false
+    ideaRequest(linkedIdeaId)
+      .then((idea) => {
+        if (!cancelled && idea !== null) setSelected(idea)
+      })
+      .catch(() => {
+        // Nothing to open; the queue is still there.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [linkedIdeaId])
+
+  function handleChanged(result: ReviewMutationResult) {
+    if (result.idea !== null) setSelected(result.idea)
+    setNotice(result.message)
+    setReloadToken((token) => token + 1)
+  }
+
   return (
-    <div className="mt-8 rounded-2xl border border-dashed border-gray-300 bg-white px-5 py-6 text-sm text-gray-600">
+    <section aria-labelledby="platform-queue-heading" className="mt-8">
+      <div className="flex items-end justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-700">
+            Platform review queue
+          </p>
+          <h2
+            id="platform-queue-heading"
+            className="mt-1 text-2xl font-semibold tracking-tight text-gray-900"
+          >
+            Submitted to the platform
+          </h2>
+        </div>
+        <button
+          type="button"
+          onClick={() => setReloadToken((token) => token + 1)}
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {notice && (
+        <output className="mt-5 block rounded-lg bg-green-50 px-4 py-3 text-sm text-green-800">
+          {notice}
+        </output>
+      )}
+
+      {/*
+        The queue on top, the selected idea underneath at full width. Side by side,
+        a short queue was stretched to the height of a long idea and left a column
+        of empty space; stacked, the queue is only as tall as its cards.
+      */}
+      <div className="mt-5 space-y-5">
+        <div className="rounded-2xl border border-gray-200 bg-white p-3">
+          {error ? (
+            <p role="alert" className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </p>
+          ) : ideas === null ? (
+            <p className="text-sm text-gray-500">Loading the platform review queue…</p>
+          ) : ideas.length === 0 ? (
+            <div>
+              <p className="text-sm font-semibold text-gray-900">
+                No submissions are waiting for platform review.
+              </p>
+              <p className="mt-1 text-sm leading-6 text-gray-500">
+                Ideas you submitted yourself are not eligible for your own review.
+              </p>
+            </div>
+          ) : (
+            <ul
+              aria-label="Submissions waiting for platform review"
+              className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3"
+            >
+              {ideas.map((idea) => (
+                <li key={idea.id}>
+                  <button
+                    type="button"
+                    aria-pressed={selected?.id === idea.id}
+                    onClick={() => {
+                      setNotice(null)
+                      setSelected(idea)
+                    }}
+                    className="h-full w-full rounded-xl border border-gray-200 px-4 py-3 text-left transition-colors hover:border-brand-200 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 aria-pressed:border-brand-300 aria-pressed:bg-brand-50"
+                  >
+                    <span className="block text-sm font-semibold text-gray-900">{idea.title}</span>
+                    <span className="mt-1 block text-xs text-gray-500">
+                      <span
+                        className={`mr-1.5 inline-block rounded-full px-2 py-0.5 font-semibold ${
+                          idea.status === 'UNDER_REVIEW'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-sky-100 text-sky-800'
+                        }`}
+                      >
+                        {idea.status === 'UNDER_REVIEW' ? 'Under review' : 'Waiting for review'}
+                      </span>
+                      {idea.category?.name ?? 'Uncategorised'}
+                      {idea.submittedAt ? ` · submitted ${formatDate(idea.submittedAt)}` : ''}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {selected ? (
+          <SelectedIdea key={selected.id}>
+            <ReviewContext
+              key={`${selected.id}:${selected.status}`}
+              idea={selected}
+              viewerId={user?.id ?? null}
+              onChanged={handleChanged}
+              detailsOpen={detailsOpen}
+              onToggleDetails={() => setDetailsOpen((open) => !open)}
+              onClose={() => setSelected(null)}
+            />
+          </SelectedIdea>
+        ) : (
+          <Panel inline>Select a submission to see its details and review history.</Panel>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * What the owner said they changed, when they answered the last request for changes.
+ * Shown above everything else, details hidden or not: it is the first thing to read
+ * when a resubmitted idea comes back for another round.
+ */
+function OwnerResponse({ ideaId }: { ideaId: string }) {
+  const [answer, setAnswer] = useState<{ ideaId: string; responses: ChangeResponse[] } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    changeResponsesRequest(ideaId)
+      .then((responses) => {
+        if (!cancelled) setAnswer({ ideaId, responses })
+      })
+      .catch(() => {
+        // Nothing to show is the same, to the reviewer, as no response.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [ideaId])
+
+  if (answer === null || answer.ideaId !== ideaId || answer.responses.length === 0) return null
+  const [latest, ...earlier] = answer.responses
+
+  return (
+    <section
+      aria-label="The owner's response"
+      className="mt-4 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3"
+    >
+      <p className="text-xs font-semibold tracking-wide text-sky-800 uppercase">
+        The owner&apos;s response to round {latest.reviewRound}
+      </p>
+      <p className="mt-1 text-sm leading-6 whitespace-pre-line text-gray-800">{latest.message}</p>
+      <p className="mt-1 text-xs text-sky-700">
+        {latest.authorName} · {formatDate(latest.createdAt)}
+      </p>
+      {earlier.length > 0 && (
+        <details className="mt-2 text-xs text-sky-800">
+          <summary className="cursor-pointer font-semibold">
+            Earlier responses ({earlier.length})
+          </summary>
+          <ul className="mt-2 space-y-2">
+            {earlier.map((response) => (
+              <li key={response.id} className="rounded-lg bg-white/70 px-3 py-2 text-gray-700">
+                <span className="font-semibold">Round {response.reviewRound}:</span>{' '}
+                <span className="whitespace-pre-line">{response.message}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  )
+}
+
+const TOGGLE_CLASSES =
+  'rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300'
+
+function Panel({ children, inline = false }: { children: React.ReactNode; inline?: boolean }) {
+  return (
+    <div
+      className={`${inline ? '' : 'mt-8 '}rounded-2xl border border-dashed border-gray-300 bg-white px-5 py-6 text-sm text-gray-600`}
+    >
+      {children}
+    </div>
+  )
+}
+
+/**
+ * The selected idea's panel, below the queue. Brought into view when a different idea is
+ * picked, because it now opens underneath the cards rather than beside them.
+ */
+function SelectedIdea({ children }: { children: React.ReactNode }) {
+  const anchor = useRef<HTMLDivElement>(null)
+  // Keyed by the idea's id where it is used, so this runs once per idea picked.
+  useEffect(() => {
+    anchor.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  }, [])
+  return (
+    <div ref={anchor} className="scroll-mt-24">
       {children}
     </div>
   )

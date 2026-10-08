@@ -78,6 +78,10 @@ const SECTION_TRAILS: Array<[RegExp, Crumb[]]> = [
   [/^\/app\/ideas$/, [{ label: 'Ideas' }]],
   [/^\/app\/reviews$/, [{ label: 'Reviews' }]],
   [
+    /^\/app\/reviews\/proposals\/[^/]+$/,
+    [{ label: 'Reviews', to: '/app/reviews' }, { label: 'Proposal' }],
+  ],
+  [
     /^\/app\/automation\/opportunities\/[^/]+$/,
     [{ label: 'Automation', to: '/app/automation' }, { label: 'Opportunity' }],
   ],
@@ -282,7 +286,7 @@ function AppShell() {
               <NavLink to="/app/ideas" className={navLinkClass}>
                 Ideas
               </NavLink>
-              {canReview && (
+              {(canReview || adminCapabilities.canReviewPlatformSubmissions) && (
                 <NavLink to="/app/reviews" className={navLinkClass}>
                   Reviews
                 </NavLink>

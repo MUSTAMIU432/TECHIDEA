@@ -220,6 +220,11 @@ describe('OpportunityPage', () => {
       estimatedEffort: '',
       estimatedTimeline: '6 weeks',
       acceptanceCriteria: '',
+      feasibility: '',
+      milestones: '',
+      financialRequirements: 'Hosting at 40 USD a month.',
+      paymentRequired: 'yes',
+      paymentPlan: 'Half on start, half on acceptance.',
       status: 'accepted',
       reviewFeedback: '',
       submittedAt: null,
@@ -231,6 +236,8 @@ describe('OpportunityPage', () => {
 
     expect(await screen.findByText('Payments dashboard')).toBeInTheDocument()
     expect(screen.getByText('Import, match, report.')).toBeInTheDocument()
+    expect(screen.getByText('Yes - the owner pays')).toBeInTheDocument()
+    expect(screen.getByText('Half on start, half on acceptance.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /save|submit|accept/i })).toBeNull()
   })
 })

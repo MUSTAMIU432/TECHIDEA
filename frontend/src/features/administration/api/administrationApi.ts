@@ -23,6 +23,7 @@ import type {
   IdeaPageInfo,
   IdeaStatus,
   IdeaVisibility,
+  SubmissionContext,
 } from '../../ideas/api/ideasApi'
 import type { CriterionAssessment, ReviewDecision } from '../../reviews/api/reviewsApi'
 
@@ -117,13 +118,24 @@ const AUDIT_ENTRY_FIELDS = `
   id action result actor { ${PERSON} } targetType targetId targetLabel message createdAt
 `
 
+/**
+ * Whose idea it is. Only an organization idea has an organization, and only a team
+ * idea a team name; an individual idea has neither.
+ */
+export interface AdminIdeaHome {
+  submissionContext: SubmissionContext
+  organization: AdminOrganizationRef | null
+  teamName: string | null
+}
+
+const IDEA_HOME = 'submissionContext organization { id name } teamName'
+
 // --- overview ---------------------------------------------------------------
 
-export interface AdminActivity {
+export interface AdminActivity extends AdminIdeaHome {
   id: string
   ideaId: string
   ideaTitle: string | null
-  organization: AdminOrganizationRef
   fromStatus: IdeaStatus
   toStatus: IdeaStatus
   actor: AdminPerson
@@ -153,7 +165,7 @@ const OVERVIEW_QUERY = `
       openReviewCount
       completedReviewCount
       recentActivity {
-        id ideaId ideaTitle organization { id name } fromStatus toStatus
+        id ideaId ideaTitle ${IDEA_HOME} fromStatus toStatus
         actor { ${PERSON} } createdAt
       }
       recentAdminActions { ${AUDIT_ENTRY_FIELDS} }
@@ -737,13 +749,14 @@ export async function adminNotificationsRequest(
 
 // --- ideas ------------------------------------------------------------------
 
-export interface AdminIdea {
+export interface AdminIdea extends AdminIdeaHome {
   id: string
   title: string | null
   contentRestricted: boolean
   status: IdeaStatus
   visibility: IdeaVisibility
-  organization: AdminOrganizationRef
+  /** The platform review team the idea is routed to now; null until someone routes it. */
+  reviewTeam: { id: string; name: string } | null
   author: AdminPerson
   categoryName: string | null
   createdAt: string
@@ -791,12 +804,11 @@ export interface AdminTransition {
   createdAt: string
 }
 
-export interface AdminReviewedIdea {
+export interface AdminReviewedIdea extends AdminIdeaHome {
   id: string
   title: string | null
   status: IdeaStatus
   visibility: IdeaVisibility
-  organization: AdminOrganizationRef
 }
 
 export interface AdminReview {
@@ -811,6 +823,24 @@ export interface AdminReview {
   contentRestricted: boolean
   feedback: string | null
   assessments: CriterionAssessment[] | null
+}
+
+/** A round as the Reviews page lists it: who, when, and what was decided. */
+export type AdminRoundSummary = Pick<
+  AdminReview,
+  'id' | 'round' | 'reviewer' | 'decision' | 'isCompleted' | 'createdAt' | 'completedAt'
+>
+
+/** One reviewed idea and all its rounds: a single row of the Reviews page. */
+export interface AdminReviewedIdeaRow {
+  idea: AdminReviewedIdea
+  roundCount: number
+  /** The most recent round: in progress, or the decision the idea stands on. */
+  latest: AdminRoundSummary
+  /** Every round, oldest first. */
+  rounds: AdminRoundSummary[]
+  startedAt: string
+  lastActivityAt: string
 }
 
 export interface AdminIdeaDetail extends AdminIdea {
@@ -835,14 +865,14 @@ export interface AdminIdeaFilters {
 }
 
 const IDEA_FIELDS = `
-  id title contentRestricted status visibility organization { id name }
+  id title contentRestricted status visibility ${IDEA_HOME} reviewTeam { id name }
   author { ${PERSON} } categoryName createdAt updatedAt submittedAt
   voteCount commentCount attachmentCount
 `
 
 const REVIEW_FIELDS = `
   id round
-  idea { id title status visibility organization { id name } }
+  idea { id title status visibility ${IDEA_HOME} }
   reviewer { ${PERSON} }
   decision isCompleted createdAt completedAt contentRestricted feedback
   assessments { criterion rating note }
@@ -951,6 +981,22 @@ const REVIEWS_QUERY = `
   }
 `
 
+const REVIEWED_IDEAS_QUERY = `
+  query AdminReviewedIdeas($filters: AdminReviewFiltersInput, $offset: Int, $limit: Int) {
+    adminReviewedIdeas(filters: $filters, offset: $offset, limit: $limit) {
+      items {
+        idea { id title status visibility ${IDEA_HOME} }
+        roundCount
+        latest { id round reviewer { ${PERSON} } decision isCompleted createdAt completedAt }
+        rounds { id round reviewer { ${PERSON} } decision isCompleted createdAt completedAt }
+        startedAt
+        lastActivityAt
+      }
+      pageInfo { ${PAGE_INFO_FIELDS} }
+    }
+  }
+`
+
 const REVIEW_QUERY = `
   query AdminReview($id: ID!) {
     adminReview(id: $id) {
@@ -971,6 +1017,18 @@ export async function adminReviewsRequest(
     ...pageVariables(page),
   })
   return data.adminReviews
+}
+
+/** Reviewed ideas, one row each with all their rounds, the most recently active first. */
+export async function adminReviewedIdeasRequest(
+  filters: AdminReviewFilters = {},
+  page: PageRequest = {},
+): Promise<Page<AdminReviewedIdeaRow>> {
+  const data = await graphqlClient.request<{ adminReviewedIdeas: Page<AdminReviewedIdeaRow> }>(
+    REVIEWED_IDEAS_QUERY,
+    { filters: compact(filters), ...pageVariables(page) },
+  )
+  return data.adminReviewedIdeas
 }
 
 export async function adminReviewRequest(id: string): Promise<AdminReviewDetail | null> {

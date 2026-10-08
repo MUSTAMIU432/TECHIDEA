@@ -160,3 +160,77 @@ describe('NotificationsPage', () => {
     expect(await screen.findByText('Nothing to report yet.')).toBeInTheDocument()
   })
 })
+
+describe('NotificationsPage as a gateway', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(badgeMock).mockResolvedValue({ count: 1, hasUnread: true })
+  })
+
+  it('names where each link goes', async () => {
+    vi.mocked(listMock).mockResolvedValue({
+      items: [
+        notification({ id: 'a', reportId: null, actionPath: '/app/ideas/4#respond' }),
+        notification({ id: 'b', reportId: null, actionPath: '/app/ideas/4#decision-letter' }),
+        notification({
+          id: 'c',
+          kind: 'automation.ready_for_uat',
+          reportId: null,
+          actionPath: '/app/automation/projects/7?tab=uat',
+        }),
+      ],
+      totalCount: 3,
+    })
+    renderPage()
+
+    expect(await screen.findByRole('link', { name: 'Respond to the review' })).toHaveAttribute(
+      'href',
+      '/app/ideas/4#respond',
+    )
+    expect(screen.getByRole('link', { name: 'Read your letter' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open acceptance testing' })).toHaveAttribute(
+      'href',
+      '/app/automation/projects/7?tab=uat',
+    )
+  })
+
+  it('keeps read notifications out of the way, under Earlier', async () => {
+    vi.mocked(listMock).mockResolvedValue({
+      items: [
+        notification({ id: 'new', title: 'Fresh news' }),
+        notification({ id: 'old', title: 'Old news', isRead: true }),
+      ],
+      totalCount: 2,
+    })
+    renderPage()
+
+    expect(await screen.findByText('Fresh news')).toBeInTheDocument()
+    expect(screen.queryByText('Old news')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Earlier (1)' }))
+    expect(screen.getByText('Old news')).toBeInTheDocument()
+  })
+
+  it('opening a notification reads it, so it clears from the new ones', async () => {
+    vi.mocked(listMock).mockResolvedValue({
+      items: [notification({ id: 'n1', reportId: null, actionPath: '/app/ideas/4#respond' })],
+      totalCount: 1,
+    })
+    vi.mocked(markOneMock).mockResolvedValue({
+      success: true,
+      message: 'Marked as read.',
+      notification: notification({
+        id: 'n1',
+        reportId: null,
+        actionPath: '/app/ideas/4#respond',
+        isRead: true,
+      }),
+    } as never)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Respond to the review' }))
+
+    await waitFor(() => expect(markOneMock).toHaveBeenCalledWith('n1'))
+    expect(await screen.findByText('You are all caught up.')).toBeInTheDocument()
+  })
+})

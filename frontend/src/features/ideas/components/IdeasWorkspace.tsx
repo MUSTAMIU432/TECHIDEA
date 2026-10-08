@@ -9,14 +9,13 @@ import {
   type IdeaStatus,
 } from '../api/ideasApi'
 import { useDebouncedCallback } from '../../../lib/useDebouncedCallback'
-import { useOrganization } from '../../organizations/context/useOrganization'
 import { IdeaList } from './IdeaList'
 import { SEARCH_DEBOUNCE_MS } from './IdeaFiltersBar'
 import { readIdeasRedirect, type NoticeTone } from '../utils/savedIdeaNotice'
 import { IdeaContextDialog } from './IdeaContextDialog'
 
 /**
- * The Ideas area: the organization's ideas. Filing a new idea
+ * The Ideas area: every idea the reader may see, at every level. Filing a new idea
  * (`/app/ideas/new`) and editing one (`/app/ideas/:ideaId/edit`) are pages of
  * their own, both the same guided form, and both redirect back here with
  * their confirmation in router state. There is deliberately no second editor
@@ -52,7 +51,6 @@ import { IdeaContextDialog } from './IdeaContextDialog'
  *   reported as itself rather than as "your idea was not accepted".
  */
 export function IdeasWorkspace() {
-  const { activeOrganization } = useOrganization()
   const location = useLocation()
   const navigate = useNavigate()
   const [submittingIdeaId, setSubmittingIdeaId] = useState<string | null>(null)
@@ -165,7 +163,7 @@ export function IdeasWorkspace() {
             id="ideas-heading"
             className="mt-1 text-2xl font-semibold tracking-tight text-gray-900"
           >
-            {activeOrganization ? activeOrganization.name : 'Your ideas'}
+            Your ideas
           </h2>
         </div>
         {/*

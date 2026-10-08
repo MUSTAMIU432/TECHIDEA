@@ -8,7 +8,7 @@ import { useAuth } from '../../identity/auth/AuthContext'
 import { useOrganization } from '../../organizations/context/useOrganization'
 import { pageOf } from '../../../test/ideaPage'
 import type { Review } from '../api/reviewsApi'
-import { ReviewsWorkspace } from './ReviewsWorkspace'
+import { PlatformReviewWorkspace, ReviewsWorkspace } from './ReviewsWorkspace'
 
 vi.mock('../api/reviewsApi', () => ({
   viewerCanReviewInRequest: vi.fn(),
@@ -16,6 +16,7 @@ vi.mock('../api/reviewsApi', () => ({
   ideaReviewsRequest: vi.fn(),
   startReviewRequest: vi.fn(),
   completeReviewRequest: vi.fn(),
+  platformReviewQueueRequest: vi.fn(),
 }))
 vi.mock('../../ideas/api/ideasApi', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -25,8 +26,13 @@ vi.mock('../../ideas/api/ideasApi', async (importOriginal) => ({
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('../../organizations/context/useOrganization', () => ({ useOrganization: vi.fn() }))
 
-const { viewerCanReviewInRequest, reviewQueueRequest, ideaReviewsRequest, startReviewRequest } =
-  await import('../api/reviewsApi')
+const {
+  viewerCanReviewInRequest,
+  reviewQueueRequest,
+  ideaReviewsRequest,
+  startReviewRequest,
+  platformReviewQueueRequest,
+} = await import('../api/reviewsApi')
 const { ideaRequest } = await import('../../ideas/api/ideasApi')
 const canReviewMock = vi.mocked(viewerCanReviewInRequest)
 const queueMock = vi.mocked(reviewQueueRequest)
@@ -562,5 +568,130 @@ describe('ReviewsWorkspace', () => {
     expect(await screen.findByRole('form', { name: 'Review decision' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Take over review' })).not.toBeInTheDocument()
     expect(startMock).toHaveBeenCalledWith('5')
+  })
+})
+
+describe('PlatformReviewWorkspace', () => {
+  beforeEach(() => {
+    vi.mocked(platformReviewQueueRequest).mockReset()
+    historyMock.mockReset()
+    historyMock.mockResolvedValue([])
+    mockContext(null)
+  })
+
+  it('lists the platform queue without needing an organization, and opens a submission', async () => {
+    vi.mocked(platformReviewQueueRequest).mockResolvedValue([
+      makeIdea({
+        id: '4',
+        title: 'Tax collection',
+        status: 'SUBMITTED',
+        viewerCanStartReview: true,
+      }),
+    ])
+    render(
+      <MemoryRouter>
+        <PlatformReviewWorkspace />
+      </MemoryRouter>,
+    )
+
+    const queue = await screen.findByRole('list', {
+      name: 'Submissions waiting for platform review',
+    })
+    // Status as a pill above the details, then the details themselves.
+    expect(within(queue).getByText('Waiting for review')).toBeVisible()
+    expect(within(queue).getByText('Uncategorised', { exact: false })).toBeVisible()
+    fireEvent.click(within(queue).getByRole('button', { name: /Tax collection/ }))
+
+    expect(await screen.findByRole('button', { name: 'Start review' })).toBeInTheDocument()
+  })
+
+  it('hides the details and keeps them hidden for the next idea, with the review still there', async () => {
+    vi.mocked(platformReviewQueueRequest).mockResolvedValue([
+      makeIdea({
+        id: '4',
+        title: 'Tax collection',
+        description: 'Taxes are collected on paper.',
+        status: 'SUBMITTED',
+        viewerCanStartReview: true,
+      }),
+      makeIdea({
+        id: '5',
+        title: 'Hostel payments',
+        description: 'Payments are tracked by hand.',
+        status: 'SUBMITTED',
+        viewerCanStartReview: true,
+      }),
+    ])
+    render(
+      <MemoryRouter>
+        <PlatformReviewWorkspace />
+      </MemoryRouter>,
+    )
+    const queue = await screen.findByRole('list', {
+      name: 'Submissions waiting for platform review',
+    })
+    fireEvent.click(within(queue).getByRole('button', { name: /Tax collection/ }))
+
+    const hide = await screen.findByRole('button', { name: 'Hide details' })
+    expect(hide).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(hide)
+
+    const show = screen.getByRole('button', { name: 'Show details' })
+    expect(show).toHaveAttribute('aria-expanded', 'false')
+    // The supporting evidence goes with the details; the review controls stay.
+    expect(screen.queryByRole('button', { name: /Supporting evidence/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Start review' })).toBeInTheDocument()
+
+    fireEvent.click(within(queue).getByRole('button', { name: /Hostel payments/ }))
+    expect(await screen.findByRole('heading', { name: 'Hostel payments' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show details' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details' }))
+    expect(screen.getByRole('button', { name: /Supporting evidence/ })).toBeInTheDocument()
+  })
+
+  it('closes the selected idea and goes back to the queue', async () => {
+    vi.mocked(platformReviewQueueRequest).mockResolvedValue([
+      makeIdea({ id: '4', title: 'Tax collection', status: 'SUBMITTED' }),
+    ])
+    render(
+      <MemoryRouter>
+        <PlatformReviewWorkspace />
+      </MemoryRouter>,
+    )
+    const queue = await screen.findByRole('list', {
+      name: 'Submissions waiting for platform review',
+    })
+    fireEvent.click(within(queue).getByRole('button', { name: /Tax collection/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Close' }))
+
+    expect(screen.queryByRole('heading', { name: 'Tax collection' })).toBeNull()
+    expect(screen.getByText(/Select a submission/)).toBeInTheDocument()
+  })
+
+  it('says so when nothing is waiting', async () => {
+    vi.mocked(platformReviewQueueRequest).mockResolvedValue([])
+    render(
+      <MemoryRouter>
+        <PlatformReviewWorkspace />
+      </MemoryRouter>,
+    )
+
+    expect(
+      await screen.findByText('No submissions are waiting for platform review.'),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('ReviewsWorkspace beside a platform queue', () => {
+  it('stays out of the way of a platform reviewer who reviews in no organization', async () => {
+    mockContext(null)
+    const { container } = render(
+      <MemoryRouter>
+        <ReviewsWorkspace quiet />
+      </MemoryRouter>,
+    )
+
+    expect(container).toBeEmptyDOMElement()
   })
 })

@@ -18,7 +18,7 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
   updateIdeaRequest: vi.fn(),
   submitIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
-  organizationIdeasRequest: vi.fn(),
+  ideasRequest: vi.fn(),
 }))
 vi.mock('../../reviews/api/reviewsApi', () => ({
   ideaReviewsRequest: vi.fn(),
@@ -30,10 +30,10 @@ vi.mock('../../organizations/context/useOrganization', () => ({
   useOrganization: vi.fn(),
 }))
 
-const { organizationIdeasRequest, submitIdeaRequest, transitionIdeaRequest, updateIdeaRequest } =
+const { ideasRequest, submitIdeaRequest, transitionIdeaRequest, updateIdeaRequest } =
   await import('../api/ideasApi')
 const { ideaReviewsRequest, startReviewRequest } = await import('../../reviews/api/reviewsApi')
-const listMock = vi.mocked(organizationIdeasRequest)
+const listMock = vi.mocked(ideasRequest)
 const submitMock = vi.mocked(submitIdeaRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 const updateMock = vi.mocked(updateIdeaRequest)

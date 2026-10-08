@@ -3,10 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EMPTY_PROBLEM_STORY } from '../../ideas/utils/problemStory'
 import type { AdminIdea, AdminIdeaDetail, AdminReview } from '../api/administrationApi'
-import { pageOfItems, renderAdminPage } from '../../../test/renderAdmin'
+import { pageOfItems, READ_ONLY_ADMIN, renderAdminPage } from '../../../test/renderAdmin'
 import { AdminIdeaDetailPage } from './AdminIdeaDetailPage'
 import { AdminIdeasPage } from './AdminIdeasPage'
 
+vi.mock('../api/reviewersApi', () => ({
+  reviewTeamsRequest: vi.fn(async () => [
+    {
+      id: '9',
+      name: 'Review Team 1',
+      isActive: true,
+      leadId: '1',
+      members: [{ id: '1', email: 'lead@example.com', name: 'Helper Test', isLead: true }],
+    },
+  ]),
+  assignIdeaToReviewTeamRequest: vi.fn(),
+}))
 vi.mock('../api/administrationApi', async (importOriginal) => ({
   ...(await importOriginal()),
   adminIdeasRequest: vi.fn(),
@@ -27,7 +39,10 @@ function idea(overrides: Partial<AdminIdea> = {}): AdminIdea {
     contentRestricted: false,
     status: 'APPROVED',
     visibility: 'PUBLIC',
+    submissionContext: 'ORGANIZATION',
     organization: { id: '3', name: 'Acme' },
+    teamName: null,
+    reviewTeam: null,
     author: { id: '5', email: 'ada@acme.example', name: 'Ada Author' },
     categoryName: 'Finance',
     createdAt: '2026-01-01T00:00:00Z',
@@ -48,7 +63,9 @@ const REVIEW: AdminReview = {
     title: 'Automate the invoice run',
     status: 'APPROVED',
     visibility: 'PUBLIC',
+    submissionContext: 'ORGANIZATION',
     organization: { id: '3', name: 'Acme' },
+    teamName: null,
   },
   reviewer: { id: '9', email: 'rae@acme.example', name: 'Rae Reviewer' },
   decision: 'APPROVED',
@@ -110,6 +127,46 @@ describe('AdminIdeasPage', () => {
     // the part that says the author's own confirmation is still outstanding -
     // an administrator reading "Approved" alone would be told the idea is done.
     expect(row).toHaveTextContent('Platform approved — your confirmation needed')
+  })
+
+  it('lists individual and team ideas, which belong to no organization', async () => {
+    ideasMock.mockResolvedValue(
+      pageOfItems([
+        idea({ id: '8', submissionContext: 'INDIVIDUAL', organization: null }),
+        idea({ id: '9', submissionContext: 'TEAM', organization: null, teamName: 'Finance Crew' }),
+      ]),
+    )
+    renderAdminPage(<AdminIdeasPage />)
+
+    const rows = within(await screen.findByRole('table', { name: 'Ideas' })).getAllByRole('row')
+    expect(rows[1]).toHaveTextContent('Individual')
+    expect(rows[2]).toHaveTextContent('Team: Finance Crew')
+  })
+
+  it('offers an Assign button for a submitted idea no team has, and names the team otherwise', async () => {
+    ideasMock.mockResolvedValue(
+      pageOfItems([
+        idea({ id: '8', status: 'SUBMITTED' }),
+        idea({ id: '9', status: 'SUBMITTED', reviewTeam: { id: '4', name: 'Review Team 1' } }),
+        idea({ id: '10', status: 'APPROVED' }),
+      ]),
+    )
+    renderAdminPage(<AdminIdeasPage />)
+
+    const rows = within(await screen.findByRole('table', { name: 'Ideas' })).getAllByRole('row')
+    const assign = within(rows[1]).getByRole('link', { name: 'Assign to review team' })
+    expect(assign).toHaveAttribute('href', '/app/admin/ideas/8#assign-review-team')
+    expect(rows[2]).toHaveTextContent('Review Team 1')
+    expect(within(rows[2]).queryByRole('link', { name: 'Assign to review team' })).toBeNull()
+    expect(within(rows[3]).queryByRole('link', { name: 'Assign to review team' })).toBeNull()
+  })
+
+  it('offers no Assign button to an administrator who cannot route work', async () => {
+    ideasMock.mockResolvedValue(pageOfItems([idea({ status: 'SUBMITTED' })]))
+    renderAdminPage(<AdminIdeasPage />, { capabilities: READ_ONLY_ADMIN })
+
+    await screen.findByRole('table', { name: 'Ideas' })
+    expect(screen.queryByRole('link', { name: 'Assign to review team' })).toBeNull()
   })
 
   it('labels a withheld title as restricted rather than leaving it blank', async () => {
@@ -183,6 +240,28 @@ describe('AdminIdeaDetailPage', () => {
     expect(screen.getByText('Clear and worth doing.')).toBeInTheDocument()
     expect(screen.getByText('Draft → Submitted')).toBeInTheDocument()
     expect(screen.getByText(/recorded in the administrative audit trail/)).toBeInTheDocument()
+  })
+
+  it('opens on the review-team picker when arriving from the Assign button', async () => {
+    ideaMock.mockResolvedValue(detail({ status: 'SUBMITTED' }))
+    renderAdminPage(<AdminIdeaDetailPage />, {
+      path: '/ideas/7#assign-review-team',
+      pattern: '/ideas/:ideaId',
+    })
+
+    const picker = await screen.findByLabelText('Review team')
+    await screen.findByRole('option', { name: 'Review Team 1 (lead: Helper Test)' })
+    await waitFor(() => expect(picker).toHaveFocus())
+    expect(screen.getByText('No review team has this idea yet.')).toBeInTheDocument()
+  })
+
+  it('shows the review team an idea is with', async () => {
+    ideaMock.mockResolvedValue(
+      detail({ status: 'SUBMITTED', reviewTeam: { id: '9', name: 'Review Team 1' } }),
+    )
+    renderDetail()
+
+    expect(await screen.findByText(/Currently with/)).toHaveTextContent('Review Team 1')
   })
 
   it('downloads evidence through the console endpoint', async () => {

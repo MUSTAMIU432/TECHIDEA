@@ -69,6 +69,21 @@ const KINDS: Array<{ value: string; label: string; group: string }> = [
     group: 'The review queues',
   },
   {
+    value: 'proposal.owner_declined',
+    label: 'An owner decided not to go ahead',
+    group: 'The review queues',
+  },
+  {
+    value: 'proposal.writing_opened',
+    label: 'A review team can write its proposal',
+    group: 'The review queues',
+  },
+  {
+    value: 'review.decision_awaiting_release',
+    label: 'A decision waiting to be sent to its owner',
+    group: 'The review queues',
+  },
+  {
     value: 'invitation.received',
     label: 'You have been invited',
     group: 'Invitations and messages',

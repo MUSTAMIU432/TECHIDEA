@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { hasReportLink, type Notification, type NotificationKind } from '../api/notificationsApi'
@@ -27,6 +28,10 @@ import { formatDate } from '../../reviews/utils/reviewLabels'
 export function NotificationsPage() {
   const { notifications, loading, error, unreadCount, reload, markRead, markAllRead } =
     useNotifications()
+  // New notifications are the list; once read, one clears into "Earlier", folded.
+  const [earlierOpen, setEarlierOpen] = useState(false)
+  const fresh = notifications.filter((notification) => !notification.isRead)
+  const earlier = notifications.filter((notification) => notification.isRead)
 
   return (
     <section aria-labelledby="notifications-heading" className="mt-8">
@@ -75,15 +80,55 @@ export function NotificationsPage() {
         ) : notifications.length === 0 ? (
           <p className="text-sm text-gray-600">Nothing to report yet.</p>
         ) : (
-          <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
-            {notifications.map((notification) => (
-              <NotificationRow
-                key={notification.id}
-                notification={notification}
-                onRead={() => void markRead(notification.id)}
-              />
-            ))}
-          </ul>
+          <>
+            <h2 className="text-sm font-semibold text-gray-900">New</h2>
+            {fresh.length === 0 ? (
+              <p className="mt-2 rounded-lg border border-dashed border-gray-300 bg-white px-4 py-4 text-sm text-gray-600">
+                You are all caught up.
+              </p>
+            ) : (
+              <ul
+                aria-label="New notifications"
+                className="mt-2 divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white"
+              >
+                {fresh.map((notification) => (
+                  <NotificationRow
+                    key={notification.id}
+                    notification={notification}
+                    onRead={() => void markRead(notification.id)}
+                  />
+                ))}
+              </ul>
+            )}
+            {earlier.length > 0 && (
+              <div className="mt-6">
+                <button
+                  type="button"
+                  aria-expanded={earlierOpen}
+                  aria-controls="earlier-notifications"
+                  onClick={() => setEarlierOpen((open) => !open)}
+                  className="text-sm font-semibold text-gray-600 hover:text-gray-900"
+                >
+                  {earlierOpen ? 'Hide earlier' : `Earlier (${earlier.length})`}
+                </button>
+                {earlierOpen && (
+                  <ul
+                    id="earlier-notifications"
+                    aria-label="Earlier notifications"
+                    className="mt-2 divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white opacity-80"
+                  >
+                    {earlier.map((notification) => (
+                      <NotificationRow
+                        key={notification.id}
+                        notification={notification}
+                        onRead={() => void markRead(notification.id)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </section>
@@ -134,6 +179,8 @@ function NotificationRow({
             {notification.actionPath && (
               <Link
                 to={notification.actionPath}
+                // Opening it is reading it: it clears from the new ones.
+                onClick={notification.isRead ? undefined : onRead}
                 className="text-sm font-semibold text-brand-700 hover:text-brand-800"
               >
                 {actionLinkLabel(notification)}
@@ -179,9 +226,26 @@ function NotificationRow({
  * your conversations" - so a reader is not shown a path.
  */
 function actionLinkLabel(notification: Notification): string {
-  if (notification.actionPath?.endsWith('/report')) return 'Read the review report'
-  if (notification.actionPath?.startsWith('/app/messages')) return 'Open your conversations'
-  if (notification.actionPath?.startsWith('/app/ideas')) return 'Open the idea'
+  const path = notification.actionPath ?? ''
+  if (path.endsWith('#respond')) return 'Respond to the review'
+  if (path.endsWith('#decision-letter')) return 'Read your letter'
+  if (path.endsWith('#proposal')) return 'See the proposal'
+  if (path.includes('?tab=uat')) return 'Open acceptance testing'
+  if (path.includes('?tab=testing')) return 'Open testing'
+  if (path.includes('?tab=deployment')) return 'Open the deployment'
+  if (path.includes('?tab=impact')) return 'Open the impact'
+  if (path.includes('?tab=work')) return 'Open tasks and milestones'
+  if (path.startsWith('/app/automation/projects/')) return 'Open the project'
+  if (path.startsWith('/app/automation/opportunities/')) return 'Open the opportunity'
+  if (path.startsWith('/app/automation/queue')) return 'Open the developer queue'
+  if (path.endsWith('/report')) return 'Read the review report'
+  if (path.startsWith('/app/messages')) return 'Open your conversations'
+  if (path.startsWith('/app/reviews/proposals/')) return 'Open the proposal'
+  if (path.startsWith('/app/reviews')) return 'Open the review'
+  if (path.startsWith('/app/admin/decisions')) return 'Open Decisions'
+  if (path.startsWith('/app/admin/proposals')) return 'Open Proposals'
+  if (path.endsWith('/proposal')) return 'Read your proposal'
+  if (path.startsWith('/app/ideas')) return 'Open the idea'
   return 'Open'
 }
 

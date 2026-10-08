@@ -16,7 +16,7 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
-  organizationIdeasRequest: vi.fn(),
+  ideasRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
@@ -24,8 +24,8 @@ vi.mock('../../organizations/context/useOrganization', () => ({
   useOrganization: vi.fn(),
 }))
 
-const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
-const listMock = vi.mocked(organizationIdeasRequest)
+const { ideasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
+const listMock = vi.mocked(ideasRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }

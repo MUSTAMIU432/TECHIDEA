@@ -24,7 +24,7 @@ import {
   UsersIcon,
 } from '../components/AdminIcons'
 import { useAdminQuery } from '../hooks/useAdminQuery'
-import { auditActionLabel, formatDateTime } from '../utils/format'
+import { auditActionLabel, formatDateTime, ideaHomeLabel } from '../utils/format'
 
 function countOf(counts: AdminStatusCount[], status: AdminStatusCount['status']): number {
   return counts.find((item) => item.status === status)?.count ?? 0
@@ -147,7 +147,7 @@ export function AdminDashboardPage() {
                         {statusLabel(activity.fromStatus)} → {statusLabel(activity.toStatus)}
                       </span>
                       <p className="text-xs text-slate-500">
-                        {activity.actor.name} · {activity.organization.name} ·{' '}
+                        {activity.actor.name} · {ideaHomeLabel(activity)} ·{' '}
                         {formatDateTime(activity.createdAt)}
                       </p>
                     </li>

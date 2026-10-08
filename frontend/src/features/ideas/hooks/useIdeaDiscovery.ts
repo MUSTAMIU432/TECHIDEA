@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react'
 
-import {
-  organizationIdeasRequest,
-  type Idea,
-  type IdeaFilters,
-  type IdeaPageInfo,
-} from '../api/ideasApi'
+import { ideasRequest, type Idea, type IdeaFilters, type IdeaPageInfo } from '../api/ideasApi'
 
 /**
- * One page of an organization's ideas, for a given set of filters.
+ * One page of every idea the signed-in user may read, for a given set of filters.
+ *
+ * **Not scoped to an organization.** An idea is filed by one person, a team or an
+ * organization, and somebody with no organization still has ideas of their own; the
+ * server's `ideas` query returns everything this reader may see at every level, and the
+ * Owner filter (`submissionContext`) narrows it to one level when wanted.
  *
  * The fetching lives here rather than in `IdeaList` because the list also has
  * to be *re-fetchable* from two directions that are not the same thing:
@@ -24,7 +24,7 @@ import {
  * that re-sorted a list would show an order the backend never promised. And
  * it does not report "no ideas" for a request that failed - a transport
  * failure is its own message, because an empty list would read as a claim
- * about the organization's contents.
+ * about what exists.
  */
 export interface IdeaDiscovery {
   /** The rows from the most recent answer, which may be for an older query. */
@@ -50,17 +50,16 @@ const FAILED = 'We could not reach the server. Please try again.'
 // must keep one identity until a real answer replaces it.
 const NO_IDEAS: Idea[] = []
 
-export function useIdeaDiscovery(
-  organizationId: string | null,
-  filters: IdeaFilters,
-  reloadToken: number,
-): IdeaDiscovery {
+export function useIdeaDiscovery(filters: IdeaFilters, reloadToken: number): IdeaDiscovery {
   // Destructured rather than used as an object, because `filters` is built
   // fresh on every render and depending on its identity would re-fetch on
   // every render, forever. These are the values the query actually is.
   const search = filters.search ?? null
   const categoryId = filters.categoryId ?? null
   const status = filters.status ?? null
+  const submissionContext = filters.submissionContext ?? null
+  const visibility = filters.visibility ?? null
+  const mine = filters.mine ?? null
   const offset = filters.offset ?? 0
   const limit = filters.limit
 
@@ -76,10 +75,12 @@ export function useIdeaDiscovery(
   // response from *replacing* a current one, which is what an older request
   // settling after a newer one would otherwise do (S2-008).
   const key = JSON.stringify([
-    organizationId,
     search,
     categoryId,
     status,
+    submissionContext,
+    visibility,
+    mine,
     offset,
     limit,
     reloadToken,
@@ -89,19 +90,18 @@ export function useIdeaDiscovery(
   const [errorKey, setErrorKey] = useState<string | null>(null)
 
   useEffect(() => {
-    // Nothing to ask for. `IdeaList` renders this case from `organizationId`
-    // rather than from an empty list, so there is no answer to clear.
-    if (organizationId === null) return
-
     // Set when this query is superseded - by new filters, a new page, or a
     // reload - so its answer, success or failure, is dropped on arrival and
     // can neither replace nor wipe the newer one.
     let cancelled = false
 
-    organizationIdeasRequest(organizationId, {
+    ideasRequest({
       search,
       categoryId,
       status,
+      submissionContext,
+      visibility,
+      mine,
       offset,
       limit,
     })
@@ -123,7 +123,7 @@ export function useIdeaDiscovery(
     // query, go and ask again" after a write. It changes nothing about the
     // request, so the linter is right that the effect does not read it.
     // oxlint-disable-next-line react/exhaustive-effect-dependencies
-  }, [organizationId, search, categoryId, status, offset, limit, key])
+  }, [search, categoryId, status, submissionContext, visibility, mine, offset, limit, key])
 
   const current = answer !== null && answer.key === key
   const failed = errorKey === key

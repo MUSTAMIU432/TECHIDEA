@@ -13,6 +13,7 @@ import { MessagesPage } from '../features/messaging/components/MessagesPage'
 import { NotificationsPage } from '../features/notifications/components/NotificationsPage'
 import { IdeaDetailPage } from '../features/ideas/components/IdeaDetailPage'
 import { IdeaReportPage } from '../features/reviews/components/IdeaReportPage'
+import { ProposalWorkspacePage } from '../features/proposals/components/ProposalWorkspacePage'
 import { AppLayout } from '../layouts/AppLayout'
 import { RootLayout } from '../layouts/RootLayout'
 import { DashboardPage } from '../routes/DashboardPage'
@@ -130,6 +131,7 @@ export const router = createBrowserRouter([
           { path: 'ideas/:ideaId/report', element: <IdeaReportPage /> },
           { path: 'ideas/:ideaId/proposal', element: <ProposalReadPage /> },
           { path: 'reviews', element: <ReviewsPage /> },
+          { path: 'reviews/proposals/:ideaId', element: <ProposalWorkspacePage /> },
           /*
             Teams and messages are `/app` children but read nothing from
             `OrganizationProvider`: a team is a collaboration boundary rather than
@@ -191,6 +193,8 @@ export const router = createBrowserRouter([
               },
               { path: 'approvals', lazy: adminPage('AdminApprovalsPage') },
               { path: 'reviewers', lazy: adminPage('AdminReviewersPage') },
+              { path: 'roles', lazy: adminPage('AdminPlatformRolesPage') },
+              { path: 'decisions', lazy: adminPage('AdminDecisionsPage') },
               { path: 'proposals', lazy: adminPage('AdminProposalsPage') },
               { path: 'automation', lazy: adminPage('AdminAutomationPage') },
               /*

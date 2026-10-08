@@ -9,6 +9,9 @@ import { ownerNameFor } from '../utils/ownership'
 import { statusDescription, statusLabel } from '../utils/lifecycle'
 import { IdeaProposalPanel } from '../../proposals/components/IdeaProposalPanel'
 import { IdeaAutomationPanel } from '../../automation/components/IdeaAutomationPanel'
+import { useScrollToHash } from '../hooks/useScrollToHash'
+import { DecisionLetterCard } from '../../reviews/components/DecisionLetterCard'
+import { RespondToChangesPanel } from '../../reviews/components/RespondToChangesPanel'
 import { IdeaReviewSection } from '../../reviews/components/IdeaReviewSection'
 import { useAuth } from '../../identity/auth/AuthContext'
 import { formatDate } from '../../reviews/utils/reviewLabels'
@@ -44,6 +47,9 @@ export function IdeaDetailPage() {
     effect to express it.
   */
   const [token, setToken] = useState(0)
+  // The server's words after the owner answered a request for changes, shown once the
+  // idea has been read again in its new state.
+  const [responded, setResponded] = useState<string | null>(null)
   const queryKey = `${ideaId}#${token}`
   const [answer, setAnswer] = useState<{
     key: string
@@ -69,6 +75,8 @@ export function IdeaDetailPage() {
   }, [ideaId, queryKey])
 
   const reload = useCallback(() => setToken((value) => value + 1), [])
+  // A notification's link names the section it is about (`#respond`, `#decision-letter`).
+  useScrollToHash(answer !== null && answer.key === queryKey && answer.idea !== null)
 
   if (answer === null || answer.key !== queryKey) {
     return <p className="mt-8 text-sm text-gray-600">Loading this idea…</p>
@@ -201,6 +209,25 @@ export function IdeaDetailPage() {
         </div>
       </header>
 
+      {responded && (
+        <output className="mt-6 block rounded-lg bg-green-50 px-4 py-3 text-sm text-green-800">
+          {responded}
+        </output>
+      )}
+
+      {/* While changes are requested: what was asked, and where the owner answers it. */}
+      <RespondToChangesPanel
+        idea={idea}
+        viewerId={user?.id ?? null}
+        onResponded={(message) => {
+          setResponded(message)
+          reload()
+        }}
+      />
+
+      {/* The platform's letter to the owner about its decision, once it has been sent. */}
+      <DecisionLetterCard ideaId={idea.id} />
+
       {idea.description && (
         <section aria-labelledby="idea-overview" className="mt-8">
           <h2 id="idea-overview" className="text-lg font-bold tracking-tight text-gray-900">
@@ -220,8 +247,13 @@ export function IdeaDetailPage() {
         the page, so the panels themselves are rendered.
       */}
       <IdeaDiscussionPanel idea={idea} />
-      <IdeaAttachmentsPanel idea={idea} />
-      <IdeaProposalPanel ideaId={idea.id} status={idea.status} />
+      {/* The anchor the response panel's "Go to documents" points at. */}
+      <div id="idea-evidence" className="scroll-mt-24">
+        <IdeaAttachmentsPanel idea={idea} />
+      </div>
+      <div id="proposal" className="scroll-mt-24 rounded-xl">
+        <IdeaProposalPanel ideaId={idea.id} status={idea.status} />
+      </div>
       <IdeaAutomationPanel idea={idea} />
       <IdeaReviewSection idea={idea} viewerId={user?.id ?? null} open />
     </article>

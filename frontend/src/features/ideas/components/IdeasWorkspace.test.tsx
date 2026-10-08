@@ -16,7 +16,7 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
-  organizationIdeasRequest: vi.fn(),
+  ideasRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
@@ -24,8 +24,8 @@ vi.mock('../../organizations/context/useOrganization', () => ({
   useOrganization: vi.fn(),
 }))
 
-const { organizationIdeasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
-const listMock = vi.mocked(organizationIdeasRequest)
+const { ideasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
+const listMock = vi.mocked(ideasRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 
 const SIGNED_IN = { id: '7', email: 'ada@example.com' }
@@ -87,26 +87,28 @@ describe('IdeasWorkspace', () => {
 
   // --- the list -----------------------------------------------------------
 
-  it('reads the active organization feed, not a list the client filtered', async () => {
+  it('reads every idea the reader may see, not a list the client filtered', async () => {
     renderWithRouter(<IdeasWorkspace />)
 
-    // The tenant and visibility rules are the server's. This component asks
-    // for one organization's ideas by id and renders whatever it is given.
+    // The tenant and visibility rules are the server's: this component asks for
+    // every idea the reader may see - their own, their teams' and their
+    // organizations' - and renders whatever it is given.
     //
-    // The second argument is asserted key by key rather than as a literal,
-    // because it is the filter and it is meant to grow: what matters is that
-    // it names no tenant, no author and no visibility, since a filter that
-    // could widen a result is the one thing this client must not be able to
-    // ask for.
+    // The filters are asserted key by key rather than as a literal, because they
+    // are meant to grow: what matters is that each one only *narrows* what the
+    // server already allows (a level, an audience, "only mine") and that none
+    // names a tenant or an author, which could widen a result.
     await waitFor(() => expect(listMock).toHaveBeenCalled())
-    const [organizationId, filters = {}] = listMock.mock.calls[0]
-    expect(organizationId).toBe('3')
+    const [filters = {}] = listMock.mock.calls[0]
     expect(Object.keys(filters).sort()).toEqual([
       'categoryId',
       'limit',
+      'mine',
       'offset',
       'search',
       'status',
+      'submissionContext',
+      'visibility',
     ])
   })
 
@@ -131,11 +133,14 @@ describe('IdeasWorkspace', () => {
     expect(await screen.findByText('No ideas here yet')).toBeInTheDocument()
   })
 
-  it('shows an empty state, not an error, when there is no organization', async () => {
+  it('lists ideas for somebody who belongs to no organization', async () => {
+    // An individual idea belongs to nobody but its author, so a reader with no
+    // organization still has a list - there is no organization to choose first.
     mockContext([], null)
     renderWithRouter(<IdeasWorkspace />)
 
-    expect(await screen.findByText('No organization selected')).toBeInTheDocument()
+    await waitFor(() => expect(listMock).toHaveBeenCalled())
+    expect(screen.queryByText('No organization selected')).toBeNull()
   })
 
   it('reports a transport failure as itself rather than as an empty list', async () => {

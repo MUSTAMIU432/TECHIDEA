@@ -14,11 +14,14 @@ import {
   Restricted,
   cellClasses,
   controlClasses,
+  primaryButtonClasses,
 } from '../components/AdminUi'
 import { SearchBox } from '../components/SearchBox'
+import { useAdminCapabilities } from '../context/useAdminCapabilities'
 import { useAdminQuery } from '../hooks/useAdminQuery'
 import { useUrlFilters } from '../hooks/useUrlFilters'
-import { formatDay, RESTRICTED_TITLE } from '../utils/format'
+import { formatDay, ideaHomeLabel, RESTRICTED_TITLE } from '../utils/format'
+import { ASSIGN_REVIEW_TEAM_ANCHOR, awaitsReviewTeam } from '../utils/reviewRouting'
 
 const STATUSES = Object.keys(STATUS_LABELS) as IdeaStatus[]
 const VISIBILITIES = Object.keys(VISIBILITY_LABELS) as IdeaVisibility[]
@@ -42,6 +45,8 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
  */
 export function AdminIdeasPage() {
   const filters = useUrlFilters()
+  // Display only: the button is offered to whoever can route work, and the server decides.
+  const canAssign = useAdminCapabilities().capabilities.canAssignPlatformReviewers
   const values = {
     search: filters.get('search'),
     status: filters.get('status') as IdeaStatus | '',
@@ -165,10 +170,11 @@ export function AdminIdeasPage() {
             label="Ideas"
             columns={[
               'Idea',
-              'Organization',
+              'Belongs to',
               'Author',
               'Category',
               'Status',
+              'Review team',
               'Visibility',
               'Created',
               'Updated',
@@ -190,12 +196,16 @@ export function AdminIdeasPage() {
                   </p>
                 </td>
                 <td className={cellClasses}>
-                  <Link
-                    to={`/app/admin/organizations/${idea.organization.id}`}
-                    className="hover:underline"
-                  >
-                    {idea.organization.name}
-                  </Link>
+                  {idea.organization ? (
+                    <Link
+                      to={`/app/admin/organizations/${idea.organization.id}`}
+                      className="hover:underline"
+                    >
+                      {idea.organization.name}
+                    </Link>
+                  ) : (
+                    ideaHomeLabel(idea)
+                  )}
                 </td>
                 <td className={cellClasses}>
                   <Link to={`/app/admin/users/${idea.author.id}`} className="hover:underline">
@@ -205,6 +215,21 @@ export function AdminIdeasPage() {
                 <td className={cellClasses}>{idea.categoryName ?? '—'}</td>
                 <td className={cellClasses}>
                   <IdeaStatusBadge status={idea.status} />
+                </td>
+                <td className={`${cellClasses} whitespace-nowrap`}>
+                  {idea.reviewTeam ? (
+                    idea.reviewTeam.name
+                  ) : canAssign && awaitsReviewTeam(idea.status, idea.reviewTeam) ? (
+                    <Link
+                      to={`/app/admin/ideas/${idea.id}#${ASSIGN_REVIEW_TEAM_ANCHOR}`}
+                      state={filters.here}
+                      className={primaryButtonClasses}
+                    >
+                      Assign to review team
+                    </Link>
+                  ) : (
+                    '—'
+                  )}
                 </td>
                 <td className={`${cellClasses} whitespace-nowrap`}>
                   {VISIBILITY_LABELS[idea.visibility]}

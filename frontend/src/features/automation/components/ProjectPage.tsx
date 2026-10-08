@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import { projectRequest, type Project } from '../api/automationApi'
 import { CONTEXT_LABEL } from '../utils/labels'
@@ -28,7 +28,10 @@ type TabId = (typeof TABS)[number]['id']
 /** One project at `/app/automation/projects/:id`. */
 export function ProjectPage() {
   const { projectId = '' } = useParams()
-  const [tab, setTab] = useState<TabId>('overview')
+  // A notification can open the page on the tab its news is about (`?tab=uat`).
+  const [params] = useSearchParams()
+  const requested = TABS.find((item) => item.id === params.get('tab'))?.id
+  const [tab, setTab] = useState<TabId>(requested ?? 'overview')
   const loaded = useLoad(() => projectRequest(projectId), `project:${projectId}`)
 
   if (loaded.loading) return <Loading what="this project" />

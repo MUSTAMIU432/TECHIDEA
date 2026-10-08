@@ -15,7 +15,7 @@ vi.mock('../api/ideasApi', async (importOriginal) => ({
   createIdeaRequest: vi.fn(),
   updateIdeaRequest: vi.fn(),
   transitionIdeaRequest: vi.fn(),
-  organizationIdeasRequest: vi.fn(),
+  ideasRequest: vi.fn(),
 }))
 
 vi.mock('../../identity/auth/AuthContext', () => ({ useAuth: vi.fn() }))
@@ -23,9 +23,8 @@ vi.mock('../../organizations/context/useOrganization', () => ({
   useOrganization: vi.fn(),
 }))
 
-const { categoriesRequest, organizationIdeasRequest, transitionIdeaRequest } =
-  await import('../api/ideasApi')
-const listMock = vi.mocked(organizationIdeasRequest)
+const { categoriesRequest, ideasRequest, transitionIdeaRequest } = await import('../api/ideasApi')
+const listMock = vi.mocked(ideasRequest)
 const categoriesMock = vi.mocked(categoriesRequest)
 const transitionMock = vi.mocked(transitionIdeaRequest)
 
@@ -48,7 +47,7 @@ const CATEGORIES = [
  * the buttons reading an offset the reader is not at.
  */
 function echoPage(total: number, rows: Idea[] = [makeIdea()]) {
-  listMock.mockImplementation(async (_organizationId, filters = {}) => {
+  listMock.mockImplementation(async (filters = {}) => {
     const offset = filters.offset ?? 0
     const limit = filters.limit ?? 20
     return {
@@ -68,7 +67,7 @@ function echoPage(total: number, rows: Idea[] = [makeIdea()]) {
 function lastFilters(): IdeaFilters {
   const call = listMock.mock.calls.at(-1)
   if (call === undefined) throw new Error('no request was made')
-  return call[1] ?? {}
+  return call[0] ?? {}
 }
 
 function mockContext(answer: IdeaPage = page([makeIdea()])) {
@@ -251,7 +250,7 @@ describe('IdeasWorkspace discovery (S2-004)', () => {
     // reaching it and being overwritten — which is what would leave the list
     // showing results for a word that is no longer in the box if the two
     // responses arrived out of order.
-    const searches = listMock.mock.calls.map((call) => (call[1] ?? {}).search)
+    const searches = listMock.mock.calls.map((call) => (call[0] ?? {}).search)
     expect(searches.filter(Boolean)).toEqual(['invoicing'])
   })
 

@@ -182,14 +182,14 @@ export function FileUploadPanel({
 
   return (
     <div className="grid overflow-hidden rounded-xl border border-gray-300 bg-white shadow-sm @2xl:grid-cols-2">
-      <div className="p-4">
+      <div className="flex flex-col p-4">
         <div
           data-testid="file-drop-zone"
           onDragOver={handleDragOver}
           onDragEnter={handleDragOver}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          className={`flex h-full min-h-56 flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-8 text-center transition-colors ${
+          className={`flex min-h-56 flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-8 text-center transition-colors ${
             dragging ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50'
           } ${disabled ? 'opacity-60' : ''}`}
         >
@@ -230,7 +230,7 @@ export function FileUploadPanel({
             />
           </label>
         </div>
-        <p className="mt-2 text-xs leading-5 text-gray-500">
+        <p className="mt-2 shrink-0 text-xs leading-5 text-gray-600">
           Accepted: PDF, JPG, PNG, GIF, WEBP, DOC, DOCX, XLS, XLSX, CSV, TXT. Up to{' '}
           {MAX_UPLOAD_LABEL} each.
         </p>

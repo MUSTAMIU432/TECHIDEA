@@ -1,4 +1,4 @@
-import type { AdminAuditAction } from '../api/administrationApi'
+import type { AdminAuditAction, AdminIdeaHome } from '../api/administrationApi'
 
 /** Presentation only: labels for what the server returned. */
 
@@ -20,6 +20,14 @@ export function formatDay(iso: string | null): string {
     month: 'short',
     day: 'numeric',
   })
+}
+
+/** Whose idea it is: its organization, its team, or "Individual". */
+export function ideaHomeLabel(idea: AdminIdeaHome): string {
+  if (idea.submissionContext === 'ORGANIZATION' && idea.organization) return idea.organization.name
+  if (idea.submissionContext === 'TEAM' && idea.teamName) return `Team: ${idea.teamName}`
+  if (idea.submissionContext === 'TEAM') return 'Team'
+  return 'Individual'
 }
 
 export function formatBytes(size: number): string {

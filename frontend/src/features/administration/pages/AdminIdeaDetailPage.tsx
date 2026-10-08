@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 
 import { IdeaStory } from '../../ideas/components/IdeaStory'
 import { statusLabel, VISIBILITY_LABELS } from '../../ideas/utils/lifecycle'
@@ -24,7 +24,8 @@ import { BackLink } from '../components/BackLink'
 import { ReviewRoundCard } from '../components/ReviewRoundCard'
 import { useAdminQuery } from '../hooks/useAdminQuery'
 import { useBackTarget } from '../hooks/useBackTarget'
-import { formatBytes, formatDateTime, RESTRICTED_TITLE } from '../utils/format'
+import { formatBytes, formatDateTime, ideaHomeLabel, RESTRICTED_TITLE } from '../utils/format'
+import { ASSIGN_REVIEW_TEAM_ANCHOR } from '../utils/reviewRouting'
 
 /**
  * One idea, as the console sees it: metadata, lifecycle history, review rounds
@@ -47,6 +48,8 @@ export function AdminIdeaDetailPage() {
   // and a hook that was only called on one of them would be called a different
   // number of times depending on which.
   const backTo = useBackTarget('/app/admin/ideas')
+  // Arriving from the idea list's "Assign" button: open on the review-team card.
+  const assigning = useLocation().hash === `#${ASSIGN_REVIEW_TEAM_ANCHOR}`
   const {
     data: idea,
     loading,
@@ -76,20 +79,33 @@ export function AdminIdeaDetailPage() {
           </p>
         )}
 
+        <AssignReviewTeam
+          ideaId={idea.id}
+          status={idea.status}
+          currentTeam={idea.reviewTeam}
+          focus={assigning}
+          onAssigned={reload}
+        />
+
         <AdminCard title="Overview">
           <DetailList
             items={[
               ['Status', <IdeaStatusBadge key="status" status={idea.status} />],
               ['Visibility', VISIBILITY_LABELS[idea.visibility]],
+              ['Review team', idea.reviewTeam?.name ?? 'Not assigned yet'],
               [
-                'Organization',
-                <Link
-                  key="organization"
-                  to={`/app/admin/organizations/${idea.organization.id}`}
-                  className="hover:underline"
-                >
-                  {idea.organization.name}
-                </Link>,
+                'Belongs to',
+                idea.organization ? (
+                  <Link
+                    key="organization"
+                    to={`/app/admin/organizations/${idea.organization.id}`}
+                    className="hover:underline"
+                  >
+                    {idea.organization.name}
+                  </Link>
+                ) : (
+                  ideaHomeLabel(idea)
+                ),
               ],
               [
                 'Author',
@@ -141,8 +157,6 @@ export function AdminIdeaDetailPage() {
             </>
           )}
         </AdminCard>
-
-        <AssignReviewTeam ideaId={idea.id} status={idea.status} />
 
         <AdminCard title="Review history">
           {idea.reviews.length === 0 ? (

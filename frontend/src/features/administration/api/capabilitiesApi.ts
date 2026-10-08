@@ -14,9 +14,12 @@ export interface AdminCapabilities {
   canManageUserAccounts: boolean
   canManageOrganizationRoles: boolean
   canManageCategories: boolean
+  /** A platform reviewer: works in the review workspace, with or without the console. */
+  canReviewPlatformSubmissions: boolean
   canAssignPlatformReviewers: boolean
   canManageReviewers: boolean
   canReleaseProposals: boolean
+  canManagePlatformRoles: boolean
 }
 
 export const NO_ADMIN_CAPABILITIES: AdminCapabilities = {
@@ -25,9 +28,11 @@ export const NO_ADMIN_CAPABILITIES: AdminCapabilities = {
   canManageUserAccounts: false,
   canManageOrganizationRoles: false,
   canManageCategories: false,
+  canReviewPlatformSubmissions: false,
   canAssignPlatformReviewers: false,
   canManageReviewers: false,
   canReleaseProposals: false,
+  canManagePlatformRoles: false,
 }
 
 const CAPABILITIES_QUERY = `
@@ -38,9 +43,11 @@ const CAPABILITIES_QUERY = `
       canManageUserAccounts
       canManageOrganizationRoles
       canManageCategories
+      canReviewPlatformSubmissions
       canAssignPlatformReviewers
       canManageReviewers
       canReleaseProposals
+      canManagePlatformRoles
     }
   }
 `

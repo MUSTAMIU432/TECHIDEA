@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom'
 
 import { useAsyncKey } from './useAsyncKey'
 import {
+  PAYMENT_WORDS,
   PROPOSAL_SECTIONS,
+  sectionApplies,
   proposalStateRequest,
   startProposalRequest,
   statusWords,
@@ -124,8 +126,9 @@ function Writer({
         state.canStart ? (
           <>
             <p className="text-sm text-gray-600">
-              This idea is approved. Write the proposal for it: what would be built, how long it
-              would take and how it will be judged done.
+              This idea is approved. Write the proposal for it: whether it is feasible, what would
+              be built and what it needs, the timeline, what it costs and whether the owner pays,
+              and how it will be judged done.
             </p>
             <button
               type="button"
@@ -136,6 +139,14 @@ function Writer({
               Start the proposal
             </button>
           </>
+        ) : state.waitingForAdmin ? (
+          <div role="note" className="rounded-lg bg-amber-50 p-4 text-sm text-amber-900">
+            <p className="font-semibold">Approved - waiting for the platform admin</p>
+            <p className="mt-1">
+              The platform admin confirms the approval and tells the owner first. You can start the
+              proposal as soon as they do, and you will be notified.
+            </p>
+          </div>
         ) : (
           <p className="text-sm text-gray-600">There is no proposal for this idea yet.</p>
         )
@@ -179,6 +190,12 @@ function Writer({
   )
 }
 
+/**
+ * The proposal form, as cards that fold: a long document is written a section at a time.
+ * Sections already written start folded and empty ones open, so the writer lands on what
+ * is left; "Expand all" and "Collapse all" do what they say. Everything is still one form,
+ * saved together.
+ */
 function Editor({
   proposal,
   busy,
@@ -197,44 +214,131 @@ function Editor({
         string
       >,
   )
+  const sections = PROPOSAL_SECTIONS.filter((section) =>
+    sectionApplies(section.key, values.paymentRequired),
+  )
+  // The folded sections, rather than the open ones: a section that appears later (the
+  // payment plan, once the owner pays) is then open, like every other empty one.
+  const [folded, setFolded] = useState<Set<SectionKey>>(
+    () => new Set(PROPOSAL_SECTIONS.filter((s) => proposal[s.key]?.trim()).map((s) => s.key)),
+  )
+  const written = sections.filter((section) => values[section.key]?.trim()).length
+  const toggle = (key: SectionKey) =>
+    setFolded((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
   return (
     <form
       aria-label="Proposal"
-      className="space-y-4"
+      className="space-y-3"
       onSubmit={(event) => {
         event.preventDefault()
         onSave(values)
       }}
     >
-      {PROPOSAL_SECTIONS.map((section) => {
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-gray-500">
+          <span className="font-semibold text-gray-800">
+            {written} of {sections.length} sections written.
+          </span>{' '}
+          Sections marked <span className="font-semibold text-red-600">*</span> must be written
+          before the lead can send it to the admin.
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setFolded(new Set())}
+            className="rounded-lg border border-gray-300 px-2.5 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            Expand all
+          </button>
+          <button
+            type="button"
+            onClick={() => setFolded(new Set(PROPOSAL_SECTIONS.map((s) => s.key)))}
+            className="rounded-lg border border-gray-300 px-2.5 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            Collapse all
+          </button>
+        </div>
+      </div>
+      {sections.map((section) => {
         const id = `proposal-${section.key}`
+        const required =
+          ('required' in section && section.required) || section.key === 'paymentPlan'
+        const set = (value: string) => setValues((v) => ({ ...v, [section.key]: value }))
+        const isOpen = !folded.has(section.key) || fieldError === section.key
+        const filled = Boolean(values[section.key]?.trim())
         return (
-          <div key={section.key}>
-            <label htmlFor={id} className="mb-1.5 block text-sm font-semibold text-gray-800">
-              {section.label}
-            </label>
-            {'short' in section && section.short ? (
-              <input
-                id={id}
-                className={inputClass}
-                value={values[section.key]}
-                onChange={(event) =>
-                  setValues((v) => ({ ...v, [section.key]: event.target.value }))
-                }
-              />
-            ) : (
-              <textarea
-                id={id}
-                rows={3}
-                className={inputClass}
-                value={values[section.key]}
-                onChange={(event) =>
-                  setValues((v) => ({ ...v, [section.key]: event.target.value }))
-                }
-              />
-            )}
-            {fieldError === section.key && (
-              <p className="mt-1 text-xs text-red-600">Check this section.</p>
+          <div key={section.key} className="rounded-xl border border-gray-200 bg-white">
+            <button
+              type="button"
+              aria-expanded={isOpen}
+              aria-controls={`${id}-body`}
+              onClick={() => toggle(section.key)}
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+            >
+              <span className="text-sm font-semibold text-gray-800">
+                {section.label}
+                {required && (
+                  <span aria-hidden="true" className="ml-0.5 text-red-600">
+                    *
+                  </span>
+                )}
+              </span>
+              <span className="flex items-center gap-2">
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    filled ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                  }`}
+                >
+                  {filled ? 'Written ✓' : 'Empty'}
+                </span>
+                <span aria-hidden="true" className="text-gray-400">
+                  {isOpen ? '▾' : '▸'}
+                </span>
+              </span>
+            </button>
+            {isOpen && (
+              <div id={`${id}-body`} className="border-t border-gray-100 px-4 pt-3 pb-4">
+                <label htmlFor={id} className="sr-only">
+                  {section.label}
+                  {required ? '*' : ''}
+                </label>
+                {'choice' in section && section.choice ? (
+                  <select
+                    id={id}
+                    className={inputClass}
+                    value={values[section.key]}
+                    onChange={(event) => set(event.target.value)}
+                  >
+                    <option value="">Choose…</option>
+                    <option value="yes">{PAYMENT_WORDS.yes}</option>
+                    <option value="no">{PAYMENT_WORDS.no}</option>
+                  </select>
+                ) : 'short' in section && section.short ? (
+                  <input
+                    id={id}
+                    className={inputClass}
+                    value={values[section.key]}
+                    onChange={(event) => set(event.target.value)}
+                  />
+                ) : (
+                  <textarea
+                    id={id}
+                    rows={4}
+                    className={inputClass}
+                    value={values[section.key]}
+                    onChange={(event) => set(event.target.value)}
+                  />
+                )}
+                {fieldError === section.key && (
+                  <p className="mt-1 text-xs text-red-600">Check this section.</p>
+                )}
+              </div>
             )}
           </div>
         )

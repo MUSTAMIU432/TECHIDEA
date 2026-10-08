@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AdminReview, AdminReviewDetail } from '../api/administrationApi'
+import type { AdminReview, AdminReviewDetail, AdminReviewedIdeaRow } from '../api/administrationApi'
 import { pageOfItems, renderAdminPage } from '../../../test/renderAdmin'
 import { AdminReviewDetailPage } from './AdminReviewDetailPage'
 import { AdminApprovalsPage, AdminReviewsPage } from './AdminReviewsPage'
@@ -9,11 +9,13 @@ import { AdminApprovalsPage, AdminReviewsPage } from './AdminReviewsPage'
 vi.mock('../api/administrationApi', async (importOriginal) => ({
   ...(await importOriginal()),
   adminReviewsRequest: vi.fn(),
+  adminReviewedIdeasRequest: vi.fn(),
   adminReviewRequest: vi.fn(),
 }))
 
 const api = await import('../api/administrationApi')
 const reviewsMock = vi.mocked(api.adminReviewsRequest)
+const reviewedIdeasMock = vi.mocked(api.adminReviewedIdeasRequest)
 const reviewMock = vi.mocked(api.adminReviewRequest)
 
 function review(overrides: Partial<AdminReview> = {}): AdminReview {
@@ -25,7 +27,9 @@ function review(overrides: Partial<AdminReview> = {}): AdminReview {
       title: 'Automate the invoice run',
       status: 'UNDER_REVIEW',
       visibility: 'ORGANIZATION',
+      submissionContext: 'ORGANIZATION',
       organization: { id: '3', name: 'Acme' },
+      teamName: null,
     },
     reviewer: { id: '9', email: 'rae@acme.example', name: 'Rae Reviewer' },
     decision: null,
@@ -39,50 +43,91 @@ function review(overrides: Partial<AdminReview> = {}): AdminReview {
   }
 }
 
-describe('AdminReviewsPage', () => {
-  beforeEach(() => reviewsMock.mockReset())
+function reviewedIdea(rounds: AdminReview[]): AdminReviewedIdeaRow {
+  const latest = rounds[rounds.length - 1]
+  return {
+    idea: latest.idea,
+    roundCount: rounds.length,
+    latest,
+    rounds,
+    startedAt: rounds[0].createdAt,
+    lastActivityAt: latest.completedAt ?? latest.createdAt,
+  }
+}
 
-  it('lists review rounds with idea, reviewer, round and decision', async () => {
-    reviewsMock.mockResolvedValue(
+describe('AdminReviewsPage', () => {
+  beforeEach(() => reviewedIdeasMock.mockReset())
+
+  it('lists each reviewed idea once, where its latest round left it', async () => {
+    reviewedIdeasMock.mockResolvedValue(
       pageOfItems([
-        review(),
-        review({
-          id: '41',
-          round: 1,
-          decision: 'CHANGES_REQUESTED',
-          isCompleted: true,
-          completedAt: '2026-01-02T00:00:00Z',
-        }),
+        reviewedIdea([
+          review({
+            id: '41',
+            round: 1,
+            decision: 'CHANGES_REQUESTED',
+            isCompleted: true,
+            completedAt: '2026-01-02T00:00:00Z',
+          }),
+          review(),
+        ]),
       ]),
     )
     renderAdminPage(<AdminReviewsPage />)
 
     const rows = within(await screen.findByRole('table', { name: 'Reviews' })).getAllByRole('row')
+    expect(rows).toHaveLength(2) // the header and one idea, not one row per round
     expect(rows[1]).toHaveTextContent('Automate the invoice run')
     expect(rows[1]).toHaveTextContent('Rae Reviewer')
     expect(rows[1]).toHaveTextContent('In progress')
-    expect(rows[2]).toHaveTextContent('Changes requested')
+    expect(rows[1]).toHaveTextContent('round 2')
+    expect(rows[1]).not.toHaveTextContent('Changes requested')
     expect(screen.queryByRole('button', { name: /edit|override|approve/i })).not.toBeInTheDocument()
   })
 
-  it('filters by state on the server', async () => {
-    reviewsMock.mockResolvedValue(pageOfItems([]))
+  it('opens the rounds that got the idea there', async () => {
+    reviewedIdeasMock.mockResolvedValue(
+      pageOfItems([
+        reviewedIdea([
+          review({ id: '41', round: 1, decision: 'CHANGES_REQUESTED', isCompleted: true }),
+          review(),
+        ]),
+      ]),
+    )
     renderAdminPage(<AdminReviewsPage />)
-    await screen.findByText('No review rounds match.')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show rounds (2)' }))
+
+    const rounds = screen.getByRole('list', { name: 'Rounds of Automate the invoice run' })
+    const items = within(rounds).getAllByRole('listitem')
+    expect(items[0]).toHaveTextContent('Round 1')
+    expect(items[0]).toHaveTextContent('Changes requested')
+    expect(items[1]).toHaveTextContent('Round 2')
+    expect(within(items[0]).getByRole('link', { name: 'Open' })).toHaveAttribute(
+      'href',
+      '/app/admin/reviews/41',
+    )
+  })
+
+  it('filters by state on the server', async () => {
+    reviewedIdeasMock.mockResolvedValue(pageOfItems([]))
+    renderAdminPage(<AdminReviewsPage />)
+    await screen.findByText('No reviewed ideas match.')
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Review state' }), {
       target: { value: 'OPEN' },
     })
 
     await waitFor(() =>
-      expect(reviewsMock).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'OPEN' }), {
-        offset: 0,
-      }),
+      expect(reviewedIdeasMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ state: 'OPEN' }),
+        { offset: 0 },
+      ),
     )
   })
 
   it('shows an error state', async () => {
-    reviewsMock.mockRejectedValueOnce(new Error('down'))
+    reviewedIdeasMock.mockRejectedValueOnce(new Error('down'))
     renderAdminPage(<AdminReviewsPage />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('We could not load the reviews.')

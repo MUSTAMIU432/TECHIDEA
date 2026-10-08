@@ -181,7 +181,10 @@ describe('IdeaDetailPage', () => {
     )
     renderPage()
 
-    expect(await screen.findByRole('link', { name: 'Revise idea' })).toBeInTheDocument()
+    // The header's button, and step 1 of the response panel: both open the same form.
+    const links = await screen.findAllByRole('link', { name: 'Revise idea' })
+    expect(links.length).toBeGreaterThanOrEqual(1)
+    for (const link of links) expect(link).toHaveAttribute('href', expect.stringMatching(/\/edit$/))
   })
 
   it('says an unavailable idea without choosing between the two reasons', async () => {

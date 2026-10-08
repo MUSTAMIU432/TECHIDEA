@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import { opportunityRequest } from '../api/automationApi'
 import { CONTEXT_LABEL } from '../utils/labels'
@@ -27,7 +27,10 @@ type TabId = (typeof TABS)[number]['id']
 /** One opportunity at `/app/automation/opportunities/:id`, in the order the work happens. */
 export function OpportunityPage() {
   const { opportunityId = '' } = useParams()
-  const [tab, setTab] = useState<TabId>('overview')
+  // A notification can open the page on the tab its news is about (`?tab=uat`).
+  const [params] = useSearchParams()
+  const requested = TABS.find((item) => item.id === params.get('tab'))?.id
+  const [tab, setTab] = useState<TabId>(requested ?? 'overview')
   const loaded = useLoad(() => opportunityRequest(opportunityId), `opp:${opportunityId}`)
 
   if (loaded.loading) return <Loading what="this opportunity" />

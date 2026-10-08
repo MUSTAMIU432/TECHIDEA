@@ -92,6 +92,11 @@ export interface Proposal {
   estimatedEffort: string
   estimatedTimeline: string
   acceptanceCriteria: string
+  feasibility: string
+  milestones: string
+  financialRequirements: string
+  paymentRequired: string
+  paymentPlan: string
   status: string
   reviewFeedback: string
   submittedAt: string | null
@@ -258,7 +263,8 @@ const SOLUTION = `opportunityId summary businessWorkflow inScope outOfScope syst
   technicalConsiderations assumptions constraints risks expectedOutput updatedAt`
 const PROPOSAL = `id opportunityId title executiveSummary problem proposedSolution
   requirementsSummary scope deliverables risks assumptions estimatedEffort estimatedTimeline
-  acceptanceCriteria status reviewFeedback submittedAt reviewedAt`
+  acceptanceCriteria feasibility milestones financialRequirements paymentRequired paymentPlan
+  status reviewFeedback submittedAt reviewedAt`
 const PROJECT = `id opportunityId ideaId title description status submissionContext ownerName
   tenantName assignedName startDate targetDate completedAt
   progress { stages { stage state } taskCompletionPercent tasksTotal tasksDone tasksBlocked }

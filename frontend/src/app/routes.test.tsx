@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setAccessToken } from '../graphql/tokenStore'
 import { meRequest, refreshTokenRequest } from '../features/identity/auth/authApi'
-import { organizationIdeasRequest } from '../features/ideas/api/ideasApi'
+import { ideasRequest } from '../features/ideas/api/ideasApi'
 import { organizationsRequest } from '../features/organizations/api/organizationApi'
 import {
   adminInvitationsRequest,
@@ -49,7 +49,6 @@ vi.mock('../features/organizations/api/organizationApi', () => ({
 // `/app/ideas` mounts IdeaList, which fetches on mount; the module's own
 // documents are asserted in `features/ideas/api/ideasApi.test.ts`.
 vi.mock('../features/ideas/api/ideasApi', () => ({
-  organizationIdeasRequest: vi.fn(),
   ideasRequest: vi.fn(async () => ({
     items: [],
     pageInfo: {
@@ -111,7 +110,7 @@ vi.mock('../features/identity/auth/authApi', () => ({
 const mockedRefresh = vi.mocked(refreshTokenRequest)
 const mockedMe = vi.mocked(meRequest)
 const mockedOrganizations = vi.mocked(organizationsRequest)
-const mockedIdeas = vi.mocked(organizationIdeasRequest)
+const mockedIdeas = vi.mocked(ideasRequest)
 const mockedCapabilities = vi.mocked(adminCapabilitiesRequest)
 const mockedOverview = vi.mocked(adminOverviewRequest)
 const mockedTeams = vi.mocked(adminTeamsRequest)

@@ -15,7 +15,7 @@ import { BackLink } from '../components/BackLink'
 import { DecisionBadge, ReviewRoundCard } from '../components/ReviewRoundCard'
 import { useAdminQuery } from '../hooks/useAdminQuery'
 import { useBackTarget } from '../hooks/useBackTarget'
-import { formatDateTime, RESTRICTED_TITLE } from '../utils/format'
+import { formatDateTime, ideaHomeLabel, RESTRICTED_TITLE } from '../utils/format'
 
 /** Pull a string out of the snapshot the server stored when the round started. */
 function snapshotText(snapshot: Record<string, unknown>, key: string): string {
@@ -57,8 +57,9 @@ export function AdminReviewDetailPage() {
       <div className="space-y-6">
         {review.isStalled && (
           <output className="block rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
-            This review is stalled: its reviewer can no longer review this idea. Another reviewer in{' '}
-            {review.idea.organization.name} can take it over from their review queue.
+            This review is stalled: its reviewer can no longer review this idea. Another reviewer
+            {review.idea.organization ? ` in ${review.idea.organization.name}` : ''} can take it
+            over from their review queue.
           </output>
         )}
         <AdminCard title="Round">
@@ -75,7 +76,7 @@ export function AdminReviewDetailPage() {
                 </Link>,
               ],
               ['Idea status now', <IdeaStatusBadge key="status" status={review.idea.status} />],
-              ['Organization', review.idea.organization.name],
+              ['Belongs to', ideaHomeLabel(review.idea)],
               [
                 'Reviewer',
                 <Link
