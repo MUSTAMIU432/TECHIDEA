@@ -43,6 +43,7 @@ from reviews.tests.platform import (
     confirm_for_organization,
     grant_platform_reviewer,
     release_proposal,
+    send_decision_letters,
 )
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
@@ -455,6 +456,8 @@ class TestWhatEachStageTellsPeople:
         services.submit_to_platform(author, idea.pk)
         idea.refresh_from_db()
         decide(platform_reviewer, idea, 'approved')
+        # The approval reaches the author in the letter an administrator sends.
+        send_decision_letters(idea)
 
         # The notifications themselves, in order.
         from notifications.models import Notification

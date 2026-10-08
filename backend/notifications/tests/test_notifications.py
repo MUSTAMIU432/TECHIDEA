@@ -525,8 +525,8 @@ class TestTheActionPath:
         )
 
         note = Notification.objects.get(user=recipient)
-        # No report id, so the idea itself - the fallback, and still gated.
-        assert note.action_path == f'/app/ideas/{idea.pk}'
+        # No report id, so the idea itself, at the letter it is about - and still gated.
+        assert note.action_path == f'/app/ideas/{idea.pk}#decision-letter'
 
     def test_a_queue_nudge_never_links_to_a_report(self, recipient, idea, mailoutbox):
         """
@@ -543,7 +543,10 @@ class TestTheActionPath:
             send_email=False,
         )
 
-        assert Notification.objects.get(user=recipient).action_path == f'/app/ideas/{idea.pk}'
+        # The review queue, opened on the idea: where the nudge is acted on - and never a report.
+        path = Notification.objects.get(user=recipient).action_path
+        assert path == f'/app/reviews?idea={idea.pk}'
+        assert not path.endswith('/report')
 
     def test_an_invitation_has_no_link_because_none_can_be_honest(self, recipient, mailoutbox):
         """

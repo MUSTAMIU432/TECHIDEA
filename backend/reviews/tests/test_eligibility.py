@@ -405,19 +405,22 @@ class TestPlatformEligibility:
         assert not can_review(make_user('outsider@example.com'), world['idea'])
         assert not can_review(None, world['idea'])
 
-    def test_the_permission_without_the_console_is_not_honoured(self, world):
+    def test_the_review_permission_needs_no_console(self, world):
         """
-        A platform permission is only ever honoured together with console access.
+        Reviewing is the review permission alone; the console is for administrators.
 
-        Without the platform track, one could have granted
-        `review_platform_submissions` by itself and ended up with a reviewer who
-        had no queue to work from. Both are required, so neither alone is enough.
+        A platform reviewer works from the review workspace's platform queue, so
+        `review_platform_submissions` is honoured by itself - and holding it opens
+        no part of the administration console.
         """
+        from administration.authorization import capabilities_for
+
         reviewer = fresh(world['reviewer'])
         revoke_platform_reviewer(reviewer)
         grant_platform_reviewer(fresh(reviewer), console=False)
 
-        assert not can_review(fresh(reviewer), world['idea'])
+        assert can_review(fresh(reviewer), world['idea'])
+        assert capabilities_for(fresh(reviewer)).can_access_console is False
 
     def test_losing_the_permission_takes_the_ability_with_it(self, world):
         reviewer = fresh(world['reviewer'])

@@ -37,6 +37,7 @@ from reviews.tests.platform import (
     make_submitted,
     release_proposal,
     revoke_platform_reviewer,
+    send_decision_letters,
 )
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
@@ -414,6 +415,8 @@ class TestImmutabilityAfterApproval:
         """
         from reviews.selectors import list_idea_reviews
 
+        # The author reads the deciding round once the approval letter has been sent.
+        send_decision_letters(world['idea'])
         history = list_idea_reviews(world['author'], world['idea'].pk).reviews
         assert history[-1] == approved
         assert [review.scope for review in history] == ['organization', 'platform']
@@ -481,19 +484,24 @@ class TestDecisionEmail:
         with django_capture_on_commit_callbacks(execute=True):
             services.complete_review(world['reviewer'], approve(open_review))
 
-        # One decision, one notification, two channels: the in-app notification
-        # and the email that goes with it.
+        # The reviewer's approval tells the author nothing by itself: an
+        # administrator sends it, in a letter (`reviews.decision_letters`).
+        assert not Notification.objects.filter(user=world['author']).exists()
+        assert mail.outbox == []
+
+        with django_capture_on_commit_callbacks(execute=True):
+            send_decision_letters(world['idea'])
+
+        # One decision, one notification, one email.
         notification = Notification.objects.get(user=world['author'])
         assert notification.kind == 'idea.platform_approved'
-        assert notification.report_id is not None
         assert notification.is_read is False
 
         assert len(mail.outbox) == 1
         message = mail.outbox[0]
         assert message.to == ['author@acme.example']
-        assert message.subject == notification.title
         assert 'Automate the invoice run' in message.subject
-        assert 'https://app.example/app/notifications' in message.body
+        assert f'https://app.example/app/ideas/{world["idea"].pk}' in message.body
         # The report's own contents stay behind authentication: the email says a
         # review is complete and where to read it, and nothing more.
         assert 'Worth automating.' not in message.body
@@ -557,11 +565,13 @@ class TestDecisionEmail:
 
         with django_capture_on_commit_callbacks(execute=True):
             services.complete_review(world['reviewer'], approve(open_review))
+        with django_capture_on_commit_callbacks(execute=True):
+            send_decision_letters(world['idea'])
 
         assert Idea.objects.get(pk=world['idea'].pk).status == Idea.Status.APPROVED
         # A delivery failure is logged and the decision stands - which is the
         # whole of "if email fails, platform approval remains valid".
-        assert 'Could not send the notification email' in caplog.text
+        assert 'Could not email the decision letter' in caplog.text
 
     def test_nothing_is_written_or_sent_for_a_review_with_no_decision(self, world, open_review):
         """

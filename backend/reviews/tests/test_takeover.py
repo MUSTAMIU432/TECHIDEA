@@ -42,6 +42,7 @@ from reviews.tests.platform import (
     grant_platform_reviewer,
     make_submitted,
     revoke_platform_reviewer,
+    send_decision_letters,
 )
 
 VALID_PASSWORD = 'a-strong-unique-pass-1'
@@ -333,6 +334,9 @@ class TestTakeOver:
 
         with django_capture_on_commit_callbacks(execute=True):
             services.complete_review(world['second'], completion(new, 'approved', ''))
+        # The author hears of the approval in the letter an administrator sends.
+        with django_capture_on_commit_callbacks(execute=True):
+            send_decision_letters(world['idea'])
 
         assert reviews_of(world['idea']) == [
             (1, 'reviewer@acme.example', Review.Decision.WITHDRAWN),

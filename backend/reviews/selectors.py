@@ -167,7 +167,13 @@ def list_idea_reviews(user: User | None, idea_id: object) -> ReviewHistory:
     if eligibility.can_review(user, idea):
         return ReviewHistory(reviews=list(reviews), viewer_is_reviewer=True)
     if idea.author_id == user.pk:
-        return ReviewHistory(reviews=list(reviews.filter(completed_at__isnull=False)))
+        # A decided round the owner has not been sent the letter for is not theirs yet.
+        from reviews import decision_letters
+
+        completed = reviews.filter(completed_at__isnull=False).exclude(
+            pk__in=decision_letters.withheld_review_ids(idea)
+        )
+        return ReviewHistory(reviews=list(completed))
     return ReviewHistory()
 
 

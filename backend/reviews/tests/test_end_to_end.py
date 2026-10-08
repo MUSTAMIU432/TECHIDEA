@@ -34,6 +34,7 @@ from reviews.tests.invariants import assert_review_records_consistent
 from reviews.tests.platform import (
     grant_platform_reviewer,
     revoke_platform_reviewer,
+    send_decision_letters,
 )
 
 PASSWORD = 'a-strong-unique-pass-1'
@@ -529,19 +530,25 @@ def test_flow_new_idea_to_approval(platform, django_capture_on_commit_callbacks)
     assert completed['review'] == {'decision': 'APPROVED'}
     assert completed['idea'] == {'status': 'APPROVED'}
 
-    # The author is told, once, through both channels of the one event: the
-    # in-app notification and its email. The email says a review is complete and
-    # what the author has to do next; the report's own contents stay behind
-    # authentication, so neither the feedback nor the criteria are in it.
+    # The reviewer's approval does not reach the author by itself: until an
+    # administrator sends its letter, the author is told nothing and still sees
+    # the idea under review.
+    assert not Notification.objects.filter(user_id=api.ids['author']).exists()
+    assert api.run(IDEA, {'id': idea_id}, 'author')['idea']['status'] == 'UNDER_REVIEW'
+
+    with django_capture_on_commit_callbacks(execute=True):
+        send_decision_letters(Idea.objects.get(pk=idea_id))
+
+    # Then the author is told, once: the in-app notification and the letter's own
+    # email, which announces it and links to it; the report's contents and the
+    # feedback stay behind authentication.
     notification = Notification.objects.get(user_id=api.ids['author'])
     assert notification.kind == 'idea.platform_approved'
-    assert notification.report_id is not None
-    assert 'go-ahead' in notification.body
+    assert 'approved' in notification.body
 
-    (email,) = decision_emails()
-    assert email.to == ['author@example.com']
-    assert email.subject == notification.title
-    assert 'approved for the next stage' in email.body
+    letter_emails = [m for m in mail.outbox if m.to == ['author@example.com']]
+    email = letter_emails[-1]
+    assert 'has been approved' in email.subject
     assert 'go-ahead' in email.body
     assert 'Clear win.' not in email.body
 
@@ -628,6 +635,7 @@ def test_flow_changes_requested_to_a_second_round(platform, django_capture_on_co
 
     with django_capture_on_commit_callbacks(execute=True):
         second = start_and_decide(api, idea_id, 'APPROVED', as_='second')
+        send_decision_letters(Idea.objects.get(pk=idea_id))
 
     all_rounds = api.run(REVIEWS, {'ideaId': idea_id}, 'second')['ideaReviews']
     # Rounds are numbered per **idea**, across both tracks: round 1 is the
@@ -661,8 +669,11 @@ def test_flow_changes_requested_to_a_second_round(platform, django_capture_on_co
         ('SUBMITTED', 'UNDER_REVIEW', api.ids['second']),
         ('UNDER_REVIEW', 'APPROVED', api.ids['second']),
     ]
-    # One per decision: the request for changes, then the approval.
-    assert [m.to for m in decision_emails()] == [['author@example.com']] * 2
+    # One per decision: the request for changes, then the approval letter's email.
+    assert [m.to for m in decision_emails()] == [['author@example.com']]
+    assert [m.to for m in mail.outbox if 'has been approved' in m.subject] == [
+        ['author@example.com']
+    ]
     assert_review_records_consistent(Idea.objects.get(pk=idea_id))
 
 
@@ -687,6 +698,7 @@ def test_flow_rejection_is_terminal(platform):
     api = platform
     idea_id = submitted_idea(api)
     start_and_decide(api, idea_id, 'REJECTED', 'Already covered by the ERP project.')
+    send_decision_letters(Idea.objects.get(pk=idea_id))
 
     for name in ('author', 'reviewer', 'second', 'owner'):
         idea = api.run(IDEA, {'id': idea_id}, name)['idea']

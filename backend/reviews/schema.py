@@ -513,6 +513,11 @@ class PlatformTrackQuery:
             return None
         if idea.author_id != getattr(user, 'pk', None) and not eligibility.can_review(user, idea):
             return None
+        from reviews import decision_letters
+
+        if decision_letters.is_withheld_from(user, idea):
+            # The owner reads the report once the approval letter has been sent.
+            return None
         return PlatformReviewReportType.from_model(report)
 
     @strawberry.field(

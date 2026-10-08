@@ -39,12 +39,10 @@ from reviews.models import Review, ReviewAssignment, ReviewTeam, ReviewTeamMembe
 logger = logging.getLogger(__name__)
 
 PLATFORM_REVIEWER_GROUP = 'Platform reviewers'
-#: What a reviewer holds: the console, the content they review, and the right to review.
-REVIEWER_PERMISSIONS = (
-    admin_authorization.ACCESS_CONSOLE,
-    admin_authorization.INSPECT_IDEA_CONTENT,
-    admin_authorization.REVIEW_PLATFORM_SUBMISSIONS,
-)
+#: What a reviewer holds: the right to review, and nothing of the console. A reviewer reads
+#: and decides submissions in the review workspace and on the idea's page; the console is
+#: for platform administrators only.
+REVIEWER_PERMISSIONS = (admin_authorization.REVIEW_PLATFORM_SUBMISSIONS,)
 #: The stages in which a submission can be routed (it has reached the platform).
 _PLATFORM_STAGES = (Idea.Status.SUBMITTED, Idea.Status.UNDER_REVIEW, Idea.Status.CHANGES_REQUESTED)
 
@@ -61,7 +59,9 @@ def _reviewer_group() -> Group:
     )
     if permissions.count() != len(codenames):
         raise ReviewTeamError('The administration permissions are missing. Run migrate first.')
-    group.permissions.add(*permissions)
+    # `set`, not `add`: the group holds exactly what a reviewer holds, so a permission a
+    # reviewer no longer gets (the console, before it became administrators' only) goes.
+    group.permissions.set(permissions)
     return group
 
 

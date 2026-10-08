@@ -30,6 +30,7 @@ from django.contrib.auth.models import Permission
 from administration.authorization import (
     ACCESS_CONSOLE,
     ASSIGN_PLATFORM_REVIEWERS,
+    RELEASE_PROPOSALS,
     REVIEW_PLATFORM_SUBMISSIONS,
 )
 from ideas.models import Idea
@@ -78,11 +79,11 @@ def grant_platform_reviewer(user, *, console: bool = True) -> None:
     """
     `user` may review ideas submitted to the platform.
 
-    `console=True` by default because `REVIEW_PLATFORM_SUBMISSIONS` is only ever
-    honoured together with `ACCESS_CONSOLE` (see `administration.authorization`):
-    the review queue is a console surface, and a platform reviewer who cannot
-    open the console has nowhere to work. A test for that specific refusal should
-    pass `console=False`.
+    Reviewing needs `REVIEW_PLATFORM_SUBMISSIONS` alone: the platform queue is in the
+    review workspace, and the console is for administrators. `console=True` (the
+    default, kept from when reviewing required the console) also grants
+    `ACCESS_CONSOLE`, which reviewing ignores; pass `console=False` for a reviewer
+    exactly as the Reviewers page makes one.
     """
     if console:
         grant_permission(user, ACCESS_CONSOLE)
@@ -393,6 +394,8 @@ def release_proposal(idea):
 
     from reviews.models import IdeaProposal, Review
 
+    # The owner is told of the approval, in its letter, before receiving the proposal.
+    send_decision_letters(idea)
     review = (
         Review.objects.filter(idea=idea, scope=Review.Scope.PLATFORM, decision='approved')
         .order_by('-completed_at', '-pk')
@@ -420,3 +423,34 @@ def release_proposal(idea):
         },
     )
     return proposal
+
+
+def send_decision_letters(idea):
+    """
+    Send every decision letter still waiting for `idea`, as an administrator who decided
+    none of it - the step that tells the owner a platform approval or rejection.
+
+    A platform approval or rejection reaches the owner only in a letter an administrator
+    sends (`reviews.decision_letters`). Tests whose subject is what the owner sees or does
+    afterwards take that step here; the letters themselves are tested in
+    `test_decision_letters.py`.
+    """
+    from administration import services as admin_services
+    from identity.models import User
+    from reviews import decision_letters
+    from reviews.models import DecisionLetter
+
+    sender = User.objects.filter(email='letters@platform.example').first()
+    if sender is None:
+        sender = User.objects.create_user(
+            email='letters@platform.example',
+            password='a-strong-unique-pass-1',
+            first_name='Letters',
+            last_name='Sender',
+            phone_number='+255712345678',
+        )
+        admin_services.grant_platform_admin(sender.email)
+        grant_permission(sender, RELEASE_PROPOSALS)
+        sender = User.objects.get(pk=sender.pk)
+    for letter in DecisionLetter.objects.filter(idea=idea, status=DecisionLetter.Status.PENDING):
+        decision_letters.send(sender, letter.pk)

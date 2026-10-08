@@ -380,6 +380,12 @@ def complete_review(user: User | None, data: CompleteReviewInput) -> Review:
         if decision == Review.Decision.APPROVED:
             report = platform_review.generate_report(review, _report_content(review, feedback))
 
+        # An approval or a rejection is told to the owner by a platform administrator,
+        # in a letter drafted here, in the same transaction as the decision itself.
+        from reviews import decision_letters
+
+        decision_letters.draft(review)
+
         # After the commit, never before: a completion that rolls back must not
         # tell the author about a decision that was never recorded, and neither
         # channel can invalidate one that was.
@@ -414,6 +420,11 @@ def _deliver(review_pk: int, approved_report_pk: int | None) -> None:
     Tell the author what the platform decided - after the commit, through every
     channel, none of which can affect the decision.
 
+    **Only a changes request is told from here.** An approval or a rejection reaches
+    the owner in a decision letter a platform administrator sends
+    (`reviews.decision_letters`); the reviewers asking the owner for something is the
+    one thing that goes to them directly.
+
     **One business event, one notification, two channels.** An approval produces
     the in-app notification *and* its email through
     `notifications.services.deliver`, which is the only delivery code in the
@@ -432,6 +443,10 @@ def _deliver(review_pk: int, approved_report_pk: int | None) -> None:
         return
     if review.decision == Review.Decision.WITHDRAWN:
         # A take-over, not a verdict: the idea is still under review.
+        return
+    if review.decision in (Review.Decision.APPROVED, Review.Decision.REJECTED):
+        # The owner hears about these from a platform administrator, in the decision
+        # letter `complete_review` drafted (`reviews.decision_letters`) - not from here.
         return
 
     if approved_report_pk is not None:

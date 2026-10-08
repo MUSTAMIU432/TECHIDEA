@@ -182,6 +182,8 @@ class TestRoutingToATeam:
             review_teams.assign_team(router, idea.pk, team.pk)
 
     def test_an_admin_cannot_hand_work_to_their_own_team(self, manager, team, lead, idea):
+        # Routing is console work, so the lead is made an administrator who routes.
+        grant_permission(lead, CONSOLE)
         grant_permission(lead, ASSIGN)
 
         with pytest.raises(AdministrationError, match='lead this team'):

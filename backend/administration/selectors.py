@@ -46,6 +46,7 @@ from django.db.models import (
     Count,
     Exists,
     IntegerField,
+    Max,
     OuterRef,
     Prefetch,
     Q,
@@ -68,7 +69,7 @@ from messaging.models import Message, MessageParticipant, MessageThread
 from notifications.models import Notification
 from organizations.models import Membership, MembershipRole, Organization, Role
 from organizations.services import DEFAULT_OWNER_ROLE_SLUG, REVIEWER_ROLE_SLUG
-from reviews.models import Review
+from reviews.models import Review, ReviewAssignment
 from teams.models import Team, TeamMembership, TeamMembershipRole, TeamRole
 
 RECENT_ACTIVITY_LIMIT = 10
@@ -178,9 +179,9 @@ def overview(user: User | None) -> Overview | None:
         open_review_count=review_counts['open'],
         completed_review_count=review_counts['completed'],
         recent_transitions=list(
-            IdeaTransition.objects.select_related('idea__organization', 'actor').order_by(
-                '-created_at', '-pk'
-            )[:RECENT_ACTIVITY_LIMIT]
+            IdeaTransition.objects.select_related(
+                'idea__organization', 'idea__team', 'actor'
+            ).order_by('-created_at', '-pk')[:RECENT_ACTIVITY_LIMIT]
         ),
         recent_admin_actions=list(
             AdminAuditEntry.objects.select_related('actor')[:RECENT_ACTIVITY_LIMIT]
@@ -489,7 +490,17 @@ class IdeaFilters:
 
 def _idea_queryset() -> QuerySet[Idea]:
     return (
-        Idea.objects.select_related('organization', 'author', 'category')
+        Idea.objects.select_related('organization', 'team', 'author', 'category')
+        # The review team the idea is routed to now (a released routing is history).
+        .prefetch_related(
+            Prefetch(
+                'review_assignments',
+                queryset=ReviewAssignment.objects.filter(released_at__isnull=True).select_related(
+                    'team'
+                ),
+                to_attr='current_review_assignments',
+            )
+        )
         .annotate(
             vote_count=_count_of(Vote, 'idea'),
             comment_count=_count_of(Comment, 'idea'),
@@ -586,9 +597,11 @@ def get_idea(user: User | None, idea_id: object) -> IdeaDetail | None:
         content_visible=content_visible,
         reviews=list(
             Review.objects.filter(idea=idea)
-            .select_related('reviewer', 'idea__organization')
+            .select_related('reviewer', 'idea__organization', 'idea__team')
             .prefetch_related('assessments')
-            .order_by('round')
+            # Rounds are numbered per track, so an idea has an organization round 1 and
+            # a platform round 1; created order breaks the tie the same way every time.
+            .order_by('round', 'created_at', 'pk')
         ),
         transitions=list(
             IdeaTransition.objects.filter(idea=idea)
@@ -667,7 +680,7 @@ class ReviewListing:
 
 def _review_queryset() -> QuerySet[Review]:
     return (
-        Review.objects.select_related('idea__organization', 'reviewer')
+        Review.objects.select_related('idea__organization', 'idea__team', 'reviewer')
         .prefetch_related('assessments')
         .order_by('-created_at', '-pk')
     )
@@ -711,6 +724,76 @@ def list_reviews(
 
 
 @dataclass(frozen=True)
+class ReviewedIdeaListing:
+    page: Page[Idea]
+    capabilities: AdminCapabilities
+
+
+def list_reviewed_ideas(
+    user: User | None, filters: ReviewFilters | None = None, *, offset=0, limit=None
+) -> ReviewedIdeaListing:
+    """
+    Ideas that have been reviewed, one row each, the most recently active first - the
+    Reviews page's view, where an idea reviewed in three rounds is one line with its
+    current state rather than three lines. Each idea carries `admin_rounds`, its rounds
+    oldest first; the last is where it stands now.
+
+    The filters are the round filters, read per idea: *open* is an idea with a round
+    in progress, *completed* one with none; a decision is the **latest** round's; a
+    reviewer or organization matches an idea any of whose rounds they are in.
+    """
+    capabilities = _capabilities(user)
+    if capabilities is None:
+        return ReviewedIdeaListing(page=empty_page(offset, limit), capabilities=AdminCapabilities())
+
+    filters = filters or ReviewFilters()
+    rounds = Review.objects.filter(idea=OuterRef('pk'))
+    queryset = (
+        Idea.objects.filter(Exists(rounds))
+        .select_related('organization', 'team')
+        .annotate(
+            last_review_activity=Max('reviews__created_at'),
+            latest_review_decision=Subquery(
+                rounds.order_by('-created_at', '-pk').values('decision')[:1]
+            ),
+        )
+        .prefetch_related(
+            Prefetch(
+                'reviews',
+                queryset=_review_queryset().order_by('created_at', 'pk'),
+                to_attr='admin_rounds',
+            )
+        )
+        .order_by('-last_review_activity', '-pk')
+    )
+
+    search = (filters.search or '').strip()
+    if search:
+        queryset = queryset.filter(
+            _content_search(search, capabilities)
+            | Exists(rounds.filter(reviewer__email__icontains=search))
+            | Q(organization__name__icontains=search)
+        )
+    open_round = Exists(rounds.filter(completed_at__isnull=True))
+    if filters.state == REVIEW_STATE_OPEN:
+        queryset = queryset.filter(open_round)
+    elif filters.state == REVIEW_STATE_COMPLETED:
+        queryset = queryset.exclude(open_round)
+    if filters.decisions:
+        queryset = queryset.filter(latest_review_decision__in=filters.decisions)
+    if filters.organization_id is not None:
+        queryset = queryset.filter(organization_id=_normalize_id(filters.organization_id))
+    if filters.reviewer_id is not None:
+        queryset = queryset.filter(
+            Exists(rounds.filter(reviewer_id=_normalize_id(filters.reviewer_id)))
+        )
+
+    return ReviewedIdeaListing(
+        page=paginate(queryset, offset=offset, limit=limit), capabilities=capabilities
+    )
+
+
+@dataclass(frozen=True)
 class ReviewDetail:
     review: Review
     capabilities: AdminCapabilities
@@ -731,7 +814,9 @@ def get_review(user: User | None, review_id: object) -> ReviewDetail | None:
     return ReviewDetail(
         review=review,
         capabilities=capabilities,
-        history=list(_review_queryset().filter(idea_id=review.idea_id).order_by('round')),
+        history=list(
+            _review_queryset().filter(idea_id=review.idea_id).order_by('round', 'created_at', 'pk')
+        ),
     )
 
 

@@ -52,6 +52,8 @@ contains it, because the enum describes the domain's vocabulary while the
 service describes what may be *used* today.
 """
 
+import copy
+
 import strawberry
 
 from ideas import go_ahead, lifecycle, selectors, services, states
@@ -320,6 +322,7 @@ class IdeaType:
 
     @staticmethod
     def from_model(idea: Idea, user=None) -> 'IdeaType':
+        idea = _as_seen_by(user, idea)
         return IdeaType(
             id=strawberry.ID(str(idea.pk)),
             title=idea.title,
@@ -370,6 +373,26 @@ class IdeaType:
             _idea=idea,
             _viewer=user,
         )
+
+
+def _as_seen_by(user, idea: Idea) -> Idea:
+    """
+    The idea as `user` may see it: still under review, if the platform has decided it
+    but the decision letter has not been sent to its owner yet.
+
+    A platform approval or rejection reaches the owner in a letter a platform
+    administrator sends (`reviews.decision_letters`); until then everything the owner
+    reads - the status, its label and stage, what they can do next - says what it said
+    while the review was open. A copy, so nothing else holding the row is changed.
+    """
+    from reviews import decision_letters
+
+    if not decision_letters.is_withheld_from(user, idea):
+        return idea
+    seen = copy.copy(idea)
+    seen.status = Idea.Status.UNDER_REVIEW
+    seen.platform_approved_at = None
+    return seen
 
 
 @strawberry.input(description='The writable content of an idea.')

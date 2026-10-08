@@ -99,7 +99,9 @@ def test_an_approved_idea_becomes_a_measured_completed_project(people):
         """mutation($i: ID!){ updateIdeaProposal(input:{ideaId:$i, executiveSummary:"Stop re-typing",
           problem:"Payments are re-typed", proposedSolution:"A dashboard", scope:"Import and match",
           deliverables:"Dashboard", estimatedTimeline:"6 weeks", acceptanceCriteria:"No re-typing",
-          requirementsSummary:"- Track every payment"}){ success } }""",
+          requirementsSummary:"- Track every payment", feasibility:"The bank exports a CSV",
+          milestones:"Weeks 1-2 import; 3-6 dashboard", financialRequirements:"Hosting only",
+          paymentRequired:"yes", paymentPlan:"Half on start, half on acceptance"}){ success } }""",
         'updateIdeaProposal',
         {'i': iid},
     )

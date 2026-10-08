@@ -3,6 +3,8 @@ The proposal an approved idea gets: written by the review team, released by an a
 the owner, who then gives the go-ahead that opens the idea to delivery.
 """
 
+from datetime import date, timedelta
+
 import pytest
 
 from administration.authorization import AdministrationError
@@ -10,10 +12,12 @@ from automation.models import AutomationOpportunity
 from automation.models import Proposal as DeliveryProposal
 from ideas import go_ahead
 from ideas.models import Category, Idea
+from ideas.services import IdeaError
 from identity.models import User
-from reviews import proposals, review_teams, services
-from reviews.models import IdeaProposalView, Review
-from reviews.tests.platform import grant_permission, submit
+from notifications.models import Notification
+from reviews import proposal_answers, proposals, review_teams, services
+from reviews.models import IdeaProposalView, ProposalAnswer, Review
+from reviews.tests.platform import build_idea, grant_permission, send_decision_letters, submit
 
 PASSWORD = 'a-strong-unique-pass-1'
 CONSOLE = 'administration.access_console'
@@ -100,6 +104,8 @@ def approve_with_a_team(owner, router, manager, lead, member):
     )
     idea.refresh_from_db()
     assert idea.status == Idea.Status.APPROVED
+    # An administrator sends the approval letter: the owner hears of it before the proposal.
+    send_decision_letters(idea)
     return idea
 
 
@@ -111,10 +117,15 @@ def approved(owner, router, manager, lead, member):
 FULL = {
     'executive_summary': 'Stop tracking payments by hand.',
     'problem': 'Finance re-types every payment.',
+    'feasibility': 'Feasible: the bank exports a CSV the importer can read.',
     'proposed_solution': 'A payments dashboard with an import.',
+    'requirements_summary': '- Track every payment\n- Match it to an invoice',
     'scope': 'Import, match, report.',
     'deliverables': 'Dashboard and importer.',
     'estimated_timeline': '6 weeks',
+    'milestones': 'Weeks 1-2 importer; 3-4 matching; 5-6 dashboard and handover.',
+    'financial_requirements': 'Hosting at 40 USD a month; no licences.',
+    'payment_required': 'no',
     'acceptance_criteria': 'Finance sees every payment without re-typing it.',
 }
 
@@ -221,6 +232,8 @@ class TestTheAdminsDecision:
 
     def test_the_author_of_a_proposal_never_approves_it(self, approved, lead, member, manager):
         submitted(approved, lead, member)
+        # Releasing is console work: the lead is made an administrator who releases.
+        grant_permission(lead, 'administration.access_console')
         grant_permission(lead, 'administration.release_proposals')
 
         with pytest.raises(proposals.ProposalError, match='somebody else'):
@@ -237,11 +250,14 @@ class TestTheAdminsDecision:
         proposal, role = proposals.proposal_for(owner, approved.pk)
         assert (proposal.status, role) == ('released', 'owner')
 
-    def test_the_admin_does_not_see_a_draft(self, approved, member, releaser):
+    def test_the_admin_follows_a_draft_but_cannot_decide_it_yet(self, approved, member, releaser):
         proposals.start_proposal(member, approved.pk)
 
-        assert proposals.proposal_for(releaser, approved.pk) is None
-        assert proposals.decided_proposals(releaser) == []
+        proposal, role = proposals.proposal_for(releaser, approved.pk)
+        assert (proposal.status, role) == ('draft', 'admin')
+        assert proposals.decided_proposals(releaser) == []  # nothing waiting for a decision
+        with pytest.raises(proposals.ProposalError):
+            proposals.release(releaser, approved.pk)
 
     def test_sending_it_back_needs_a_reason_and_reopens_it_to_the_team(
         self, approved, lead, member, releaser
@@ -353,3 +369,274 @@ class TestTheGoAhead:
             not Review.objects.filter(idea=approved, decided_by=None).exclude(decision='').exists()
             or True
         )
+
+
+@pytest.mark.django_db
+class TestProgress:
+    """The admin sees how far each proposal has got, and who is writing it."""
+
+    def test_an_approved_idea_shows_as_not_started_with_its_team(
+        self, approved, lead, member, releaser
+    ):
+        (row,) = proposals.progress_board(releaser)
+
+        assert (row.idea, row.status, row.team_name) == (approved, 'not_started', 'Team A')
+        assert [(p.user, p.role, p.contributions) for p in row.participants] == [
+            (lead, 'lead', 0),
+            (member, 'member', 0),
+        ]
+        assert row.missing_required == tuple(f for f, _ in proposals.missing_required(None))
+        assert 'payment_plan' not in row.missing_required  # asked for only once the owner pays
+
+    def test_each_hand_in_it_is_recorded_with_the_sections_it_changed(
+        self, approved, lead, member, releaser
+    ):
+        proposals.start_proposal(member, approved.pk)
+        proposals.update_proposal(member, approved.pk, {'scope': 'Import and match'})
+        # Re-sending what is already there is not a contribution.
+        proposals.update_proposal(lead, approved.pk, {'scope': 'Import and match'})
+        proposals.update_proposal(lead, approved.pk, {'deliverables': 'A dashboard'})
+
+        (row,) = proposals.progress_board(releaser)
+
+        assert row.status == 'draft'
+        assert {'scope', 'deliverables', 'title', 'problem'} <= set(row.filled)
+        assert 'scope' not in row.missing_required
+        assert 'executive_summary' in row.missing_required
+        people = {p.user: p for p in row.participants}
+        assert (people[member].contributions, people[member].sections) == (2, ('scope',))
+        assert (people[lead].contributions, people[lead].sections) == (1, ('deliverables',))
+        assert [(c.contributor, c.action) for c in row.activity] == [
+            (lead, 'edited'),
+            (member, 'edited'),
+            (member, 'started'),
+        ]
+
+    def test_sending_it_is_recorded_and_it_moves_to_the_top(
+        self, approved, lead, member, releaser, owner, router, manager
+    ):
+        submitted(approved, lead, member)
+        later = build_idea(
+            status=Idea.Status.APPROVED,
+            author=owner,
+            title='Another idea',
+            description='A second approved idea that nobody has started.',
+            submission_context=Idea.SubmissionContext.INDIVIDUAL,
+            visibility=Idea.Visibility.PRIVATE,
+        )
+
+        rows = proposals.progress_board(releaser)
+
+        assert [(r.idea, r.status) for r in rows] == [
+            (approved, 'submitted'),
+            (later, 'not_started'),
+        ]
+        assert rows[0].activity[0].action == 'submitted'
+        assert rows[0].missing_required == ()
+        assert rows[1].participants == ()  # never reviewed: nobody to write it yet
+
+    def test_a_former_member_who_wrote_part_of_it_still_shows(
+        self, approved, lead, member, releaser, manager
+    ):
+        proposals.start_proposal(member, approved.pk)
+        team = approved.proposal.team
+        review_teams.update_team(manager, team.pk, name=team.name, lead_id=lead.pk, member_ids=[])
+
+        (row,) = proposals.progress_board(releaser)
+
+        assert {p.user: p.role for p in row.participants} == {lead: 'lead', member: 'former'}
+
+    def test_only_release_admins_see_the_board(self, approved, member, manager, owner):
+        proposals.start_proposal(member, approved.pk)
+
+        for person in (manager, member, owner, None):
+            assert proposals.progress_board(person) == []
+
+    def test_the_board_over_graphql(self, approved, member, releaser):
+        from automation.tests.test_api_journey import Api
+
+        proposals.start_proposal(member, approved.pk)
+        proposals.update_proposal(member, approved.pk, {'scope': 'Import and match'})
+        board = """{ proposalProgress { ideaTitle status teamName totalSections missingRequired
+            participants { email role contributions sections } activity { action sections }
+            proposal { scope } } }"""
+
+        assert Api(member)(board)['proposalProgress'] == []  # writers are not admins
+        (row,) = Api(releaser)(board)['proposalProgress']
+        assert row['status'] == 'draft'
+        assert row['totalSections'] == len(proposals.FIELDS)
+        assert 'executiveSummary' in row['missingRequired']
+        assert row['proposal'] == {'scope': 'Import and match'}
+        assert {
+            'email': member.email,
+            'role': 'member',
+            'contributions': 2,
+            'sections': ['scope'],
+        } in row['participants']
+        assert row['activity'][0] == {'action': 'edited', 'sections': ['scope']}
+
+
+@pytest.mark.django_db
+class TestCompleteness:
+    """A proposal reaches the admin complete: feasibility, requirements, timeline, money."""
+
+    @pytest.mark.parametrize(
+        ('field', 'label'),
+        [
+            ('feasibility', 'feasibility'),
+            ('requirements_summary', 'requirements'),
+            ('milestones', 'timeline and milestones'),
+            ('financial_requirements', 'financial requirements'),
+            ('payment_required', 'answer to whether the owner pays'),
+        ],
+    )
+    def test_the_lead_cannot_send_it_without(self, approved, lead, member, field, label):
+        written(approved, lead, member)
+        proposals.update_proposal(member, approved.pk, {field: ''})
+
+        with pytest.raises(proposals.ProposalError, match=f'Fill in the {label}') as refused:
+            proposals.submit_proposal(lead, approved.pk)
+        assert refused.value.field == field
+
+    def test_a_paid_proposal_needs_its_payment_plan(self, approved, lead, member, releaser):
+        written(approved, lead, member)
+        proposals.update_proposal(member, approved.pk, {'payment_required': 'yes'})
+
+        with pytest.raises(proposals.ProposalError, match='payment plan'):
+            proposals.submit_proposal(lead, approved.pk)
+        (row,) = proposals.progress_board(releaser)
+        assert row.missing_required == ('payment_plan',)
+
+        proposals.update_proposal(
+            member, approved.pk, {'payment_plan': '50% on start, 50% on acceptance.'}
+        )
+        assert proposals.submit_proposal(lead, approved.pk).status == 'submitted'
+
+    def test_no_charge_leaves_the_payment_plan_out_of_the_count(
+        self, approved, lead, member, releaser
+    ):
+        written(approved, lead, member)
+
+        (row,) = proposals.progress_board(releaser)
+
+        assert row.total == len(proposals.FIELDS) - 1
+        assert row.missing_required == ()
+
+    def test_whether_the_owner_pays_is_yes_or_no(self, approved, member):
+        proposals.start_proposal(member, approved.pk)
+
+        with pytest.raises(proposals.ProposalError, match="'yes' or 'no'"):
+            proposals.update_proposal(member, approved.pk, {'payment_required': 'maybe'})
+
+    def test_the_agreed_proposal_carries_its_money_and_timeline_into_delivery(
+        self, approved, lead, member, releaser, owner
+    ):
+        submitted(approved, lead, member)
+        proposals.release(releaser, approved.pk)
+
+        go_ahead.confirm_go_ahead(owner, approved.pk)
+
+        agreed = DeliveryProposal.objects.get(opportunity__idea=approved)
+        assert agreed.feasibility == FULL['feasibility']
+        assert agreed.milestones == FULL['milestones']
+        assert agreed.financial_requirements == FULL['financial_requirements']
+        assert agreed.payment_required == 'no'
+
+
+# --- the owner's answers to the released proposal ------------------------------------
+
+
+@pytest.fixture
+def released(approved, lead, member, releaser):
+    submitted(approved, lead, member)
+    proposals.release(releaser, approved.pk)
+    return approved
+
+
+def proceed(owner, idea, **overrides):
+    values = {'decision': 'proceed', 'timeline': 'yes', 'conditions': 'Start after payroll week.'}
+    values.update(overrides)
+    return proposal_answers.answer(owner, idea.pk, **values)
+
+
+@pytest.mark.django_db
+class TestGoingAhead:
+    def test_going_ahead_is_the_go_ahead_and_carries_the_terms(self, owner, released):
+        record = proceed(owner, released, preferred_start=date.today() + timedelta(days=7))
+
+        released.refresh_from_db()
+        assert released.status == Idea.Status.READY_FOR_IMPLEMENTATION
+        assert released.automation_opportunities.get().status == 'ready_for_assignment'
+        assert (record.decision, record.timeline, record.payment) == ('proceed', 'yes', '')
+        assert record.conditions == 'Start after payroll week.'
+
+    def test_a_paying_owner_must_answer_the_payment_plan(
+        self, owner, approved, lead, member, releaser
+    ):
+        proposals.start_proposal(member, approved.pk)
+        proposals.update_proposal(
+            member,
+            approved.pk,
+            {**FULL, 'payment_required': 'yes', 'payment_plan': 'Half up front, half on delivery.'},
+        )
+        proposals.submit_proposal(lead, approved.pk)
+        proposals.release(releaser, approved.pk)
+
+        with pytest.raises(proposal_answers.ProposalAnswerError, match='payment plan'):
+            proceed(owner, approved)
+        assert proceed(owner, approved, payment='discuss').payment == 'discuss'
+
+    def test_the_timeline_must_be_answered_and_a_start_cannot_be_past(self, owner, released):
+        with pytest.raises(proposal_answers.ProposalAnswerError, match='timeline'):
+            proceed(owner, released, timeline='')
+        with pytest.raises(proposal_answers.ProposalAnswerError, match='start date'):
+            proceed(owner, released, preferred_start=date.today() - timedelta(days=1))
+        assert not ProposalAnswer.objects.exists()
+
+
+@pytest.mark.django_db
+class TestDeclining:
+    def test_a_decline_needs_a_reason_and_ends_the_way_to_development(self, owner, released):
+        with pytest.raises(proposal_answers.ProposalAnswerError, match='why'):
+            proposal_answers.answer(owner, released.pk, decision='decline')
+
+        proposal_answers.answer(
+            owner, released.pk, decision='decline', decline_reason='The cost is too high.'
+        )
+
+        released.refresh_from_db()
+        assert released.status == Idea.Status.APPROVED
+        with pytest.raises(IdeaError, match='decided not to go ahead'):
+            go_ahead.confirm_go_ahead(owner, released.pk)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_decline_tells_the_admin_and_the_review_team(owner, released, releaser, lead):
+    proposal_answers.answer(owner, released.pk, decision='decline', decline_reason='Too costly.')
+
+    for person in (releaser, lead):
+        assert Notification.objects.filter(user=person, kind='proposal.owner_declined').exists()
+
+
+@pytest.mark.django_db
+class TestWhoAnswersAndReads:
+    def test_only_the_owner_answers_and_only_once(self, owner, released, lead, releaser):
+        for other in (lead, releaser, make_user('stranger@example.com')):
+            with pytest.raises(proposal_answers.ProposalAnswerError, match='not yours'):
+                proceed(other, released)
+        proceed(owner, released)
+        with pytest.raises(proposal_answers.ProposalAnswerError):
+            proceed(owner, released)
+
+    def test_an_unreleased_proposal_cannot_be_answered(self, owner, approved, lead, member):
+        submitted(approved, lead, member)
+
+        with pytest.raises(proposal_answers.ProposalAnswerError, match='no released proposal'):
+            proceed(owner, approved)
+
+    def test_the_answers_are_read_by_those_who_act_on_them(self, owner, released, lead, releaser):
+        proceed(owner, released)
+
+        for reader in (owner, lead, releaser):
+            assert proposal_answers.answer_for(reader, released.pk) is not None
+        assert proposal_answers.answer_for(make_user('stranger@example.com'), released.pk) is None

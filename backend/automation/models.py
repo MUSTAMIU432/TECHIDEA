@@ -381,6 +381,9 @@ def _known(field: str, choices, name: str) -> models.CheckConstraint:
     return models.CheckConstraint(condition=models.Q(**{f'{field}__in': dict(choices)}), name=name)
 
 
+PAYMENT_CHOICES = (('yes', 'The owner pays'), ('no', 'No charge to the owner'))
+
+
 class Proposal(models.Model):
     """The delivery team's proposal for an opportunity. One per opportunity, edited in place."""
 
@@ -399,6 +402,16 @@ class Proposal(models.Model):
     estimated_effort = models.CharField(max_length=120, blank=True)
     estimated_timeline = models.CharField(max_length=120, blank=True)
     acceptance_criteria = models.TextField(blank=True)
+    feasibility = models.TextField(blank=True)
+    milestones = models.TextField(blank=True, help_text='The timeline, phase by phase.')
+    financial_requirements = models.TextField(blank=True)
+    payment_required = models.CharField(
+        max_length=3,
+        choices=PAYMENT_CHOICES,
+        blank=True,
+        help_text='Whether the owner pays for it; empty until the team answers.',
+    )
+    payment_plan = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=PROPOSAL_STATUS_CHOICES, default='draft')
     review_feedback = models.TextField(blank=True)
     created_by = models.ForeignKey(

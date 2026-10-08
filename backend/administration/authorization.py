@@ -22,6 +22,11 @@ already platform-scoped - Django's `auth.Permission`, declared on
   `INSPECT_IDEA_CONTENT` (the content of ideas that are not PUBLIC, their
   discussion and evidence, and review feedback), `MANAGE_USER_ACCOUNTS`,
   `MANAGE_ORGANIZATION_ROLES`, `MANAGE_CATEGORIES`.
+- **Except `REVIEW_PLATFORM_SUBMISSIONS`**, which stands on its own. A platform
+  reviewer works in the review workspace and on the idea's page, not in the
+  console, and the console - every account, every organization, the audit trail -
+  is the administrators' alone. So a reviewer holds the review permission and
+  nothing else here, and never sees the console.
 
 Who holds them: a user granted them directly or through a group (the
 `grant_platform_admin` command creates the "Platform administrators" group),
@@ -67,22 +72,29 @@ MANAGE_REVIEWERS = 'administration.manage_reviewers'
 # Decide whether a review team's proposal is released to the idea's owner. Not held by the
 # reviewers who write it: the author of a proposal never approves it.
 RELEASE_PROPOSALS = 'administration.release_proposals'
+# Give an existing account one of the platform's jobs - developer, delivery manager,
+# intake, proposal approver (`administration.platform_roles`) - and take it away.
+MANAGE_PLATFORM_ROLES = 'administration.manage_platform_roles'
 
-# The console's own permissions: the gate plus the additional capabilities, and
+# The console's own permissions: the gate, the additional capabilities, and
+# *staffing* - making reviewers and handing out the platform's other jobs - but
 # nothing about *deciding* anything. Named separately from `ALL_PERMISSIONS`
 # because the "Platform administrators" group holds exactly this set, and the
-# reason it does not hold the other two is a separation of duties rather than an
-# oversight: inspecting content and reading audit metadata is watching the
-# platform work, while routing submissions and deciding them is *doing* it. An
-# administrator who could hand an idea to a reviewer and then approve it would
-# be their own intake and their own decision, and no permission check anywhere
-# could catch it - because both would be true at once.
+# reason it does not hold review, routing or release is a separation of duties
+# rather than an oversight: inspecting content and staffing the platform is
+# running it, while routing submissions and deciding them is *doing* the work.
+# Those jobs are given to named accounts on the console's Platform roles and
+# Reviewers pages, each grant audited, and the operations themselves still refuse
+# the conflicts (a lead routing to their own team, a writer releasing their own
+# proposal, an author reviewing their own idea, a builder accepting their own work).
 CONSOLE_PERMISSIONS = (
     ACCESS_CONSOLE,
     INSPECT_IDEA_CONTENT,
     MANAGE_USER_ACCOUNTS,
     MANAGE_ORGANIZATION_ROLES,
     MANAGE_CATEGORIES,
+    MANAGE_REVIEWERS,
+    MANAGE_PLATFORM_ROLES,
 )
 
 ALL_PERMISSIONS = (
@@ -95,6 +107,7 @@ ALL_PERMISSIONS = (
     ASSIGN_PLATFORM_REVIEWERS,
     MANAGE_REVIEWERS,
     RELEASE_PROPOSALS,
+    MANAGE_PLATFORM_ROLES,
 )
 
 
@@ -110,7 +123,8 @@ class AdminCapabilities:
     """
     What one user may do in the console. All false for anybody without
     `ACCESS_CONSOLE`, whatever else they hold - the additional permissions are
-    never honoured on their own.
+    never honoured on their own - except `can_review_platform_submissions`, which
+    is the reviewer's and needs no console (see the module docstring).
     """
 
     can_access_console: bool = False
@@ -119,13 +133,13 @@ class AdminCapabilities:
     can_manage_organization_roles: bool = False
     can_manage_categories: bool = False
     # The platform review track, held independently of the console: a platform
-    # reviewer needs `can_review_platform_submissions` to decide a submission,
-    # and needs `can_access_console` too, so the review queue is a console
-    # surface and nobody reviews without being able to see the platform's work.
+    # reviewer decides submissions from the review workspace and never needs the
+    # console, which is for administrators only.
     can_review_platform_submissions: bool = False
     can_assign_platform_reviewers: bool = False
     can_manage_reviewers: bool = False
     can_release_proposals: bool = False
+    can_manage_platform_roles: bool = False
 
 
 NO_CAPABILITIES = AdminCapabilities()
@@ -140,7 +154,11 @@ def _active(user: User | None) -> User | None:
 def capabilities_for(user: User | None) -> AdminCapabilities:
     """The console capabilities of `user`, from Django's per-request permission cache."""
     active_user = _active(user)
-    if active_user is None or not active_user.has_perm(ACCESS_CONSOLE):
+    if active_user is None:
+        return NO_CAPABILITIES
+    if not active_user.has_perm(ACCESS_CONSOLE):
+        if active_user.has_perm(REVIEW_PLATFORM_SUBMISSIONS):
+            return AdminCapabilities(can_review_platform_submissions=True)
         return NO_CAPABILITIES
     return AdminCapabilities(
         can_access_console=True,
@@ -152,13 +170,14 @@ def capabilities_for(user: User | None) -> AdminCapabilities:
         can_assign_platform_reviewers=active_user.has_perm(ASSIGN_PLATFORM_REVIEWERS),
         can_manage_reviewers=active_user.has_perm(MANAGE_REVIEWERS),
         can_release_proposals=active_user.has_perm(RELEASE_PROPOSALS),
+        can_manage_platform_roles=active_user.has_perm(MANAGE_PLATFORM_ROLES),
     )
 
 
 def require_platform_reviewer(user: User | None) -> User:
     """
-    `user`, if they hold both `ACCESS_CONSOLE` and
-    `REVIEW_PLATFORM_SUBMISSIONS`; otherwise `AdministrationError`.
+    `user`, if they hold `REVIEW_PLATFORM_SUBMISSIONS`; otherwise
+    `AdministrationError`. No console access is needed or implied.
 
     The one gate for every platform review decision. It asks Django's backend
     about platform-scoped permissions and nothing else - no organization role,
@@ -166,7 +185,12 @@ def require_platform_reviewer(user: User | None) -> User:
     makes an organization Reviewer structurally unable to approve an idea, and
     a team Owner structurally unable to approve their own.
     """
-    return require_admin(user, REVIEW_PLATFORM_SUBMISSIONS)
+    active_user = _active(user)
+    if active_user is None:
+        raise AdministrationError('Authentication is required.', reason='unauthenticated')
+    if not active_user.has_perm(REVIEW_PLATFORM_SUBMISSIONS):
+        raise AdministrationError('You do not have permission to perform this action.')
+    return active_user
 
 
 def require_assign_reviewer(user: User | None) -> User:
@@ -189,6 +213,11 @@ def require_manage_reviewers(user: User | None) -> User:
 def require_release_proposals(user: User | None) -> User:
     """`user`, if they hold both `ACCESS_CONSOLE` and `RELEASE_PROPOSALS`."""
     return require_admin(user, RELEASE_PROPOSALS)
+
+
+def require_manage_platform_roles(user: User | None) -> User:
+    """`user`, if they hold both `ACCESS_CONSOLE` and `MANAGE_PLATFORM_ROLES`."""
+    return require_admin(user, MANAGE_PLATFORM_ROLES)
 
 
 def is_platform_admin(user: User | None) -> bool:

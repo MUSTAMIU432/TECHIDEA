@@ -716,6 +716,9 @@ PROPOSAL_STATUS_CHOICES = (
 )
 
 
+PAYMENT_CHOICES = (('yes', 'The owner pays'), ('no', 'No charge to the owner'))
+
+
 class IdeaProposal(models.Model):
     """
     The proposal for an approved idea: what the platform would build, written by the review
@@ -752,6 +755,16 @@ class IdeaProposal(models.Model):
     estimated_effort = models.CharField(max_length=120, blank=True)
     estimated_timeline = models.CharField(max_length=120, blank=True)
     acceptance_criteria = models.TextField(blank=True)
+    feasibility = models.TextField(blank=True)
+    milestones = models.TextField(blank=True, help_text='The timeline, phase by phase.')
+    financial_requirements = models.TextField(blank=True)
+    payment_required = models.CharField(
+        max_length=3,
+        choices=PAYMENT_CHOICES,
+        blank=True,
+        help_text='Whether the owner pays for it; empty until the team answers.',
+    )
+    payment_plan = models.TextField(blank=True)
 
     status = models.CharField(max_length=20, choices=PROPOSAL_STATUS_CHOICES, default='draft')
     review_feedback = models.TextField(blank=True)
@@ -781,6 +794,37 @@ class IdeaProposal(models.Model):
         return f'{self.title} ({self.status})'
 
 
+class IdeaProposalContribution(models.Model):
+    """
+    One person's hand in a proposal: starting it, saving changes to it, or sending it to the
+    admin. Append-only, so the admin can see who is actually writing it and what they touched,
+    not only who is on the team.
+    """
+
+    class Action(models.TextChoices):
+        STARTED = 'started', 'Started'
+        EDITED = 'edited', 'Edited'
+        SUBMITTED = 'submitted', 'Sent to the admin'
+
+    proposal = models.ForeignKey(
+        IdeaProposal, on_delete=models.CASCADE, related_name='contributions'
+    )
+    contributor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+'
+    )
+    action = models.CharField(max_length=20, choices=Action.choices)
+    sections = models.JSONField(
+        default=list, blank=True, help_text='The proposal fields an edit changed.'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-created_at', '-pk']
+
+    def __str__(self) -> str:
+        return f'{self.contributor_id} {self.action} {self.proposal_id}'
+
+
 class IdeaProposalView(models.Model):
     """
     Each time the owner opened the released proposal. Append-only evidence: the page is
@@ -796,3 +840,146 @@ class IdeaProposalView(models.Model):
 
     def __str__(self) -> str:
         return f'{self.viewer_id} viewed {self.proposal_id}'
+
+
+class DecisionLetter(models.Model):
+    """
+    The platform's final word on an idea, as the owner receives it.
+
+    A platform reviewer's **approval or rejection** does not reach the owner by itself.
+    It is recorded (the idea moves, the report is written) and a letter is drafted -
+    congratulations or a gracious no - which a platform administrator reads, adjusts
+    and sends. Until then the owner still sees the idea as under review, and the last
+    round and the report stay behind the letter (`reviews.decision_letters`).
+
+    A **changes request** has no letter: it goes straight to the owner, because it is
+    the reviewers asking the owner for something, not the platform deciding.
+
+    One letter per deciding review. Never deleted, and never sent twice: `sent_at` and
+    `sent_by` are set together, once, by `decision_letters.send`.
+    """
+
+    class Decision(models.TextChoices):
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Waiting to be sent'
+        SENT = 'sent', 'Sent to the owner'
+
+    idea = models.ForeignKey(Idea, on_delete=models.CASCADE, related_name='decision_letters')
+    review = models.OneToOneField(Review, on_delete=models.CASCADE, related_name='decision_letter')
+    decision = models.CharField(max_length=16, choices=Decision.choices)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    message = models.TextField(
+        blank=True,
+        help_text='The letter as sent. Drafted from a template; the administrator may edit it.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-created_at', '-pk']
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status='pending', sent_at__isnull=True, sent_by__isnull=True)
+                    | models.Q(status='sent', sent_at__isnull=False, sent_by__isnull=False)
+                ),
+                name='decision_letter_sent_fields_match_status',
+            ),
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=['idea', 'status'], name='decision_letter_idea_status'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.get_decision_display()} letter for idea {self.idea_id}'
+
+
+class ChangeResponse(models.Model):
+    """
+    The owner's answer to a request for changes: what they changed, in their own words.
+
+    Written once per changes-requested round, together with the resubmission it explains
+    (`reviews.change_responses.respond`), so the reviewer opening the next round reads the
+    author's account of the changes beside the new version rather than diffing two
+    versions to guess. Never edited: it is what the author said when they resubmitted.
+    """
+
+    idea = models.ForeignKey(Idea, on_delete=models.CASCADE, related_name='change_responses')
+    review = models.OneToOneField(
+        Review,
+        on_delete=models.CASCADE,
+        related_name='change_response',
+        help_text='The completed round that asked for the changes.',
+    )
+    message = models.TextField()
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='change_responses'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ['-created_at', '-pk']
+
+    def __str__(self) -> str:
+        return f'Response to review {self.review_id}'
+
+
+class ProposalAnswer(models.Model):
+    """
+    The owner's answers to the released proposal: whether to go ahead with development,
+    and on what terms.
+
+    One per proposal, written once (`reviews.proposal_answers.answer`). A *proceed* is
+    given together with the owner's go-ahead - the same transaction opens the automation
+    opportunity - so the delivery team never sees a go-ahead without the owner's terms,
+    nor terms without a go-ahead. A *decline* ends the idea's way to development: the
+    go-ahead is refused afterwards (`ideas.go_ahead`).
+    """
+
+    class Decision(models.TextChoices):
+        PROCEED = 'proceed', 'Go ahead with development'
+        DECLINE = 'decline', 'Do not go ahead'
+
+    class Agreement(models.TextChoices):
+        YES = 'yes', 'Agreed'
+        DISCUSS = 'discuss', 'Needs discussion'
+
+    proposal = models.OneToOneField(
+        IdeaProposal, on_delete=models.CASCADE, related_name='owner_answer'
+    )
+    idea = models.ForeignKey(Idea, on_delete=models.CASCADE, related_name='proposal_answers')
+    decision = models.CharField(max_length=16, choices=Decision.choices)
+    timeline = models.CharField(
+        max_length=16,
+        choices=Agreement.choices,
+        blank=True,
+        help_text='Whether the owner accepts the proposed timeline. Blank for a decline.',
+    )
+    payment = models.CharField(
+        max_length=16,
+        choices=Agreement.choices,
+        blank=True,
+        help_text='Whether the owner accepts the payment plan. Blank when there is no charge.',
+    )
+    preferred_start = models.DateField(null=True, blank=True)
+    conditions = models.TextField(
+        blank=True, help_text='Anything the delivery team should know before starting.'
+    )
+    decline_reason = models.TextField(blank=True)
+    answered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+'
+    )
+    answered_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f'{self.get_decision_display()} for proposal {self.proposal_id}'

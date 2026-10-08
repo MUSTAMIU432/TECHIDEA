@@ -14,6 +14,8 @@ per domain.
 import django
 import strawberry
 
+from administration.roles_schema import Mutation as PlatformRolesMutation
+from administration.roles_schema import Query as PlatformRolesQuery
 from administration.schema import Mutation as AdministrationMutation
 from administration.schema import Query as AdministrationQuery
 from automation.delivery_schema import Mutation as DeliveryMutation
@@ -32,13 +34,20 @@ from notifications.schema import Mutation as NotificationsMutation
 from notifications.schema import Query as NotificationsQuery
 from organizations.schema import Mutation as OrganizationsMutation
 from organizations.schema import Query as OrganizationsQuery
+from reviews.answer_schema import Mutation as ProposalAnswerMutation
+from reviews.answer_schema import Query as ProposalAnswerQuery
+from reviews.letter_schema import Mutation as DecisionLetterMutation
+from reviews.letter_schema import Query as DecisionLetterQuery
 from reviews.proposal_schema import Mutation as ProposalMutation
 from reviews.proposal_schema import Query as ProposalQuery
+from reviews.response_schema import Mutation as ChangeResponseMutation
+from reviews.response_schema import Query as ChangeResponseQuery
 from reviews.schema import Mutation as ReviewsMutation
 from reviews.schema import PlatformTrackMutation, PlatformTrackQuery
 from reviews.schema import Query as ReviewsQuery
 from reviews.team_schema import Mutation as ReviewTeamMutation
 from reviews.team_schema import Query as ReviewTeamQuery
+from reviews.workboard_schema import Query as ReviewerWorkQuery
 from teams.schema import Mutation as TeamsMutation
 from teams.schema import Query as TeamsQuery
 
@@ -62,12 +71,17 @@ class Query(
     PlatformTrackQuery,
     ReviewTeamQuery,
     ProposalQuery,
+    DecisionLetterQuery,
+    ChangeResponseQuery,
+    ProposalAnswerQuery,
+    ReviewerWorkQuery,
     InvitationsQuery,
     NotificationsQuery,
     MessagingQuery,
     AutomationQuery,
     DeliveryQuery,
     AdministrationQuery,
+    PlatformRolesQuery,
 ):
     @strawberry.field(
         description=(
@@ -92,12 +106,16 @@ class Mutation(
     PlatformTrackMutation,
     ReviewTeamMutation,
     ProposalMutation,
+    DecisionLetterMutation,
+    ChangeResponseMutation,
+    ProposalAnswerMutation,
     InvitationsMutation,
     NotificationsMutation,
     MessagingMutation,
     AutomationMutation,
     DeliveryMutation,
     AdministrationMutation,
+    PlatformRolesMutation,
 ):
     @strawberry.mutation(
         description=('Infrastructure check: echoes the input to prove the mutation root resolves.')

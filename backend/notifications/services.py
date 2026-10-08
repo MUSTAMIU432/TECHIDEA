@@ -159,3 +159,28 @@ def mark_all_read(user: User | None) -> int:
     return Notification.objects.filter(user=user, is_read_at__isnull=True).update(
         is_read_at=timezone.now()
     )
+
+
+#: The notifications that ask the author to change something - answered by resubmitting.
+CHANGES_REQUESTED_KINDS = (
+    'idea.platform_changes_requested',
+    'idea.organization_changes_requested',
+)
+
+
+def mark_answered(user: User | None, idea, kinds: tuple[str, ...] = CHANGES_REQUESTED_KINDS) -> int:
+    """
+    Mark `user`'s unread notifications of `kinds` about `idea` read: the thing they
+    asked for has been done, so they should stop waiting in the bell.
+
+    Called when an author resubmits after a changes request, however they did it.
+    Scoped to the recipient and the one idea, like `mark_all_read`.
+    """
+    from django.utils import timezone
+
+    if user is None or not user.is_active or idea is None:
+        return 0
+
+    return Notification.objects.filter(
+        user=user, idea=idea, kind__in=kinds, is_read_at__isnull=True
+    ).update(is_read_at=timezone.now())

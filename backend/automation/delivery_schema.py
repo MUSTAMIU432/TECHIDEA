@@ -56,6 +56,11 @@ class ProposalType:
     estimated_effort: str
     estimated_timeline: str
     acceptance_criteria: str
+    feasibility: str
+    milestones: str
+    financial_requirements: str
+    payment_required: str
+    payment_plan: str
     status: str
     review_feedback: str
     submitted_at: datetime | None

@@ -1,0 +1,15 @@
+{% comment %}The plain-text part of the decision letter's announcement. See decision_letter.html.{% endcomment %}{% if approved %}Congratulations, {{ first_name }}!
+
+Your idea "{{ title }}" has been approved by the {{ platform }} review team.
+
+Your letter explains what happens next: the team is now preparing a proposal for you, and nothing goes ahead until you give your go-ahead.{% else %}Thank you, {{ first_name }}.
+
+The {{ platform }} review team has reached a decision on your idea "{{ title }}", and has written you a letter.
+
+We are grateful for the care you put into it, and we would genuinely welcome your next idea.{% endif %}
+
+Read your letter:
+
+{{ idea_url }}
+
+- The {{ platform }} team

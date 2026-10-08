@@ -52,6 +52,8 @@ NOTIFICATION_KIND_CHOICES = (
     ('idea.owner_go_ahead', 'Your idea is ready for implementation'),
     # --- automation delivery (Sprint 4) ----------------------------------------
     ('proposal.submitted', 'A proposal is waiting for your decision'),
+    ('proposal.writing_opened', 'You can now write the proposal'),
+    ('proposal.owner_declined', 'The owner decided not to go ahead'),
     ('proposal.changes_requested', 'Your proposal was sent back'),
     ('proposal.released', 'Your proposal is ready to read'),
     ('proposal.declined', 'Your idea will not be developed'),
@@ -76,6 +78,7 @@ NOTIFICATION_KIND_CHOICES = (
     ('review.assigned', 'An idea was assigned to you'),
     ('review.organization_queue', 'An idea is waiting for organization review'),
     ('review.platform_queue', 'An idea is waiting for platform review'),
+    ('review.decision_awaiting_release', 'A decision is waiting to be sent to its owner'),
     # --- invitations and messaging ---------------------------------------------
     ('invitation.received', 'You have been invited'),
     ('invitation.accepted', 'Your invitation was accepted'),
@@ -120,6 +123,8 @@ NOTIFICATION_LABELS = {
     'idea.platform_approved': 'Platform review completed',
     'idea.owner_go_ahead': 'Your idea is ready for implementation',
     'proposal.submitted': 'A proposal is waiting for your decision',
+    'proposal.writing_opened': 'You can now write the proposal',
+    'proposal.owner_declined': 'The owner decided not to go ahead',
     'proposal.changes_requested': 'Your proposal was sent back',
     'proposal.released': 'Your proposal is ready to read',
     'proposal.declined': 'Your idea will not be developed',
@@ -143,6 +148,7 @@ NOTIFICATION_LABELS = {
     'review.assigned': 'An idea was assigned to you',
     'review.organization_queue': 'An idea is waiting for organization review',
     'review.platform_queue': 'An idea is waiting for platform review',
+    'review.decision_awaiting_release': 'A decision is waiting to be sent to its owner',
     'invitation.received': 'You have been invited',
     'invitation.accepted': 'Your invitation was accepted',
     'invitation.declined': 'Your invitation was declined',
@@ -155,6 +161,53 @@ NOTIFICATIONS_PATH = '/app/notifications'
 IDEA_PATH = '/app/ideas'
 IDEA_REPORT_PATH = '/app/ideas/{idea_id}/report'
 MESSAGES_PATH = '/app/messages'
+DECISIONS_PATH = '/app/admin/decisions'
+ADMIN_PROPOSALS_PATH = '/app/admin/proposals'
+#: Where each kind sends its reader to act - the page that owns the work, not just the idea.
+#: `{idea_id}` is filled from the row. Kinds not listed fall back to the idea, or the list.
+WORK_PATHS = {
+    # The reviewer's queue, opened on the idea.
+    'review.assigned': '/app/reviews?idea={idea_id}',
+    'review.platform_queue': '/app/reviews?idea={idea_id}',
+    'review.organization_queue': '/app/reviews?idea={idea_id}',
+    # The review team's proposal workspace.
+    'proposal.writing_opened': '/app/reviews/proposals/{idea_id}',
+    'proposal.changes_requested': '/app/reviews/proposals/{idea_id}',
+    'proposal.owner_declined': '/app/reviews/proposals/{idea_id}',
+    # The owner's reading of the released proposal.
+    'proposal.released': '/app/ideas/{idea_id}/proposal',
+    # The administrators' console pages.
+    'review.decision_awaiting_release': DECISIONS_PATH,
+    'proposal.submitted': ADMIN_PROPOSALS_PATH,
+    # The owner's idea page, opened on the section the notification is about.
+    'idea.platform_changes_requested': '/app/ideas/{idea_id}#respond',
+    'idea.organization_changes_requested': '/app/ideas/{idea_id}#respond',
+    'idea.platform_approved': '/app/ideas/{idea_id}#decision-letter',
+    'idea.platform_rejected': '/app/ideas/{idea_id}#decision-letter',
+    'proposal.declined': '/app/ideas/{idea_id}#proposal',
+    # Delivery: the developer queue for the people who assign it.
+    'delivery.go_ahead_received': '/app/automation/queue',
+}
+
+#: Delivery notifications open the idea's project, on the tab the news is about.
+PROJECT_TABS = {
+    'automation.project_created': 'overview',
+    'automation.project_started': 'overview',
+    'automation.project_completed': 'overview',
+    'automation.milestone_completed': 'work',
+    'automation.testing_failed': 'testing',
+    'automation.ready_for_uat': 'uat',
+    'automation.uat_passed': 'uat',
+    'automation.uat_failed': 'uat',
+    'automation.deployment_completed': 'deployment',
+    'automation.impact_recorded': 'impact',
+}
+#: ...and opportunity news opens the opportunity, on its tab.
+OPPORTUNITY_TABS = {
+    'automation.opportunity_assigned': 'assignment',
+    'automation.ready_for_assignment': 'assignment',
+    'automation.opportunity_created': 'overview',
+}
 
 
 class Notification(models.Model):
@@ -262,6 +315,19 @@ class Notification(models.Model):
         """
         if self.report_id is not None and self.kind in DECISION_KINDS:
             return IDEA_REPORT_PATH.format(idea_id=self.idea_id)
+        delivery_path = self._delivery_path()
+        if delivery_path is not None:
+            return delivery_path
+        work_path = WORK_PATHS.get(self.kind)
+        if work_path is not None and (self.idea_id is not None or '{' not in work_path):
+            path = work_path.format(idea_id=self.idea_id)
+            if not path.startswith(f'{IDEA_PATH}/'):
+                # A workspace or console page, which checks its reader itself.
+                return path
+            # A section of the idea's page: only for somebody who can still read the idea.
+            from ideas import selectors as idea_selectors
+
+            return path if idea_selectors.can_view_idea(self.user, self.idea) else None
         if self.idea_id is not None:
             from ideas import selectors as idea_selectors
 
@@ -270,6 +336,28 @@ class Notification(models.Model):
         if self.kind == 'message.received':
             return MESSAGES_PATH
         return None
+
+    def _delivery_path(self) -> str | None:
+        """The project or opportunity page, on its tab, for delivery news about this idea."""
+        if self.idea_id is None or (
+            self.kind not in PROJECT_TABS and self.kind not in OPPORTUNITY_TABS
+        ):
+            return None
+        from automation.models import AutomationOpportunity, Project
+
+        if self.kind in PROJECT_TABS:
+            project = Project.objects.filter(opportunity__idea_id=self.idea_id).first()
+            if project is not None:
+                return f'/app/automation/projects/{project.pk}?tab={PROJECT_TABS[self.kind]}'
+        opportunity = (
+            AutomationOpportunity.objects.filter(idea_id=self.idea_id)
+            .exclude(status='cancelled')
+            .first()
+        )
+        if opportunity is None:
+            return None
+        tab = OPPORTUNITY_TABS.get(self.kind, 'project')
+        return f'/app/automation/opportunities/{opportunity.pk}?tab={tab}'
 
     @property
     def is_read(self) -> bool:

@@ -34,6 +34,11 @@ class IdeaProposalType:
     estimated_effort: str
     estimated_timeline: str
     acceptance_criteria: str
+    feasibility: str
+    milestones: str
+    financial_requirements: str
+    payment_required: str
+    payment_plan: str
     status: str
     review_feedback: str
     submitted_at: datetime | None
@@ -58,6 +63,11 @@ class IdeaProposalType:
             estimated_effort=p.estimated_effort,
             estimated_timeline=p.estimated_timeline,
             acceptance_criteria=p.acceptance_criteria,
+            feasibility=p.feasibility,
+            milestones=p.milestones,
+            financial_requirements=p.financial_requirements,
+            payment_required=p.payment_required,
+            payment_plan=p.payment_plan,
             status=p.status,
             review_feedback=p.review_feedback,
             submitted_at=p.submitted_at,
@@ -67,11 +77,90 @@ class IdeaProposalType:
 
 
 @strawberry.type
+class ProposalParticipantType:
+    """Someone on the writing team, or who wrote part of it, and what they have done."""
+
+    name: str
+    email: str
+    role: str = strawberry.field(
+        description="'lead', 'member', or 'former' (wrote part of it, no longer on the team)."
+    )
+    contributions: int
+    sections: list[str] = strawberry.field(description='The sections they changed, camelCase.')
+    last_contributed_at: datetime | None
+
+
+@strawberry.type
+class ProposalActivityType:
+    name: str
+    action: str = strawberry.field(description="'started', 'edited' or 'submitted'.")
+    sections: list[str]
+    at: datetime
+
+
+@strawberry.type
+class ProposalProgressType:
+    """How far one approved idea's proposal has got, and who is writing it."""
+
+    idea_id: strawberry.ID
+    idea_title: str
+    status: str = strawberry.field(description="A proposal status, or 'not_started'.")
+    team_name: str | None
+    participants: list[ProposalParticipantType]
+    filled_sections: list[str]
+    total_sections: int
+    missing_required: list[str]
+    activity: list[ProposalActivityType]
+    proposal: IdeaProposalType | None
+
+
+def _name(user) -> str:
+    return user.get_full_name() or user.email
+
+
+def _progress(row: proposals.ProgressRow) -> ProposalProgressType:
+    return ProposalProgressType(
+        idea_id=strawberry.ID(str(row.idea.pk)),
+        idea_title=row.idea.title,
+        status=row.status,
+        team_name=row.team_name,
+        participants=[
+            ProposalParticipantType(
+                name=_name(p.user),
+                email=p.user.email,
+                role=p.role,
+                contributions=p.contributions,
+                sections=[_camel(s) for s in p.sections],
+                last_contributed_at=p.last_contributed_at,
+            )
+            for p in row.participants
+        ],
+        filled_sections=[_camel(f) for f in row.filled],
+        total_sections=row.total,
+        missing_required=[_camel(f) for f in row.missing_required],
+        activity=[
+            ProposalActivityType(
+                name=_name(c.contributor),
+                action=c.action,
+                sections=[_camel(s) for s in c.sections],
+                at=c.created_at,
+            )
+            for c in row.activity
+        ],
+        proposal=IdeaProposalType.from_model(row.proposal) if row.proposal else None,
+    )
+
+
+@strawberry.type
 class IdeaProposalState:
     """What the caller can do about this idea's proposal, and the proposal if they may see it."""
 
     viewer_role: str | None
     can_start: bool
+    waiting_for_admin: bool = strawberry.field(
+        description='Approved, but the platform admin has not confirmed it yet: the proposal '
+        'can be started once they send the approval to the owner.'
+    )
     can_edit: bool
     can_submit: bool
     can_decide: bool
@@ -117,6 +206,11 @@ class UpdateIdeaProposalInput:
     estimated_effort: str | None = None
     estimated_timeline: str | None = None
     acceptance_criteria: str | None = None
+    feasibility: str | None = None
+    milestones: str | None = None
+    financial_requirements: str | None = None
+    payment_required: str | None = None
+    payment_plan: str | None = None
 
 
 def _camel(name: str | None) -> str | None:
@@ -162,14 +256,16 @@ class Query:
                 'changes_requested',
             )
         )
+        from reviews import decision_letters
+
+        startable = bool(
+            idea and role == 'writer' and idea.status == Idea.Status.APPROVED and proposal is None
+        )
+        waiting = startable and decision_letters.pending_letter(idea) is not None
         return IdeaProposalState(
             viewer_role=role,
-            can_start=bool(
-                idea
-                and role == 'writer'
-                and idea.status == Idea.Status.APPROVED
-                and proposal is None
-            ),
+            can_start=startable and not waiting,
+            waiting_for_admin=waiting,
             can_edit=editable,
             can_submit=bool(editable and proposals.is_writer_lead(user, idea)),
             can_decide=bool(role == 'admin' and proposal and proposal.status == 'submitted'),
@@ -183,6 +279,14 @@ class Query:
         return [
             IdeaProposalType.from_model(p) for p in proposals.decided_proposals(info.context.user)
         ]
+
+    @strawberry.field(
+        description="Every approved idea's proposal as far as it has got - not started, being "
+        'written, with the admin, decided - with who is writing it. Empty without the release '
+        'permission.'
+    )
+    def proposal_progress(self, info: strawberry.Info) -> list[ProposalProgressType]:
+        return [_progress(row) for row in proposals.progress_board(info.context.user)]
 
 
 @strawberry.type

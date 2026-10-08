@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 
 from administration import authorization as admin_authorization
@@ -31,7 +31,14 @@ from administration import services as admin_services
 from administration.models import AdminAuditEntry
 from ideas.models import Idea
 from identity.models import User
-from reviews.models import IdeaProposal, IdeaProposalView, Review, ReviewAssignment
+from reviews.models import (
+    IdeaProposal,
+    IdeaProposalContribution,
+    IdeaProposalView,
+    Review,
+    ReviewAssignment,
+    ReviewTeam,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,25 +46,40 @@ FIELDS = (
     'title',
     'executive_summary',
     'problem',
+    'feasibility',
     'proposed_solution',
     'requirements_summary',
     'scope',
     'deliverables',
+    'estimated_timeline',
+    'milestones',
+    'estimated_effort',
+    'financial_requirements',
+    'payment_required',
+    'payment_plan',
     'risks',
     'assumptions',
-    'estimated_effort',
-    'estimated_timeline',
     'acceptance_criteria',
 )
+#: What a proposal must say before the lead can send it: complete enough for the admin to
+#: judge and for the owner to agree to - what, whether it can be done, what it needs, how long,
+#: what it costs, and who pays how. The payment plan is required only when the owner pays.
 _REQUIRED = (
     ('executive_summary', 'executive summary'),
     ('problem', 'problem'),
+    ('feasibility', 'feasibility'),
     ('proposed_solution', 'proposed solution'),
+    ('requirements_summary', 'requirements'),
     ('scope', 'scope'),
     ('deliverables', 'deliverables'),
-    ('estimated_timeline', 'timeline'),
+    ('estimated_timeline', 'overall timeline'),
+    ('milestones', 'timeline and milestones'),
+    ('financial_requirements', 'financial requirements'),
+    ('payment_required', 'answer to whether the owner pays'),
+    ('payment_plan', 'payment plan'),
     ('acceptance_criteria', 'acceptance criteria'),
 )
+_LIMITS = {'title': 200, 'estimated_effort': 120, 'estimated_timeline': 120}
 _EDITABLE = frozenset({'draft', 'changes_requested'})
 UNAVAILABLE = 'This proposal is not available.'
 
@@ -177,6 +199,33 @@ def _require_writer(user: User | None, idea: Idea) -> Writers:
     return writers
 
 
+def _required_for(proposal: IdeaProposal | None) -> list[tuple[str, str]]:
+    # The payment plan is asked for only once the team has said the owner pays.
+    pays = proposal is not None and proposal.payment_required == 'yes'
+    return [(f, label) for f, label in _REQUIRED if f != 'payment_plan' or pays]
+
+
+def missing_required(proposal: IdeaProposal | None) -> list[tuple[str, str]]:
+    """The required sections still empty, as `(field, label)`, in reading order."""
+    required = _required_for(proposal)
+    if proposal is None:
+        return required
+    return [(f, label) for f, label in required if not getattr(proposal, f).strip()]
+
+
+def applicable_fields(proposal: IdeaProposal | None) -> tuple[str, ...]:
+    """The sections this proposal has: no payment plan when the owner is not charged."""
+    if proposal is not None and proposal.payment_required == 'no':
+        return tuple(f for f in FIELDS if f != 'payment_plan')
+    return FIELDS
+
+
+def _contributed(proposal: IdeaProposal, user: User, action: str, sections=()) -> None:
+    IdeaProposalContribution.objects.create(
+        proposal=proposal, contributor=user, action=action, sections=list(sections)
+    )
+
+
 # --- writing ---------------------------------------------------------------------------------
 
 
@@ -187,6 +236,14 @@ def start_proposal(user: User | None, idea_id: object) -> IdeaProposal:
     writers = _require_writer(user, idea)
     if idea.status != Idea.Status.APPROVED:
         raise ProposalError('A proposal is written once the idea has been approved.')
+    from reviews import decision_letters
+
+    if decision_letters.pending_letter(idea) is not None:
+        # The platform admin confirms the approval - sending it to the owner - first.
+        raise ProposalError(
+            'The platform admin has not confirmed this approval yet. You can start the '
+            'proposal as soon as they do - you will be notified.'
+        )
     if IdeaProposal.objects.filter(idea=idea).exists():
         raise ProposalError('This idea already has a proposal.')
 
@@ -197,6 +254,7 @@ def start_proposal(user: User | None, idea_id: object) -> IdeaProposal:
         problem=idea.description,
         created_by=user,
     )
+    _contributed(proposal, user, IdeaProposalContribution.Action.STARTED)
     return proposal
 
 
@@ -217,14 +275,20 @@ def update_proposal(user: User | None, idea_id: object, values: dict) -> IdeaPro
     for field, value in values.items():
         if value is None:
             continue
-        limit = {'title': 200, 'estimated_effort': 120, 'estimated_timeline': 120}.get(field)
-        text = _clean(value, field, limit=limit)
+        text = _clean(value, field, limit=_LIMITS.get(field))
         if field == 'title' and not text:
             raise ProposalError('Title is required.', field='title')
+        if field == 'payment_required' and text not in ('', 'yes', 'no'):
+            raise ProposalError(
+                "Say whether the owner pays: 'yes' or 'no'.", field='payment_required'
+            )
+        if getattr(proposal, field) == text:
+            continue  # the editor sends every section; only real changes count as a hand in it
         setattr(proposal, field, text)
         changed.append(field)
     if changed:
         proposal.save(update_fields=[*changed, 'updated_at'])
+        _contributed(proposal, user, IdeaProposalContribution.Action.EDITED, changed)
     return proposal
 
 
@@ -240,15 +304,17 @@ def submit_proposal(user: User | None, idea_id: object) -> IdeaProposal:
         raise ProposalError("Only the team's lead can send the proposal to the admin.")
     if proposal.status not in _EDITABLE:
         raise ProposalError('This proposal has already been sent.')
-    for field, label in _REQUIRED:
-        if not getattr(proposal, field).strip():
-            raise ProposalError(f'Fill in the {label} before sending it.', field=field)
+    missing = missing_required(proposal)
+    if missing:
+        field, label = missing[0]
+        raise ProposalError(f'Fill in the {label} before sending it.', field=field)
 
     proposal.status = 'submitted'
     proposal.submitted_by = user
     proposal.submitted_at = timezone.now()
     proposal.review_feedback = ''
     proposal.save(update_fields=['status', 'submitted_by', 'submitted_at', 'review_feedback'])
+    _contributed(proposal, user, IdeaProposalContribution.Action.SUBMITTED)
     _audit(user, AdminAuditEntry.Action.PROPOSAL_SUBMITTED, proposal)
     _notify(
         release_managers(),
@@ -287,7 +353,19 @@ def _decide(admin, idea_id, to_status: str, action, *, feedback: str | None = No
 
 @transaction.atomic
 def release(admin: User | None, idea_id: object) -> IdeaProposal:
-    """Approve the proposal and make it readable to the idea's owner."""
+    """
+    Approve the proposal and make it readable to the idea's owner.
+
+    Refused until the approval itself has reached the owner: they hear "your idea was
+    approved" in the decision letter first, and only then receive the proposal.
+    """
+    from reviews import decision_letters
+
+    if decision_letters.pending_letter(_idea(idea_id)) is not None:
+        raise ProposalError(
+            'Send the approval letter to the owner first, from the Decisions page. The owner '
+            'hears that their idea was approved before they receive its proposal.'
+        )
     idea, proposal = _decide(admin, idea_id, 'released', AdminAuditEntry.Action.PROPOSAL_RELEASED)
     _notify(
         [idea.author],
@@ -372,7 +450,9 @@ def proposal_for(user: User | None, idea_id: object) -> tuple[IdeaProposal, str]
         return None
     visible = {
         'writer': True,
-        'admin': proposal.status != 'draft',
+        # The admin follows a draft as it is written - read-only: deciding still waits for the
+        # lead to send it.
+        'admin': True,
         'owner': proposal.status == 'released',
     }[role]
     return (proposal, role) if visible else None
@@ -401,3 +481,131 @@ def decided_proposals(admin: User | None) -> list[IdeaProposal]:
         .select_related('idea', 'team')
         .order_by('-submitted_at', '-pk')[:200]
     )
+
+
+# --- progress, for the admin -----------------------------------------------------------------
+
+#: Where a row sits on the board: the work still moving first, the decided last.
+_BOARD_ORDER = {
+    'submitted': 0,
+    'changes_requested': 1,
+    'draft': 2,
+    'not_started': 3,
+    'released': 4,
+    'declined': 5,
+}
+
+
+@dataclass(frozen=True)
+class Participant:
+    """Someone with a hand, or a seat, in writing one proposal."""
+
+    user: User
+    role: str  # 'lead', 'member', or 'former' (contributed, no longer on the team)
+    contributions: int
+    sections: tuple[str, ...]
+    last_contributed_at: object  # datetime | None
+
+
+@dataclass(frozen=True)
+class ProgressRow:
+    idea: Idea
+    proposal: IdeaProposal | None
+    status: str  # a proposal status, or 'not_started'
+    team_name: str | None
+    participants: tuple[Participant, ...]
+    filled: tuple[str, ...]
+    total: int
+    missing_required: tuple[str, ...]
+    activity: tuple[IdeaProposalContribution, ...]
+
+
+def _participants(writers: Writers | None, contributions) -> tuple[Participant, ...]:
+    seats = dict.fromkeys(writers.member_ids, 'member') if writers else {}
+    if writers is not None:
+        seats[writers.lead_id] = 'lead'
+    by_person: dict[int, list[IdeaProposalContribution]] = {}
+    for contribution in contributions:
+        by_person.setdefault(contribution.contributor_id, []).append(contribution)
+    people = User.objects.in_bulk(set(seats) | set(by_person))
+
+    rows = []
+    for pk, user in people.items():
+        mine = by_person.get(pk, [])
+        sections = sorted({s for c in mine for s in c.sections}, key=FIELDS.index)
+        rows.append(
+            Participant(
+                user=user,
+                role=seats.get(pk, 'former'),
+                contributions=len(mine),
+                sections=tuple(sections),
+                last_contributed_at=max((c.created_at for c in mine), default=None),
+            )
+        )
+    rank = {'lead': 0, 'member': 1, 'former': 2}
+    rows.sort(key=lambda p: (rank[p.role], -p.contributions, p.user.email))
+    return tuple(rows)
+
+
+def progress_board(admin: User | None) -> list[ProgressRow]:
+    """
+    Every approved idea's proposal, as far as it has got - including ideas whose team has not
+    started one yet, and drafts still being written - with who is on the team and what each
+    of them has actually done. Empty without the release permission.
+    """
+    if not admin_authorization.capabilities_for(admin).can_release_proposals:
+        return []
+    written = list(
+        IdeaProposal.objects.select_related('idea', 'team')
+        .prefetch_related(
+            Prefetch(
+                'contributions',
+                queryset=IdeaProposalContribution.objects.select_related('contributor'),
+            )
+        )
+        .order_by('-updated_at', '-pk')[:200]
+    )
+    waiting = list(
+        Idea.objects.filter(status=Idea.Status.APPROVED, proposal__isnull=True).order_by(
+            '-updated_at', '-pk'
+        )[:200]
+    )
+
+    rows = []
+    for proposal in written:
+        contributions = list(proposal.contributions.all())
+        rows.append(
+            ProgressRow(
+                idea=proposal.idea,
+                proposal=proposal,
+                status=proposal.status,
+                team_name=proposal.team.name if proposal.team_id else None,
+                participants=_participants(writers_for(proposal.idea), contributions),
+                filled=tuple(
+                    f for f in applicable_fields(proposal) if getattr(proposal, f).strip()
+                ),
+                total=len(applicable_fields(proposal)),
+                missing_required=tuple(f for f, _ in missing_required(proposal)),
+                activity=tuple(contributions[:10]),
+            )
+        )
+    for idea in waiting:
+        writers = writers_for(idea)
+        team = None
+        if writers is not None and writers.team_id is not None:
+            team = ReviewTeam.objects.filter(pk=writers.team_id).values_list('name', flat=True)
+        rows.append(
+            ProgressRow(
+                idea=idea,
+                proposal=None,
+                status='not_started',
+                team_name=team.first() if team is not None else None,
+                participants=_participants(writers, []),
+                filled=(),
+                total=len(FIELDS),
+                missing_required=tuple(f for f, _ in missing_required(None)),
+                activity=(),
+            )
+        )
+    rows.sort(key=lambda r: _BOARD_ORDER.get(r.status, 9))  # stable: newest first within
+    return rows

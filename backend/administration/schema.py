@@ -62,6 +62,7 @@ from ideas.schema import (
     IdeaStatus,
     IdeaVisibility,
     PageInfo,
+    SubmissionContext,
 )
 from identity.models import User
 from invitations.models import Invitation
@@ -107,9 +108,14 @@ class AdminCapabilitiesType:
     can_manage_user_accounts: bool
     can_manage_organization_roles: bool
     can_manage_categories: bool
+    can_review_platform_submissions: bool = strawberry.field(
+        description='A platform reviewer. Needs no console: reviews are done in the review '
+        'workspace, and `canAccessConsole` is false for a reviewer who is not an administrator.'
+    )
     can_assign_platform_reviewers: bool
     can_manage_reviewers: bool
     can_release_proposals: bool
+    can_manage_platform_roles: bool
 
     @staticmethod
     def from_capabilities(capabilities: AdminCapabilities) -> 'AdminCapabilitiesType':
@@ -119,9 +125,11 @@ class AdminCapabilitiesType:
             can_manage_user_accounts=capabilities.can_manage_user_accounts,
             can_manage_organization_roles=capabilities.can_manage_organization_roles,
             can_manage_categories=capabilities.can_manage_categories,
+            can_review_platform_submissions=capabilities.can_review_platform_submissions,
             can_assign_platform_reviewers=capabilities.can_assign_platform_reviewers,
             can_manage_reviewers=capabilities.can_manage_reviewers,
             can_release_proposals=capabilities.can_release_proposals,
+            can_manage_platform_roles=capabilities.can_manage_platform_roles,
         )
 
 
@@ -150,6 +158,47 @@ class AdminOrganizationRefType:
         return AdminOrganizationRefType(
             id=strawberry.ID(str(organization.pk)), name=organization.name
         )
+
+
+def _idea_organization(idea: Idea) -> 'AdminOrganizationRefType | None':
+    """An idea's organization; None for an individual or team idea, which has none."""
+    if idea.organization_id is None:
+        return None
+    return AdminOrganizationRefType.from_model(idea.organization)
+
+
+def _idea_team_name(idea: Idea) -> str | None:
+    return idea.team.name if idea.team_id is not None else None
+
+
+def _current_review_team(idea: Idea) -> 'AdminReviewTeamRefType | None':
+    """
+    The review team the idea is routed to now, or None while nobody has routed it.
+
+    Read from `current_review_assignments`, which the console's idea queryset
+    prefetches, so a page of ideas costs one query for all their teams.
+    """
+    assignments = getattr(idea, 'current_review_assignments', None)
+    if assignments is None:
+        assignments = idea.review_assignments.filter(released_at__isnull=True).select_related(
+            'team'
+        )
+    team = next((a.team for a in assignments if a.team_id is not None), None)
+    if team is None:
+        return None
+    return AdminReviewTeamRefType(id=strawberry.ID(str(team.pk)), name=team.name)
+
+
+@strawberry.type(description='A platform review team, as a reference from an idea.')
+class AdminReviewTeamRefType:
+    id: strawberry.ID
+    name: str
+
+
+_IDEA_LEVEL_DESCRIPTION = (
+    'Whose idea this is: an individual, a team or an organization. `organization` is '
+    'null unless it is an organization idea, and `teamName` unless it is a team idea.'
+)
 
 
 @strawberry.type(description='A role, as a reference from a membership.')
@@ -234,7 +283,9 @@ class AdminActivityType:
     idea_title: str | None = strawberry.field(
         description="Null when the administrator may not see this idea's content."
     )
-    organization: AdminOrganizationRefType
+    submission_context: SubmissionContext = strawberry.field(description=_IDEA_LEVEL_DESCRIPTION)
+    organization: AdminOrganizationRefType | None
+    team_name: str | None
     from_status: IdeaStatus
     to_status: IdeaStatus
     actor: AdminPersonType
@@ -251,7 +302,9 @@ class AdminActivityType:
             idea_title=idea.title
             if authorization.may_see_idea_content(capabilities, idea.visibility)
             else None,
-            organization=AdminOrganizationRefType.from_model(idea.organization),
+            submission_context=SubmissionContext(idea.submission_context),
+            organization=_idea_organization(idea),
+            team_name=_idea_team_name(idea),
             from_status=IdeaStatus(transition.from_status),
             to_status=IdeaStatus(transition.to_status),
             actor=AdminPersonType.from_model(transition.actor),
@@ -475,7 +528,13 @@ class AdminIdeaType:
     content_restricted: bool
     status: IdeaStatus
     visibility: IdeaVisibility
-    organization: AdminOrganizationRefType
+    submission_context: SubmissionContext = strawberry.field(description=_IDEA_LEVEL_DESCRIPTION)
+    organization: AdminOrganizationRefType | None
+    team_name: str | None
+    review_team: AdminReviewTeamRefType | None = strawberry.field(
+        description='The platform review team the idea is routed to now; null until '
+        'someone with intake routes it.'
+    )
     author: AdminPersonType
     category_name: str | None
     created_at: str
@@ -494,7 +553,10 @@ class AdminIdeaType:
             'content_restricted': not visible,
             'status': IdeaStatus(idea.status),
             'visibility': IdeaVisibility(idea.visibility),
-            'organization': AdminOrganizationRefType.from_model(idea.organization),
+            'submission_context': SubmissionContext(idea.submission_context),
+            'organization': _idea_organization(idea),
+            'team_name': _idea_team_name(idea),
+            'review_team': _current_review_team(idea),
             'author': AdminPersonType.from_model(idea.author),
             'category_name': idea.category.name if idea.category_id else None,
             'created_at': idea.created_at.isoformat(),
@@ -638,7 +700,9 @@ class AdminReviewedIdeaType:
     title: str | None
     status: IdeaStatus
     visibility: IdeaVisibility
-    organization: AdminOrganizationRefType
+    submission_context: SubmissionContext = strawberry.field(description=_IDEA_LEVEL_DESCRIPTION)
+    organization: AdminOrganizationRefType | None
+    team_name: str | None
 
 
 @strawberry.type(
@@ -697,7 +761,9 @@ class AdminReviewType:
                 else None,
                 status=IdeaStatus(idea.status),
                 visibility=IdeaVisibility(idea.visibility),
-                organization=AdminOrganizationRefType.from_model(idea.organization),
+                submission_context=SubmissionContext(idea.submission_context),
+                organization=_idea_organization(idea),
+                team_name=_idea_team_name(idea),
             ),
             'reviewer': AdminPersonType.from_model(review.reviewer),
             'decision': ReviewDecision(review.decision) if review.decision else None,
@@ -723,6 +789,42 @@ class AdminReviewType:
 @strawberry.type(description='One page of review rounds across the platform, newest first.')
 class AdminReviewPage:
     items: list[AdminReviewType]
+    page_info: PageInfo
+
+
+@strawberry.type(
+    description='One reviewed idea and all its rounds: a single row of the Reviews page, '
+    'standing where its latest round left it.'
+)
+class AdminReviewedIdeaRowType:
+    idea: AdminReviewedIdeaType
+    round_count: int
+    latest: AdminReviewType = strawberry.field(
+        description='The most recent round: in progress, or the decision the idea stands on.'
+    )
+    rounds: list[AdminReviewType] = strawberry.field(description='Every round, oldest first.')
+    started_at: str = strawberry.field(description='When the first round started.')
+    last_activity_at: str = strawberry.field(
+        description='When the latest round started or completed.'
+    )
+
+    @staticmethod
+    def from_model(idea: Idea, capabilities: AdminCapabilities) -> 'AdminReviewedIdeaRowType':
+        rounds = [AdminReviewType.from_model(review, capabilities) for review in idea.admin_rounds]
+        latest_review = idea.admin_rounds[-1]
+        return AdminReviewedIdeaRowType(
+            idea=rounds[-1].idea,
+            round_count=len(rounds),
+            latest=rounds[-1],
+            rounds=rounds,
+            started_at=idea.admin_rounds[0].created_at.isoformat(),
+            last_activity_at=(latest_review.completed_at or latest_review.created_at).isoformat(),
+        )
+
+
+@strawberry.type(description='One page of reviewed ideas.')
+class AdminReviewedIdeaPage:
+    items: list[AdminReviewedIdeaRowType]
     page_info: PageInfo
 
 
@@ -1308,6 +1410,41 @@ class Query:
             items=[
                 AdminReviewType.from_model(review, listing.capabilities)
                 for review in listing.page.items
+            ],
+            page_info=_page_info(listing.page),
+        )
+
+    @strawberry.field(
+        description=(
+            'Reviewed ideas, one row each with all their rounds, the most recently active '
+            'first. The filters read per idea: OPEN has a round in progress, a decision is '
+            "the latest round's. Empty for a non-administrator."
+        )
+    )
+    def admin_reviewed_ideas(
+        self,
+        info: strawberry.Info,
+        filters: AdminReviewFiltersInput | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> AdminReviewedIdeaPage:
+        filters = filters or AdminReviewFiltersInput()
+        listing = selectors.list_reviewed_ideas(
+            info.context.user,
+            selectors.ReviewFilters(
+                search=filters.search,
+                state=filters.state.value if filters.state else None,
+                decisions=tuple(decision.value for decision in filters.decisions or ()),
+                organization_id=filters.organization_id,
+                reviewer_id=filters.reviewer_id,
+            ),
+            offset=offset,
+            limit=limit,
+        )
+        return AdminReviewedIdeaPage(
+            items=[
+                AdminReviewedIdeaRowType.from_model(idea, listing.capabilities)
+                for idea in listing.page.items
             ],
             page_info=_page_info(listing.page),
         )

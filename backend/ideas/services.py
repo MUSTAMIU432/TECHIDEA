@@ -851,8 +851,17 @@ def submit_idea(user: User | None, idea_id: object) -> Idea:
     if idea is None:
         raise IdeaError('Idea is unavailable.', reason='forbidden')
 
+    answering_changes = idea.status in (
+        Idea.Status.CHANGES_REQUESTED,
+        Idea.Status.ORGANIZATION_CHANGES_REQUESTED,
+    )
     moved = lifecycle.transition_idea(active_user, idea_id, submission_target(active_user, idea))
     _notify_the_reviewers_waiting_on(moved)
+    if answering_changes:
+        # The changes request has been answered: it should stop waiting in the bell.
+        from notifications import services as notification_services
+
+        notification_services.mark_answered(moved.author, moved)
     return moved
 
 

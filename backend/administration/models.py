@@ -73,6 +73,12 @@ ADMIN_AUDIT_ACTION_CHOICES = (
     ('proposal.changes_requested', 'Proposal sent back to the review team'),
     ('proposal.released', 'Proposal released to its owner'),
     ('proposal.declined', 'Proposal declined'),
+    # The platform's other jobs - developer, delivery manager, intake, proposal approver -
+    # given to and taken from named accounts (`administration.platform_roles`).
+    ('platform_role.granted', 'Platform role given'),
+    ('platform_role.revoked', 'Platform role removed'),
+    # A platform approval or rejection, sent to the idea's owner by an administrator.
+    ('decision_letter.sent', 'Decision letter sent to the owner'),
 )
 
 ADMIN_AUDIT_RESULT_CHOICES = (
@@ -136,6 +142,9 @@ class AdminAuditEntry(models.Model):
             PROPOSAL_CHANGES_REQUESTED,
             PROPOSAL_RELEASED,
             PROPOSAL_DECLINED,
+            PLATFORM_ROLE_GRANTED,
+            PLATFORM_ROLE_REVOKED,
+            DECISION_LETTER_SENT,
         ) = ADMIN_AUDIT_ACTION_CHOICES
 
     class Result(models.TextChoices):
@@ -208,6 +217,13 @@ class AdminAuditEntry(models.Model):
             (
                 'release_proposals',
                 "Can approve a review team's proposal and release it to the idea owner",
+            ),
+            # Staffing the platform's jobs from the console (`platform_roles`): held by the
+            # administrators, never by the people doing the jobs it hands out.
+            (
+                'manage_platform_roles',
+                'Can give accounts platform roles: developer, delivery manager, intake and '
+                'proposal approver',
             ),
         ]
         constraints: ClassVar[list[models.BaseConstraint]] = [

@@ -142,6 +142,13 @@ def confirm_go_ahead(user, idea_id: object) -> Idea:
         # and can only be answering a proposal an admin released to them.
         if not IdeaProposal.objects.filter(idea=idea, status='released').exists():
             raise IdeaError(NO_PROPOSAL, reason='forbidden')
+        # An owner who answered the proposal "do not go ahead" has decided; it stands.
+        from reviews.models import ProposalAnswer
+
+        if ProposalAnswer.objects.filter(
+            idea=idea, decision=ProposalAnswer.Decision.DECLINE
+        ).exists():
+            raise IdeaError('You decided not to go ahead with this proposal.', reason='forbidden')
 
         # Resolved *before* the transition, so the notification names the idea
         # by the title it had when it was approved.
