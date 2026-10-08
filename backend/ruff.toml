@@ -31,8 +31,14 @@ select = [
 max-complexity = 10
 
 [lint.isort]
-known-first-party = ["config", "graphql_api"]
+known-first-party = ["config", "graphql_api", "identity"]
 
 [lint.per-file-ignores]
-# pytest tests rely on bare `assert`.
-"tests/**" = ["S101"]
+# pytest tests rely on bare `assert`, and use literal strings as synthetic
+# (fake) credentials, which isn't a hardcoded-secret concern in test code.
+# "**/tests/**" covers both the top-level suite and each business-domain
+# app's own tests/ (e.g. identity/tests/).
+"**/tests/**" = ["S101", "S105", "S106"]
+# The journey test reads as the GraphQL operations it sends, one per line; wrapping
+# them would hide the thing being tested.
+"automation/tests/test_api_journey.py" = ["E501"]

@@ -35,3 +35,19 @@ if not CORS_ALLOWED_ORIGINS:  # noqa: F405
 
 if not CSRF_TRUSTED_ORIGINS:  # noqa: F405
     CSRF_TRUSTED_ORIGINS = _LOCAL_FRONTEND_ORIGINS
+
+# Password-reset and activation emails are links into the frontend, so local
+# development needs the Vite dev server's origin to build them. Left unset in
+# the environment, a reset link would point nowhere and the flow would be
+# impossible to test by hand; set it explicitly when running the app on a
+# different port or a real hostname (e.g. FRONTEND_URL=http://192.168.1.10:5173
+# to test on a phone).
+if not FRONTEND_URL:  # noqa: F405
+    FRONTEND_URL = _LOCAL_FRONTEND_ORIGINS[0]
+
+# Same reasoning for mail: the console backend (base.py's default) prints the
+# message - reset link included - to the terminal running the server, which is
+# enough to click through the whole flow locally with no mail account. Spelled
+# out here so it is obvious that this is a deliberate local-only choice, not an
+# accident of a missing setting; production.py rejects it outright.
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')

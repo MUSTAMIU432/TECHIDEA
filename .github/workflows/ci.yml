@@ -54,6 +54,9 @@ jobs:
     env:
       ENVIRONMENT: ci
       DJANGO_SECRET_KEY: ci-only-secret-key
+      # Sprint 1 (S1-003): signs JWT access tokens, deliberately distinct
+      # from DJANGO_SECRET_KEY (see backend/config/settings/base.py).
+      DJANGO_JWT_SIGNING_KEY: ci-only-jwt-signing-key
       DJANGO_DEBUG: 'False'
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
       DATABASE_URL: postgres://ci_user:ci-only-password@localhost:5432/automation_platform_ci

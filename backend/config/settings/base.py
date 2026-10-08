@@ -5,6 +5,7 @@ Shared by every environment. Environment-specific settings (local,
 production) import from this module and override only what differs.
 """
 
+from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -52,8 +53,178 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'corsheaders',
     'strawberry_django',
+    # Business domain apps (own their models and logic) before the GraphQL
+    # adapter layer that exposes them.
+    'identity',
+    'organizations',
+    'teams',
+    'ideas',
+    'reviews',
+    'invitations',
+    'notifications',
+    'messaging',
+    'automation',
+    # Platform administration (the internal console): reads and changes the
+    # domains above through their own rules, so it comes after all of them.
+    'administration',
     'graphql_api',
 ]
+
+# Sprint 1: the identity app owns the platform's own User model rather than
+# Django's default (which is username/password, not email/password). This
+# must be set before the first `migrate` in any environment - swapping it
+# afterwards is not supported by Django's migration framework.
+AUTH_USER_MODEL = 'identity.User'
+
+# JWT access-token signing (identity/tokens.py). Deliberately a separate
+# secret from DJANGO_SECRET_KEY: SECRET_KEY is used for several unrelated
+# purposes (session/CSRF signing, ...), and rotating it shouldn't force
+# rotating - or be blocked by the need to keep valid - every issued access
+# token, and vice versa. Required everywhere, like SECRET_KEY, so a missing
+# secret fails at startup rather than falling back to a known value.
+JWT_SIGNING_KEY = env('DJANGO_JWT_SIGNING_KEY')
+
+# Access tokens are short-lived and stateless (no DB check to verify one) -
+# that's the whole point of a JWT here, and why it must expire quickly.
+# Refresh credentials are long-lived but server-side (RefreshSession), so
+# they can be individually revoked; a stolen refresh credential is the real
+# exposure window, not the access token.
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=env.int('ACCESS_TOKEN_LIFETIME_MINUTES', default=15))
+REFRESH_TOKEN_LIFETIME = timedelta(days=env.int('REFRESH_TOKEN_LIFETIME_DAYS', default=30))
+
+# Google OAuth/OIDC ("Sign in with Google", S1-004). Optional: unset, the
+# `googleLogin` mutation always fails closed rather than accepting tokens
+# for an unknown audience (see identity/google_oauth.py) - deployments that
+# don't need Google sign-in yet, or local dev without a Google Cloud
+# project, need not set this. Not secret: a Google OAuth client ID is
+# embedded in the frontend bundle by design (it identifies the app, not a
+# credential), so it's also read directly by the frontend as
+# VITE_GOOGLE_OAUTH_CLIENT_ID. There is deliberately no
+# GOOGLE_OAUTH_CLIENT_SECRET: the ID-token flow used here verifies a
+# Google-signed credential against Google's public keys and never
+# exchanges an authorization code, so the backend has no use for a client
+# secret at all (see identity/google_oauth.py's module docstring).
+GOOGLE_OAUTH_CLIENT_ID = env('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+
+# Outgoing email (identity/email.py)
+# ---------------------------------------------------------------------------------
+# Everything the two emailed flows need: where the browser app lives (to build
+# the link a user clicks), how long a link stays usable, and how to reach an
+# SMTP server.
+#
+# Deliberately plain SMTP rather than a Google API client: the only Google
+# credential this project holds is a public OAuth *client id* for verifying
+# sign-in ID tokens, which is not a credential that can send anything. Sending
+# mail through Gmail's SMTP relay needs a mailbox and an app password - no
+# service account, no domain-wide delegation, no key file to leak - and
+# EMAIL_BACKEND is a plain Django setting, so swapping in a hosted provider
+# later (SES, Postmark, django-anymail) is a settings change, not a rewrite.
+#
+# EMAIL_BACKEND defaults to Django's console backend: it writes the message to
+# stdout instead of sending it, so a developer can complete a reset or
+# activation locally with no mail account at all. production.py refuses that
+# default - a deployment that printed its password-reset links to a log
+# instead of mailing them would look like it worked and reach nobody.
+EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = env('EMAIL_HOST', default='localhost')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+# Submission (port 587) is encrypted in transit; implicit TLS on 465 is
+# instead selected by setting EMAIL_USE_TLS=False and EMAIL_PORT=465, which
+# Django expresses as SSL-on-connect.
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='no-reply@localhost')
+
+# The public origin of the browser app, without a trailing slash. Password
+# reset and activation emails are links *into the frontend*, not into the API,
+# so this is the one setting that decides where a user is sent after clicking
+# one. Required in every deployed environment (a link built from an empty
+# value is a link to nowhere); local.py fills in the Vite dev server.
+FRONTEND_URL = env('FRONTEND_URL', default='').rstrip('/')
+
+# How long an emailed link stays usable. Both are deliberately short: the link
+# travels over plaintext-ish channels (a mail client's search index, a shared
+# inbox, a chat app someone forwards it into) and is only needed at the moment
+# its owner clicks it, so there is no reason for it to stay good for days.
+PASSWORD_RESET_TOKEN_LIFETIME = timedelta(
+    minutes=env.int('PASSWORD_RESET_TOKEN_LIFETIME_MINUTES', default=60)
+)
+ACTIVATION_TOKEN_LIFETIME = timedelta(hours=env.int('ACTIVATION_TOKEN_LIFETIME_HOURS', default=48))
+
+# How long an organization or team invitation stays acceptable. Longer than the
+# other two links, and for a different reason: a password reset and an activation
+# are things the recipient is *already* waiting for and can do in a minute, while
+# an invitation is an email somebody may read on their own schedule, decide about,
+# and only then click. The window has to cover "I saw this on Monday" without
+# becoming a durable credential - it is single-use, revocable, bound to one
+# address, and only its digest is stored, so the risk of a longer window is a
+# wider window rather than a permanent one.
+INVITATION_TOKEN_LIFETIME = timedelta(days=env.int('INVITATION_TOKEN_LIFETIME_DAYS', default=7))
+
+
+# Cache framework
+# ---------------------------------------------------------------------------------
+# Three aliases, deliberately separated even where they point at the same
+# place:
+#
+#   default           general-purpose caching. Nothing security-critical may
+#                     ever depend on this one.
+#   replay_protection used *only* by identity.google_oauth to record Google ID
+#                     tokens that have already been consumed.
+#   auth_throttle     used *only* by identity.throttling to count
+#                     authentication attempts.
+#
+# The latter two are security-critical and therefore deliberately isolated:
+# each can be pointed at a different shared server than general caching,
+# neither is ever cleared as part of routine cache housekeeping, and
+# production.py refuses to start if either resolves to a per-process backend.
+#
+# In one process, a per-process in-memory cache is complete protection: a
+# replayed token is rejected, and an over-limit request refused, by the very
+# same worker that recorded the state. Across processes it is not - worker 1
+# accepts a Google credential that worker 2 has never seen, and worker 2
+# permits another ten login attempts after worker 1 stopped at five - so
+# anything that runs as more than one process needs a backend every worker
+# shares. CACHE_URL selects it (Redis, Memcached, a database, ...); it is
+# required in every deployed environment precisely because that is where
+# "more than one process" is the norm.
+REPLAY_PROTECTION_CACHE_ALIAS = 'replay_protection'
+AUTH_THROTTLE_CACHE_ALIAS = 'auth_throttle'
+
+# The aliases whose contents decide a security outcome. A deployed
+# environment may not let any of them resolve to a per-process backend - see
+# config/settings/production.py, which enforces exactly this list.
+SHARED_CACHE_ALIASES = (REPLAY_PROTECTION_CACHE_ALIAS, AUTH_THROTTLE_CACHE_ALIAS)
+
+_DEFAULT_CACHE = {
+    'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    'LOCATION': 'automation-platform-default',
+}
+_LOCAL_SECURITY_CACHE = {
+    'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    'LOCATION': 'automation-platform-security',
+}
+
+_cache_url = env('CACHE_URL', default='')
+if _cache_url:
+    # django-environ parses a URL into a cache config (e.g.
+    # redis://localhost:6379/1). All aliases share the server but keep
+    # separate key namespaces, so a `cache.clear()` aimed at one can never
+    # wipe another's records.
+    CACHES = {
+        'default': env.cache_url('CACHE_URL'),
+        REPLAY_PROTECTION_CACHE_ALIAS: env.cache_url('CACHE_URL'),
+        AUTH_THROTTLE_CACHE_ALIAS: env.cache_url('CACHE_URL'),
+    }
+else:
+    CACHES = {
+        'default': _DEFAULT_CACHE,
+        REPLAY_PROTECTION_CACHE_ALIAS: _LOCAL_SECURITY_CACHE,
+        AUTH_THROTTLE_CACHE_ALIAS: _LOCAL_SECURITY_CACHE,
+    }
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -142,15 +313,106 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 
-# CORS
-# Only the GraphQL API is meant to be called from the browser app. The
-# allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a wildcard).
+# Attachment object storage (S2-007)
+# ---------------------------------------------------------------------------------
+# `ideas.storage` is the only module that ever calls `storages['attachments']`
+# directly - see its module docstring. Everything below exists so that module
+# never has to know whether it is writing to the local disk or to an
+# object-storage bucket.
+#
+# `ATTACHMENTS_STORAGE_BACKEND` names a Django `Storage` subclass by import
+# path, exactly like Django's own `STORAGES` setting expects. The default is
+# the filesystem backend that ships with Django, which is what every local
+# and CI environment uses today - there is no object-storage backend
+# installed or configured in this codebase yet, and this file does not
+# pretend otherwise. A deployment that has actually provisioned one (S3,
+# GCS, Azure Blob, ...) installs the matching driver package (e.g.
+# `django-storages`) and points this at its backend class; that backend then
+# reads its own settings (bucket name, region, credentials, ...) the way it
+# normally does. No code in `ideas/` changes either way - the swap is
+# entirely a settings/environment concern, which is the point of routing
+# every attachment read/write through Django's pluggable storage registry
+# instead of touching a path or a client library directly.
+#
+# `location` is only meaningful to the filesystem backend (it is where the
+# accepted files actually live on disk) and is omitted for anything else, so
+# switching backends never leaves a stale, backend-specific option behind for
+# the new backend to trip over.
+ATTACHMENTS_STORAGE_BACKEND = env(
+    'ATTACHMENTS_STORAGE_BACKEND', default='django.core.files.storage.FileSystemStorage'
+)
+_ATTACHMENTS_STORAGE_OPTIONS: dict = {}
+if ATTACHMENTS_STORAGE_BACKEND == 'django.core.files.storage.FileSystemStorage':
+    _ATTACHMENTS_STORAGE_OPTIONS['location'] = str(BASE_DIR / 'media' / 'attachments')
 
-CORS_URLS_REGEX = r'^/graphql/'
+STORAGES = {
+    # Django's own defaults (https://docs.djangoproject.com/en/5.2/ref/settings/#storages) -
+    # spelled out explicitly because defining `STORAGES` at all overrides them.
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+    'attachments': {
+        'BACKEND': ATTACHMENTS_STORAGE_BACKEND,
+        'OPTIONS': _ATTACHMENTS_STORAGE_OPTIONS,
+    },
+}
+
+# The hard ceiling on one uploaded file, enforced server-side in
+# `ideas.attachments.validate_size` before anything is read into storage - a
+# client-side check is a courtesy, never the boundary. 200 MB fits the evidence
+# this domain is actually given (a scanned document, a photo of a whiteboard, an
+# exported spreadsheet with its supporting tabs) without letting one idea's
+# evidence become a liability.
+#
+# This is *not* the only thing standing between a browser and the disk. Django's
+# own `DATA_UPLOAD_MAX_MEMORY_SIZE` does not apply to multipart file parts - it
+# bounds the non-file fields - so a large upload is streamed and spooled to a
+# temporary file rather than rejected outright, and `ideas.views` refuses an
+# unauthorized caller before the body is parsed at all. A deployment still wants
+# a limit at its proxy: nothing here stops a web server reading bytes off a
+# socket.
+ATTACHMENT_MAX_UPLOAD_BYTES = env.int('ATTACHMENT_MAX_UPLOAD_BYTES', default=200 * 1024 * 1024)
+
+# Profile photos and other pictures: 100 MB. Enforced in `identity.avatars`.
+AVATAR_MAX_UPLOAD_BYTES = env.int('AVATAR_MAX_UPLOAD_BYTES', default=100 * 1024 * 1024)
+
+
+# CORS
+# The browser app calls two surfaces, not one: the GraphQL API, and the handful
+# of HTTP endpoints that carry attachment *bytes* (S2-007, and the console's
+# audited evidence download). Those are outside `/graphql/`, so they have to be
+# named here or the browser blocks the response.
+#
+# This is not cosmetic. The frontend and backend run on different origins even
+# in local development (:5173 vs :8000), so an upload is a cross-origin request:
+# with no `Access-Control-Allow-Origin` on the response the browser discards it
+# and `fetch` rejects, which the client reports as "we could not reach the
+# server" - a message that is wrong in a way that sends people looking at the
+# server instead of at the request. Same for the preflight: an `Authorization`
+# header makes the request non-simple, so `OPTIONS` is asked first, and a URL
+# outside this pattern is answered 405 with no CORS headers at all.
+#
+# Named endpoint by endpoint, deliberately. A broader pattern would quietly make
+# `/admin/` or `/health/` reachable from the browser, which is the opposite of
+# what this list is for.
+#
+# The allowed origins themselves come from CORS_ALLOWED_ORIGINS (never a
+# wildcard).
+
+CORS_URLS_REGEX = (
+    r'^(?:/graphql/|/ideas/\d+/attachments/|/administration/attachments/'
+    r'|/account/avatar/|/users/\d+/avatar/)'
+)
 # Explicit so a stray setting elsewhere can never open the API to every origin.
-# Credentialed cross-origin requests stay off until authentication exists.
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOW_CREDENTIALS = False
+# Sprint 1 (S1-003): the refresh-token cookie requires the browser to send
+# and accept credentials on cross-origin requests (the frontend and backend
+# run on different origins even in local dev - :5173 vs :8000), so this can
+# no longer stay off. This is safe only because CORS_ALLOWED_ORIGINS is - and
+# must remain - an explicit, non-wildcard allow-list (django-cors-headers
+# refuses to combine credentials with a wildcard origin regardless, and
+# production.py separately rejects wildcards); see docs/environments.md and
+# docs/architecture.md for the full authentication cookie/CORS/CSRF design.
+CORS_ALLOW_CREDENTIALS = True
 
 
 # Security headers and cookies

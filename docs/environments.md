@@ -87,6 +87,9 @@ Template: [`backend/.env.example`](../backend/.env.example).
 | ---------------------------- | :----: | ----------------- | ------- |
 | `ENVIRONMENT`                |        | no (`local`)      | Environment name (see table above). CI sets `ci`; see [CI execution context](#ci-execution-context) |
 | `DJANGO_SECRET_KEY`          | **yes**| **always**        | Django signing key. No default |
+| `DJANGO_JWT_SIGNING_KEY`     | **yes**| **always**        | Signs JWT access tokens (Sprint 1). No default; must differ from `DJANGO_SECRET_KEY` when deployed |
+| `ACCESS_TOKEN_LIFETIME_MINUTES` |     | no (`15`)         | JWT access token lifetime |
+| `REFRESH_TOKEN_LIFETIME_DAYS` |       | no (`30`)         | Refresh session (`RefreshSession`) lifetime |
 | `DJANGO_DEBUG`               |        | no                | Default `True` locally; rejected if true when deployed |
 | `DJANGO_ALLOWED_HOSTS`       |        | deployed          | Comma-separated hostnames |
 | `DATABASE_URL`               | **yes**| **always**        | PostgreSQL URL including the password. No default |
@@ -98,16 +101,49 @@ Template: [`backend/.env.example`](../backend/.env.example).
 | `DJANGO_SECURE_HSTS_SECONDS` |        | no (`31536000` production, `3600` development/staging) | HSTS max-age in seconds; `0` disables (deployed only) |
 | `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS` | | no (`False`)   | Extend HSTS to every subdomain (deployed only) |
 | `DJANGO_SECURE_HSTS_PRELOAD` |        | no (`False`)      | Add the HSTS `preload` directive (deployed only). Requires includeSubDomains and a max-age of at least 31536000 |
+| `GOOGLE_OAUTH_CLIENT_ID`     |        | no                | Google OAuth client id for "Sign in with Google" (Sprint 1, S1-004). The `googleLogin` mutation always fails closed if unset - see `backend/identity/google_oauth.py`. Not secret; must match the frontend's `VITE_GOOGLE_OAUTH_CLIENT_ID`. The name is exact and nothing is inferred from any other name: a differently-named variable is silently ignored, and Google sign-in then fails closed at runtime rather than at startup |
+| `CACHE_URL`                  | **yes**| **deployed**       | Shared cache backend, e.g. `redis://localhost:6379/1`. Required in every deployed environment: the Google ID-token replay check and the authentication rate limits record state that every process must agree on, and a per-process cache is a per-process *copy*. Must not resolve to a local in-memory backend - `config.settings.production` refuses to start if it does. Local development may leave it unset (in-process cache is correct there: there is one process). See [Caching](architecture.md#caching-target--implemented) |
+| `EMAIL_BACKEND`              | **yes**| **deployed**       | Django mail backend for the password-reset and account-activation messages. Deployed environments must use one that actually sends - `config.settings.production` refuses the console backend, which would print reset links to the log instead of mailing them while every request still reported success. Local defaults to `django.core.mail.backends.console.EmailBackend`, which is what makes the flow clickable by hand with no mail account |
+| `EMAIL_HOST`                 |        | no (`localhost`)   | SMTP server. Not guarded - an ordinary knob of every SMTP server |
+| `EMAIL_PORT`                 |        | no (`587`)         | SMTP port. For implicit TLS on 465 use `EMAIL_PORT=465` with `EMAIL_USE_TLS=False`, which Django expresses as SSL-on-connect |
+| `EMAIL_USE_TLS`              |        | no (`True`)        | Use TLS on submission (port 587) |
+| `EMAIL_HOST_USER`            | **yes**| **deployed**       | **Secret.** The mailbox's app password, never the account's real password. Required in every deployed environment |
+| `EMAIL_HOST_PASSWORD`        | **yes**| **deployed**       | **Secret.** The SMTP credential, normally the app password issued for `EMAIL_HOST_USER` |
+| `DEFAULT_FROM_EMAIL`         | **yes**| **deployed**       | The address the messages claim to come from. Rejected in a deployed environment if left at the local default: SPF/DKIM are checked against this domain, so a placeholder sender is how reset mail ends up in spam |
+| `FRONTEND_URL`               | **yes**| **deployed**       | Public origin of the browser app, no trailing slash (a trailing `/` is stripped). The reset and activation links point *into the frontend*, so this decides where a user lands after clicking one. Required in a deployed environment and must be `https://` there - an `http://` link would hand the single-use token in its query string to the network in the clear. Local defaults to the Vite dev server |
+| `PASSWORD_RESET_TOKEN_LIFETIME_MINUTES` | | no (`60`) | How long an emailed password-reset link stays usable. Deliberately short: the link is only needed at the moment its owner clicks it |
+| `ACTIVATION_TOKEN_LIFETIME_HOURS` | | no (`48`)  | How long an emailed account-activation link stays usable |
 
 Notes:
 
 - Real environment variables override `backend/.env`. Deployed
   environments should not use a `.env` file at all.
-- CORS applies only to `/graphql/`. The GraphQL endpoint is CSRF-exempt until
-  authentication exists, so `CSRF_TRUSTED_ORIGINS` currently affects only
-  Django's own forms (e.g. admin).
+- The two emailed flows (password reset, account activation) report the same
+  generic success whether or not anything was sent, so a deployment whose
+  mail is silently broken looks exactly like one nobody has used yet. That
+  asymmetry is the reason the five variables above are *required* in a
+  deployed environment rather than merely recommended: the failure is
+  invisible at the API boundary by construction, and is otherwise found from
+  a support ticket. A failed send is logged at `ERROR` with the user's
+  primary key - never the token - so the logs are where to look.
+- CORS applies only to `/graphql/`. `CORS_ALLOW_CREDENTIALS` is `True`
+  (Sprint 1, S1-003): the refresh-token cookie needs credentialed
+  cross-origin requests, and this is safe only because
+  `CORS_ALLOWED_ORIGINS` stays an explicit, non-wildcard allow-list. The
+  GraphQL endpoint remains CSRF-exempt even with that cookie present - see
+  the comment in `backend/graphql_api/views.py` for the full reasoning
+  (JSON-only requests can't be triggered by a bare HTML form, and the
+  cookie's own `SameSite=Lax` blocks genuinely cross-site attachment).
+  `CSRF_TRUSTED_ORIGINS` still affects only Django's own forms (e.g. admin).
 - The GraphiQL IDE is served only when `DEBUG` is on, so it is never
   exposed in deployed environments.
+- `CACHE_URL` configures three cache aliases at once: `default` for
+  general-purpose caching, and `replay_protection` and `auth_throttle` for
+  the two that decide a security outcome. The latter two are kept separate
+  so routine cache housekeeping can never wipe them. Both fail **closed** if
+  the cache is unreachable - the alternative is a silent, invisible removal
+  of a security control - so a cache outage takes authentication down with
+  it. That is a deliberate trade-off, not an oversight.
 
 ## Frontend variables (`frontend/.env`)
 
@@ -116,9 +152,23 @@ Template: [`frontend/.env.example`](../frontend/.env.example).
 | Variable           | Secret | Required | Purpose |
 | ------------------ | :----: | -------- | ------- |
 | `VITE_GRAPHQL_URL` | no     | yes      | Public URL of the backend GraphQL endpoint |
+| `VITE_GOOGLE_OAUTH_CLIENT_ID` | no | no | Google OAuth client id for "Sign in with Google" (Sprint 1, S1-004). Must match the backend's `GOOGLE_OAUTH_CLIENT_ID`. Leaving it unset disables the Google button rather than breaking the build |
 
 Vite is configured at **build time**: the value is compiled into the
 bundle, so each environment needs its own build (or build-time variable).
+
+### Why there is no Google OAuth client secret
+
+Google OAuth normally involves a client secret for the authorization-code
+flow (exchanging a code for tokens server-side). This project uses Google
+Identity Services' ID-token flow instead ("Sign in with Google"): the
+browser gets a Google-*signed* credential directly from Google, and the
+backend verifies it against Google's public keys
+(`backend/identity/google_oauth.py`) - there is no code-exchange step, so
+no secret is ever needed on either side. `GOOGLE_OAUTH_CLIENT_ID` (and its
+frontend twin) is not secret either: a Google OAuth client id identifies
+the application, not a credential, and Google's own client libraries send
+it from the browser as a matter of course.
 
 ## Backend secrets vs. frontend public configuration
 

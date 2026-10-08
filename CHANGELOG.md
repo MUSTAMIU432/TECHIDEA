@@ -6,6 +6,1406 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Documentation: the platform track, written down against the code
+
+The submission-context work left two domain documents describing a codebase
+that no longer exists: eleven lifecycle statuses written as seven, one tenant
+written as a required column, one reviewer kind written as two. Both have been
+corrected against `backend/ideas/` and `backend/reviews/` on `feature/reviews`.
+
+- **[`docs/ideas-domain.md`](docs/ideas-domain.md)** — the entity list gains
+  `IdeaTransition` and `IdeaSubmissionVersion`; a new **Submission context**
+  section states the three contexts, which tenant column each one names and why
+  one model rather than three; the lifecycle carries all eleven statuses, the
+  full transition matrix with its three actor kinds, the context rule that
+  decides which door "submit" opens, and the two statuses that are deliberately
+  *not* statuses (`organization_review`, and a split `approved`); new sections
+  for `ideas/states.py`, the frozen submission version and the owner's
+  go-ahead. Corrected along the way: the submission visibility rule, which is
+  now **context-dependent** (`PUBLIC` only for an individual or team idea,
+  because its platform reviewer holds no membership of the author's tenant); the
+  claim that `Idea.organization` is required on every row; the constraint and
+  index tables; the selector list and `IdeaFilters`; and the GraphQL and
+  frontend boundaries, including `IdeaContextDialog`, the two ownership badges
+  and the detail page that used to 404 from three links.
+- **[`docs/reviews-domain.md`](docs/reviews-domain.md)** — a new section
+  records what the platform track changed, and `§5.4` states the two tracks in
+  one table: an **organization** reviewer is a member of the idea's own
+  organization holding `idea.review`, a **platform** reviewer is an account
+  holding a platform-scoped Django permission and nothing else, so no code path
+  exists in which holding `idea.review` somewhere also confers platform review.
+  `Review.scope`, `ReviewAssignment` and `PlatformReviewReport` are documented
+  as entities; rounds and the one-open-review rule are corrected to **per
+  scope**; `§11` becomes approval as three separate facts (the report is written
+  in the approval's transaction, only the author may give the go-ahead, and the
+  hand-off follows it rather than replacing it); the GraphQL section gains the
+  platform track's own seam; and `D-1` is marked delivered — the `invitations`
+  app is the only writer of a `Membership`, which is what finally makes an
+  organization reviewer somebody other than its single Owner.
+- **What was deliberately left alone.** `reviews-domain.md` §1 is the code as it
+  stood before S3-002 and now says so at the top, pointing at the later sections
+  where it disagrees. The S2 and S3 narratives in both files are unchanged: a
+  record of what each sprint decided is worth more than a document that was
+  always current, and the corrections above are the ones that would otherwise
+  have been read as descriptions of the system rather than of its history.
+
+### Added — Collaboration: teams, invitations, private messages and notifications
+
+Four small apps that answer four questions about the same thing - who works with
+you, how they got there, how you talk to them, and what the platform has told
+you. New [`docs/collaboration.md`](docs/collaboration.md).
+
+- **A team is a collaboration boundary, not a tenant.** The `teams` app has its
+  own `Team`, `TeamMembership`, `TeamRole`, `TeamRolePermission` and
+  `TeamMembershipRole`, with two seeded system roles per team (Owner, Member)
+  holding five codes: `team.view`, `team.update`, `team.members.view`,
+  `team.members.manage`, `team.ideas.submit`. The roles are **separate tables
+  over the same `organizations.Permission` records**, because
+  `organizations.Role` requires an organization and a team deliberately has
+  none - pointing at it would mean inventing a fake tenant that could be joined
+  and filtered for. So a team role cannot hold a review or approval permission:
+  no such code exists for it to hold. `createTeam` needs no organization, which
+  is the case the app exists for.
+- **Team operations.** `createTeam`, `addTeamMember`, `leaveTeam`; `teams`,
+  `team(id)` and `teamMembers`. `team(id)` answers null for a team you are not in
+  *and* for one that does not exist, so a team id cannot discover teams. Leaving
+  is refused while you are the only member - a team nobody can administer cannot
+  be repaired from the interface - and the team and its ideas stay as they are.
+- **Accepting an invitation is the only thing that creates a membership.** One
+  `invitations.Invitation` table serves organizations and teams, because the
+  security is identical: bound to an email address (a signed-in account with a
+  different address is refused, not switched), single-use (claimed with a
+  conditional `UPDATE`, so two clicks in two tabs make one membership), expiring,
+  revocable, and with only the SHA-256 digest of a 32-byte `secrets` token
+  stored. `role_slug` is resolved *at acceptance*, so a role the tenant has since
+  dropped fails loudly instead of granting the wrong permissions. Owner is not an
+  invitable **organization** role - that is a role change, and letting an
+  invitation create one would bypass the last-holder protection.
+- **Private messages are not comments.** `messaging` has `MessageThread`,
+  `MessageParticipant` and `Message`, and access comes from the participant
+  list, so there is no "messages for idea X" query and no `message(id)` field:
+  somebody who can read an idea cannot see that two of its readers are talking
+  about it. `idea` on a thread is context, never access - the creator must be
+  able to read it, and the recipients need not be. `startMessageThread`
+  continues an existing thread about the same idea rather than opening a second
+  one, and refuses a recipient id that does not resolve instead of silently
+  dropping them. The read position is per participant.
+- **Notifications are the platform speaking.** `notifications.Notification` has
+  13 fixed kinds, and `DECISION_KINDS` - the subset that is about a decision
+  rather than a queue - is the only thing that may render a review report link,
+  so a "somebody is waiting for you" nudge cannot point at an approval. One
+  business event, two channels: `deliver` writes the row and registers the email
+  from the same call, both on `transaction.on_commit`, the write wrapped so a
+  failure is logged, and the send never raising. `body` is bounded to 500
+  characters and carries no report contents - the email links to a page that
+  requires authentication. `notifications`/`unreadNotificationCount`,
+  `markNotificationRead`, `markAllNotificationsRead`.
+- **Email now has four senders, one contract.** `identity` (reset, activation),
+  `reviews` (the author's decision), `invitations` and `notifications`: plain
+  text, to the stored address, after commit, never raising, full content always
+  behind authentication. The invitation email is addressed to the address *on the
+  invitation* and contains nothing the recipient is not yet entitled to.
+- **Frontend.** `/app/teams` and `/app/teams/:teamId` (roster, leave,
+  invitations, and adding a colleague for the owner), `/app/messages` and
+  `/app/messages/:threadId`, `/app/notifications` with a bell in the app chrome,
+  and `/invitations/accept` - a **top-level** route, not an `/app` child,
+  because the recipient may have no account yet.
+- **Not in the UI, on purpose and recorded as a gap.** An organization
+  invitation panel and a compose screen for a new private message: both are
+  implemented and authorized on the server and the client has the requests, but
+  no component calls them. A people-picker needs a people directory, and this
+  API has none.
+
+### Added — Three ways to file an idea, and a platform that decides
+
+- **An organization is optional.** `Idea.submission_context` is now `INDIVIDUAL`,
+  `TEAM` or `ORGANIZATION` (migrations `ideas/0005`-`0006`), and only the
+  organization context names an organization. `ideas.services._resolve_context`
+  proves a different thing per branch - nothing beyond being an authenticated
+  user, an active *team* membership, or an active organization membership - and
+  refuses a context carrying the other tenant's id, so an individual idea cannot
+  be quietly filed for an organization. `INDIVIDUAL` and `TEAM` ideas go straight
+  to the platform, which is the point of letting somebody with no tenant put an
+  idea forward.
+- **The submission the platform holds is frozen.** Migration `ideas/0005` adds
+  `IdeaSubmissionVersion`; `ideas/versions.py` copies the content into one inside
+  the transaction that moves the idea to `SUBMITTED`, so "submitted" without a
+  version cannot commit. Answering feedback edits the working copy and produces
+  version n+1 beside version n - nothing is overwritten, and an old round's
+  review still describes the submission it read. `platform_locked_at` and
+  `platform_version` report the freeze rather than leaving the client to infer
+  it.
+- **Platform approval is not the owner's go-ahead.** `reviews/0003` adds
+  `Review.scope`, the per-scope rounds and `PlatformReviewReport`; the platform
+  queue is `platformReviewQueue`/`platformIntake`, a platform reviewer is an
+  account holding the platform-scoped
+  `administration.review_platform_submissions` permission rather than an
+  organization role, and `startReview`/`completeReview` are the organization
+  review while `startOrganizationReview`/`completeOrganizationReview` is the
+  organization's own. `submitToPlatform` and `giveGoAhead` are separate acts:
+  receiving the report, the notification or the email never sets the owner's
+  decision. `assignPlatformReviewer`/`releasePlatformReviewer` are the one
+  exception to the self-claim queue. The idea report is a page of its own at
+  `/app/ideas/:ideaId/report`.
+- **A handoff state.** `READY_FOR_IMPLEMENTATION` sits between approval and
+  `AUTOMATION_PROPOSAL`, and `seed_dev_categories` creates the twelve sample
+  categories the handoff needs (see the existing entry below).
+
+### Changed — The app bar, and one request per teams page
+
+- **Teams and Messages are reachable.** Both were routed and both were built, and
+  neither had a link in the app header: `/app/teams` and `/app/messages` could
+  only be reached by typing a URL. Unlike Reviews and Admin they are offered
+  unconditionally, because neither is gated by anything but a session - a team is
+  a collaboration boundary rather than a tenant, and a private message belongs to
+  its participants.
+- **Messages carries an unread badge.** Its own one-field query
+  (`unreadThreadCount`) asked once per mount, on the same terms as the
+  notifications bell: the bar renders on every authenticated page and the
+  conversation list renders on one, so reading the count out of the list would
+  have meant pulling every thread on every page. Capped at `99+`.
+- **`/app/teams` asks once.** `TeamList` and `CreateTeamForm` each mounted
+  `useMyTeams`, so the page made two requests for one answer. A page-scoped
+  `TeamsProvider` now serves both, which is the difference between one request
+  and two.
+- **Adding somebody who already has an account.** `addTeamMember` was
+  unreachable: it needs a user id, and this API has no people directory, so the
+  client had no honest way to name anybody. The team page now draws candidates
+  from the reader's **organization roster** - the only list of people the client
+  can name - minus those already on the team, and offers it to the owner only
+  (`addTeamMember` needs `team.members.manage`, and `ownerId` is the only
+  statement of that the client has, which narrows what is drawn rather than
+  granting it). Somebody outside that organization is invited by email, which is
+  still the main way in.
+- **Docs.** New [`docs/collaboration.md`](docs/collaboration.md);
+  [`architecture.md`](docs/architecture.md)'s app list, mail section,
+  multi-tenancy and Ideas sections corrected against the code above, and its
+  implementation-status table extended. `ideas-domain.md` and `reviews-domain.md`
+  predate the platform track and are marked as such rather than left to disagree
+  with it silently.
+
+### Added — Teams, invitations, messages and notifications in the console
+
+The console could see users, tenants, ideas, reviews and categories, and nothing
+else - so a team, an invitation, a conversation or a notification was invisible
+to the one person whose job is to know they exist. Four read-only sections, in
+the shape the console already uses.
+
+- **Teams** (`/app/admin/teams`, `/teams/:id`). `adminTeams`, `adminTeam`,
+  `adminTeamInvitations`. Both membership numbers are shown, because a team keeps
+  the row of somebody who left so it does not re-invite them: "one member, one
+  former" is the honest summary. The detail lists each role's **permission
+  codes** rather than a count, since a team role holding a review or approval
+  code would be the platform's own boundary failing and this is where somebody
+  would notice. Teams sits beside Organizations in the nav, not inside it: a
+  team is a collaboration boundary, not a kind of organization.
+- **Invitations** (`/app/admin/invitations`). `adminInvitations`, filterable by
+  scope and status, across both tenants. The state shown is `isOpen` rather than
+  `status`, because a pending invitation past its expiry is still "pending" in
+  the database and cannot be accepted - the distinction is the operational
+  question. **No token is exposed anywhere**, so there is nothing to redact: only
+  the SHA-256 digest is stored and the plaintext exists solely in the email.
+  That is asserted against the schema itself, not left as a reviewer's habit.
+- **Messages** (`/app/admin/messages`, `/messages/:id`). `adminMessageThreads`,
+  `adminMessageThread`, `adminThreadMessages`. The list is metadata -
+  participants, counts, last activity - and a **body needs
+  `inspect_idea_content`**, because a message is the one place on the platform
+  where somebody wrote something for named people rather than for the platform.
+  Without it every body is `null` and the page says "restricted" instead of
+  drawing an empty message that would read as an empty conversation.
+- **Notifications** (`/app/admin/notifications`). `adminNotifications`,
+  filterable by kind and unread, with the recipient. These are the platform's own
+  words - a notification row only holds what a domain decided, and its body is
+  length-bounded precisely so it never carries a review report - so the text is
+  metadata under the console gate, unlike a message body. The idea a
+  notification points at is still gated like everywhere else.
+- **Two rules the redaction inherited rather than invented.** A **thread subject
+  is withheld with the idea it is anchored to**, because `start_thread` defaults
+  an anchored thread's subject to that idea's title: redacting the title and
+  leaving the subject would have left the answer in the subject. And **search
+  follows suit** - the subject of an anchored thread is only searchable by a
+  caller who may read that idea, so a search cannot confirm a private title.
+- **`staleParticipantCount` is not an unread count.** Unread is a position per
+  reader and the console has no reader, so the column says how many
+  *participants* have not opened the thread - a fact about the platform rather
+  than a fictional reader's state.
+- **Read-only on purpose.** There is no console operation over any of the four: a
+  membership is only ever created by accepting an invitation, and a message
+  belongs to its participants. An administrator who could write either would be
+  recording an acceptance or a conversation that did not happen.
+- **Tests.** `administration/tests/test_collaboration_reads.py` (28 cases):
+  the four surfaces, both redaction rules, the search rule, the "no token"
+  schema assertion, that an ordinary member gets nothing from all four, and
+  pinned query counts for all five lists.
+- **Docs.** `docs/administration.md` gains §3.1 and the four read rows;
+  `docs/architecture.md` and `docs/collaboration.md` updated to match.
+
+### Changed — One idea, one owner, and never a guess about it
+
+The ownership question was answerable by the API and invisible in the product.
+It is now asked before anything is written, answered on every card and detail
+page, and enforced by the database as well as the services.
+
+- **`TEAM` becomes a visibility of its own** (migration `ideas/0009`). A team
+  idea whose audience is its own members used to say so with the word
+  "organization", which is exactly the ambiguity that made an idea's owner and
+  its audience impossible to tell apart on a card. `Idea.Visibility` is now
+  `public / organization / team / department / private`, each value scoped to the
+  tenant it actually names — a team idea cannot be read through an organization
+  membership, nor an organization idea through a team one. No existing row moves:
+  the migration only widens the CHECK constraint.
+- **The audience must belong to the owner's kind.** `private` and `public` are
+  offered in every context; `team` only on a team idea, `organization` only on an
+  organization one, with a sentence explaining why rather than a generic
+  "choose who can see this".
+- **Fixed: a team or individual idea could not be edited at all.**
+  `ideas.services._load_editable_idea` asked for an *organization* membership
+  unconditionally, and those two contexts have no organization — so the refusal
+  reached the author of their own idea. The check now branches per context, the
+  way `ideas.lifecycle._require_tenant_standing` already did, because the two
+  must agree or one refuses an operation the other allows.
+- **`can_edit_idea` and `IdeaType.viewerCanEdit`** ask the same questions in the
+  same order as `updateIdea`, so a client cannot offer a save the server would
+  refuse — and `UpdateIdeaInput` still has no context, tenant or author field, so
+  ownership cannot be changed by a write.
+- **`teamIdeas(teamId, filters)`** is wired to the selector that already existed
+  and was never called, and `IdeaFilters` gained `submissionContext`,
+  `visibility` and `mine`. All three are **narrowing**: `visibility: PUBLIC`
+  returns only ideas the caller could already see that are also public, and `mine`
+  is the caller's own id rather than one they supply. `authorId` is still
+  refused outright.
+- **`can_submit_for`'s docstring corrected.** It claimed "any active member may
+  submit that team's idea, which is the point of authorized team submission"; the
+  lifecycle refused that, because `DRAFT → SUBMITTED` is the author's move in
+  every context. The claim was wrong rather than the code, and is now described
+  as what it is: the tenant-standing half of an answer the lifecycle completes.
+- **Tests.** `ideas/tests/test_ownership.py` (33 cases): one owner always, the
+  database refusing a row the service would never write, unauthorized filing,
+  ownership surviving a widened audience, who may manage, what each audience
+  means, and the filter never widening the read.
+
+### Added — "Where does this idea belong?", asked before the form
+
+- **The global create button opens a dialog, not the form.** Three whole
+  options — Individual, Team, Organization — each carrying its own explanation,
+  then the tenant picker when one is needed, then a confirmation with
+  **Continue / Change** before a single word is written. Filing for the wrong
+  owner is the expensive mistake here: an idea filed for yourself when you meant
+  your organization will never be confirmed by it, and it will sit in a queue
+  nobody else can see.
+- **Only tenants the reader may file for are listed**, and a reader with none is
+  told that in those words rather than shown an empty picker — the backend
+  refuses the others, so offering them would teach the reader the list is
+  arbitrary.
+- **The choice travels in the URL**, not in React state: `?context=team&team=9`.
+  That makes the form's page bookmarkable and reloadable, and it is what lets a
+  Team or Organization page link straight into a form already decided. The
+  context controls are then closed, and the banner "Creating a Team Idea for
+  Automation Team" sits above **every** step of the eight-step form.
+- **Team and Organization pages go straight to the form.** `/app/teams/:id` and
+  `/app/organizations/:id` each carry a **Create Idea** button with the context
+  already decided, and the dialog is the global button's job alone.
+- **Re-resolved against the reader's own memberships**, so a pasted or
+  hand-edited `?context=team&team=999` opens the form's own step rather than a
+  context the server would refuse.
+- **`/app/ideas/:ideaId` exists.** Three places already linked to it — two in the
+  review report page and one in the notifications list — and all three were a 404,
+  because ideas existed only as rows in a list. Its header answers the four
+  questions in order: what it is, **who owns it**, who created it, where it is in
+  the lifecycle, with **Owned by** and the audience badge as two separate lines.
+- **`/app/organizations/:organizationId`** is a new page: the organization's
+  members, its ideas and its own create button, reachable from the workspace
+  list.
+- **Ownership and audience are drawn as two badges and never merged**, on cards,
+  on both lists and in the detail header — including the case that must not
+  collapse, a *public* organization idea that is still MUNA's. `utils/ownership`
+  owns the wording for both, because two label maps for one enum is how a card
+  ends up contradicting itself.
+- **Filters**: owner (individual/team/organization), audience (public/team only/
+  organization only/private), "Only my ideas", and the status list completed
+  from seven of eleven values to all of them.
+- **Tests**: `IdeaContextDialog.test.tsx` (10), `IdeaDetailPage.test.tsx` (10),
+  `TeamIdeasPanel.test.tsx` (9, covering the organization page too).
+
+### Added — Declining an invitation, and knowing where a notification goes
+
+The invitation flow had three exits and could only produce one by mail. It now
+has a fourth and a recipient-side notification, and the destinations a
+notification offers are the server's rather than the client's.
+
+- **`declineInvitation`.** A recipient may decline an invitation, under the same
+  address rule as accepting and refused **before** the claim, so a link cannot be
+  burned for somebody else. `DECLINED` is a new status with `declined_by` /
+  `declined_at` (migration `invitations/0002`), paired by a CHECK constraint the
+  way acceptance's are, and it is single-use under concurrency like acceptance.
+  **Nothing is created and nothing is removed** — acceptance is the only writer
+  of a membership, so a decline writes the invitation's own terminal state and
+  that is the whole record. The inviter is notified, and can invite again.
+- **`invitation.received` is now delivered.** It was declared in the vocabulary
+  and emitted by nothing: an address with an account was told by email alone.
+  There is **no accept link** in it, and that is deliberate — acceptance needs the
+  plaintext token, only its digest is stored, and the email is the only place the
+  token exists. The notification says what happened and where to look.
+- **`Notification.actionPath`, derived server-side.** The client used to compose
+  destinations out of `ideaId` and the kind, which is how three links came to
+  point at a route that did not exist and an invitation notification came to have
+  no way to act at all. One mapping — from the kind and the ids the row already
+  holds — now serves the in-app link and any payload built from the same row, so
+  the two cannot disagree and a renamed route is one edit. A link to an idea this
+  recipient may no longer read is not offered at all, because a notification
+  outlives the access it was written under. `NotificationType.label` likewise
+  ends the client's habit of splitting a dotted string to guess the wording.
+- **Frontend**: a **Decline** button beside **Join**, each disabled while the
+  other runs; a declined outcome that says plainly that nothing about the account
+  or the work changed; and a declined *preview* state that says the invitation was
+  declined rather than calling the link invalid, because an expired one, a revoked
+  one and a declined one are three different facts for the person looking at it.
+
+### Fixed — Push notifications
+
+**There is no push notification subsystem.** Not a partial one: no VAPID keys or
+settings, no subscription model, no delivery library (`pywebpush` is not a
+dependency), no service worker, no `requestPermission` call anywhere in the
+repository. The delivery the platform has is in-app plus email, both synchronously
+on `transaction.on_commit` — `docs/architecture.md` records Redis + Celery as
+planned and absent, which is also why there is no worker to retry a failed send.
+
+Nothing fake was added in its place: a delivery function that reported success
+without a transport would be worse than none, and a push notification that never
+arrives is a silent failure a user cannot see. What real web push needs is
+recorded in the report — a VAPID-signed transport dependency, subscription storage,
+a background worker for retries, and a browser service worker with a permission
+flow — and none of it can be built on a queue the project has decided not to run
+yet. The notification work here is the part that is genuinely substrate for it:
+one server-derived destination, usable by any channel.
+
+### Added — Replies, and one open card section at a time
+
+- **A comment can be a reply.** Migration `ideas/0004` adds a nullable
+  self-reference `Comment.parent`; `CommentType.parentId` reports it and
+  `CreateCommentInput.parentId` sets it. A reply must name a comment the caller
+  can read, on the same idea, that is not itself a reply — one level of nesting
+  as a rule of the row rather than a depth field, so `comments(ideaId)` still
+  returns one chronological page and the client groups the page it already has.
+  There is deliberately no nested `replies` selection: it would be a second fetch
+  of rows already in that page. Deleting a comment `CASCADE`s to its replies
+  rather than promoting them, and a reply to a reply is refused everywhere.
+- **The reply is written inside the comment it answers.** "Reply" opens a box
+  under that comment — never more than one open — and the posted reply lands
+  nested beneath it inside the same box, instead of appearing as another card in
+  the thread. Pressing it again, or Cancel, closes the box; a refusal keeps it
+  open with the words still in it. Replies carry no "Reply" of their own, since
+  the server would refuse one.
+- **One section open per card, and per page.** Discussion, Evidence and Review
+  were three independent toggles per card, so a reader comparing ideas could
+  leave twenty discussions and twenty evidence lists open at once. They are now
+  one value: opening any section closes whatever was open, anywhere on the page,
+  and pressing the open one closes it. Each section is a fetch keyed on being
+  open, so this is also the difference between three requests and sixty.
+- **Docs.** [`docs/ideas-domain.md`](docs/ideas-domain.md): the entity table,
+  `add_comment`'s requirements, and a new section on replies.
+
+### Changed — The idea card's action bar
+
+- **Heavier, clearer cells.** The four cells were 1.75px strokes over 12px grey
+  words, which is unreadable at the glance a card's footer actually gets. Icons
+  are now 2px at 22px, labels 13px bold in `gray-700`, and an open section is
+  drawn as a filled surface rather than being left to `aria-expanded`.
+- **One icon weight, decided once.** A shared `CellIcon` sets the stroke weight
+  and the box, so a new glyph inherits them instead of choosing its own and the
+  row never ends up with four slightly different sizes. Its `size` is a named
+  step rather than a class callers append, because two Tailwind size utilities in
+  one string do not compose.
+- **Redrawn paperclip and review clipboard.** The old paperclip had three turns
+  and a tail running off the frame, and read as a grey smudge at 20px; both are
+  redrawn inside a 22px frame. The vote count is now brand-coloured and
+  `tabular-nums` when voted, so "mine" is legible without relying on the fill.
+
+### Fixed — A flaky admin-console route test
+
+- `routes.test.tsx` asserted on a `lazy` route with Testing Library's 1s default.
+  Under full-suite load the dynamic import plus the capability query sometimes
+  exceeded it, failing roughly one run in three and never in isolation. Those
+  assertions now pass an explicit `LAZY_ROUTE_TIMEOUT`.
+
+### Added — Platform administration console
+
+- **Access model.** A new `administration` app declares platform-scoped Django
+  permissions (`administration.access_console`, `inspect_idea_content`,
+  `manage_user_accounts`, `manage_organization_roles`, `manage_categories`).
+  They stay separate from organization roles: an Owner or Reviewer is never
+  a platform administrator. `python manage.py grant_platform_admin <email>
+  [--revoke]` manages the "Platform administrators" group. Superusers hold
+  every permission.
+- **Console GraphQL.** `adminCapabilities`, `adminOverview`,
+  `adminUsers`/`adminUser`, `adminOrganizations`/`adminOrganization`/
+  `adminOrganizationMembers`, `adminIdeas`/`adminIdea`,
+  `adminReviews`/`adminReview` (also the approvals view), `adminCategories`,
+  `adminAuditEntries`. All are authorized on the server, paged and filtered
+  in the database, and bounded in query count. Non-public idea content,
+  evidence and review feedback need `inspect_idea_content`; without it they
+  are withheld (`contentRestricted`). No credential is ever returned.
+- **Audited operations.** `adminSetUserActive` (revokes sessions; not your
+  own account; superusers only by superusers), `adminAssignMembershipRole` /
+  `adminRemoveMembershipRole` (the organization domain's own rules, last
+  Owner protected), `adminCreateCategory` / `adminUpdateCategory` /
+  `adminSetCategoryActive` (retire, never delete). There is no review or
+  approval override.
+- **Audit trail.** Migration `administration/0001` adds the append-only
+  `AdminAuditEntry` (read-only in Django Admin). It records every console
+  operation, rule refusals of account and role changes, evidence downloads
+  and admin grants.
+- **Evidence download.** `GET /administration/attachments/<id>/download/`,
+  gated on the content-inspection permission and audited. It shares the
+  safe-download response, now `ideas.views.attachment_file_response`.
+- **Frontend.** `/app/admin` (lazy-loaded) with Dashboard, Users,
+  Organizations, Ideas, Reviews, Approvals and Categories: tables, server
+  search/filters/paging, detail pages, status badges, confirmation dialogs
+  with audited reasons, and loading/empty/error/forbidden states. An "Admin"
+  nav link is offered only when `adminCapabilities` allows it.
+- **Refactor.** `organizations.services.grant_membership_role` /
+  `revoke_membership_role` hold the role-assignment rules, shared by the
+  member-facing mutations and the console.
+- **Docs.** New [`docs/administration.md`](docs/administration.md);
+  architecture and backend README updated.
+
+### Changed — Idea submission for non-technical authors
+
+- **Guided intake form.** `IdeaForm` is now an eight-step conversation about
+  the problem - the problem, how it happens today, the impact, what should
+  improve, how you would know it is solved, anything important, category &
+  visibility, supporting documents - with a progress list, Back/Next, every
+  step reachable at any time, and "Save draft" on every step. No question asks
+  about technology. Visibility options read "Only me", "My organization" and
+  "Everyone". Drafts need only a title on the client too (the server's rule);
+  the submission rule is unchanged.
+- **Problem story on `Idea`.** Migration `ideas/0003` adds optional columns
+  `current_process`, `current_tools` / `current_tools_other`, `performed_by`,
+  `affected_people`, `frequency`, `time_required`, `people_involved`,
+  `impacts` / `impact_details`, `improvement_goal`, `desired_outcome`,
+  `easier_for_people` and `important_considerations`, with CHECK constraints
+  on the closed vocabularies; the existing `expected_benefit` is now written.
+  Validated for shape in `ideas.services`, exposed on GraphQL `IdeaInput` /
+  `IdeaType` (enums `IdeaFrequency`, `IdeaImpact`, `IdeaCurrentTool`), and
+  included in the review submission snapshot (`story`).
+- **Supporting documents on create.** Files chosen on the last step are
+  uploaded through the existing attachment endpoint after the draft is
+  created and before it is submitted; a file that fails is named in the
+  confirmation. Editing an idea shows its live evidence on that step.
+- **Reviewers see the story.** The review workspace shows every answered
+  question under the description.
+- **One editing pipeline.** Editing a draft, or revising an idea a reviewer
+  sent back, now happens only on `/app/ideas/:ideaId/edit` - the same guided
+  form, on its own page. The side-panel editor beside the ideas list is
+  removed; "Edit draft" and "Revise idea" open the page.
+- **Upload surface.** The supporting-documents step is a drop zone beside the
+  file list, each file with its own bar (moving while in flight, full when
+  attached, red when refused). Edit mode uploads several files one after
+  another through `useAttachments`, whose append now builds on the latest
+  list so none is dropped. The form's step list sits in its own tinted pane
+  behind a full-height divider.
+
+### Added — Sprint 3: Review & Validation
+
+- S3-001: Review & Validation domain architecture — `docs/reviews-domain.md`.
+- S3-002: Reviewer eligibility and the review-domain foundation.
+  - **`idea.review` permission** — the reviewer gate in `ideas.lifecycle`
+    moves from "holds a system role" to this permission, checked through
+    `organizations.authorization.membership_has_permission` and therefore
+    scoped to the idea's own organization. The Owner role holds it, so no one
+    who could review before lost the ability. `membership_holds_system_role`,
+    whose only callers were the two reviewer checks, is removed.
+  - **Reviewer role** — a non-system role provisioned per organization with
+    exactly `organization.view` and `idea.review`, granted and removed through
+    the existing `assignRoleToMembership` / `removeRoleFromMembership`.
+    Migration `organizations/0003` grants `idea.review` to existing Owner roles
+    and provisions the Reviewer role for existing organizations, leaving any
+    pre-existing role with the `reviewer` slug untouched; it is reversible.
+  - **`reviews` app** — `Review` (one row per review round: idea, reviewer
+    (`PROTECT`), round, decision, feedback, submission snapshot, timestamps)
+    and `ReviewCriterionAssessment` (five fixed criteria, categorical rating,
+    no numeric score). Database constraints: unique `(idea, round)`, at most
+    one open review per idea (partial unique), `round >= 1`, decided exactly
+    when completed, known decision/criterion/rating values, one assessment per
+    criterion per review. Completed reviews refuse further saves and new
+    assessments; the admin is read-only.
+  - **`reviews.eligibility`** — `can_review` (can read the idea and is its
+    reviewer under the lifecycle's own rule) and `can_start_review` (the same,
+    on a `SUBMITTED` idea). No queue, claiming, decision, GraphQL or UI yet.
+  - **Membership prerequisite** — not added. A self-service "add member by
+    email" mutation would reveal which emails have accounts to anyone who
+    creates an organization; members are added through Django admin until a
+    consent-based invitation flow exists.
+- S3-003: Review queue and workspace — read-only; nothing is claimed or
+  decided yet.
+  - **`reviewQueue(organizationId, offset, limit)`** — one organization's
+    `SUBMITTED` ideas, oldest submission first, for a reviewer there: never the
+    caller's own, never one they cannot read, never another tenant's (a
+    `PUBLIC` idea included). Everybody else gets an empty page. Built on
+    `list_organization_ideas` plus the existing pagination and vote
+    annotations, at a fixed number of queries per page.
+  - **`ideaReviews(ideaId)`** — every round for a reviewer of the idea's
+    organization, completed rounds for its author, nothing for anybody else,
+    `PUBLIC` readers included. Reached only through an idea the caller can
+    read; there is no query by review id. `submissionSnapshot` is for
+    reviewers only; `reviewerId` is an id, never a nested user.
+  - **`viewerCanReviewIn(organizationId)`**, and **`IdeaType.viewerCanStartReview`
+    / `viewerActiveReviewId`** — per-viewer capability flags from
+    `reviews.eligibility`, resolved lazily and without a query for ideas whose
+    status rules them out.
+  - **Frontend** — `/app/reviews`: the queue with loading, empty, error and
+    paging states, and the selected idea's content, evidence and review
+    history. Idea cards gain a collapsed review-history section for the author
+    and for reviewers. The Ideas page links to the queue for reviewers.
+  - **Docs** — `reviewQueue` pages with `offset`/`limit`, the project's
+    convention, not the `page`/`pageSize` the S3-001 table named; the Ideas
+    GraphQL adapter (not the Ideas domain) reads Reviews for the capability
+    fields.
+- S3-004: Start review and complete review.
+  - **`startReview(ideaId)`** — one transaction: lock the idea, re-check
+    eligibility on the locked row, require `SUBMITTED`, open the next review
+    round with a snapshot of the idea, and move it to `UNDER_REVIEW`. Two
+    reviewers starting at once produce one review and one refusal (row lock;
+    the one-open-review constraint is the backstop).
+  - **`completeReview(input)`** — one transaction: lock the idea then the
+    review, require the caller's own open review of that idea, record all five
+    criterion assessments (exactly once each, categorical, notes allowed),
+    the feedback (required for changes requested and rejected) and the
+    decision, set `completed_at`, and move the idea to the decided status. A
+    failure at any step rolls all of it back; a completed review is refused.
+  - **The old path is closed** — `transitionIdea` refuses the four
+    review-owned moves and `availableTransitions` no longer offers them, so
+    every review decision leaves a `Review`. The lifecycle stays the only
+    writer of `Idea.status`, via `lifecycle.apply_review_transition`.
+    `APPROVED → AUTOMATION_PROPOSAL` is unchanged.
+  - **Frontend** — Start review in the review workspace, the decision form
+    (five criteria with rating and note, feedback, decision, client checks
+    mirroring the server's), reconciliation from the server's answer, and
+    `/app/reviews?idea=<id>` to continue a review from an idea card.
+  - Existing Ideas tests that made review moves through `transitionIdea` now
+    make them through the review path or assert the refusal.
+- S3-005: Changes requested and resubmission —
+  `CHANGES_REQUESTED → author edits → SUBMITTED → a reviewer starts round n+1`,
+  with no new operation.
+  - **`updateIdea`** accepts the author's own `CHANGES_REQUESTED` idea as well
+    as a draft (`ideas.services.EDITABLE_STATUSES`), with the same validation,
+    membership and tenant checks. Visibility is fixed once submitted: a
+    different value is a `visibility` field error (D-6).
+  - **`submitIdea`** resubmits, unchanged: the same lifecycle move and the
+    same submission validation. It creates no review.
+  - **History** — the completed review that asked for changes is never
+    touched; the next round is created only by `startReview`, as round n+1
+    with a snapshot of the revised content. Tested field by field.
+  - **Frontend** — "Revise idea" and "Submit again" on the author's card;
+    the existing `IdeaForm` in a revise mode with the reviewer's feedback
+    above the fields and visibility locked; resubmission via
+    `submitIdeaRequest`, then the list refreshes.
+- S3-006: Reviewer approval.
+  - **Approval is the existing `completeReview`** with `decision: APPROVED` -
+    no new mutation, permission or lifecycle code. It moves the idea
+    `UNDER_REVIEW → APPROVED` in the same locked transaction as the review's
+    completion, with the S3-004 rules unchanged (the review's own reviewer,
+    still eligible, all five criteria, known ratings, idea still under review).
+    It stops at `APPROVED`: no opportunity or proposal is created, and the
+    `APPROVED → AUTOMATION_PROPOSAL` hand-off is unchanged.
+  - **Immutability** — a completed review now also refuses `delete()`, on top
+    of refusing edits and new assessments.
+  - **The author's decision email** (brought forward from S3-007) —
+    `reviews/notifications.py`: one plain-text email to the author for every
+    decision, sent only after the completion commits, with the decision and a
+    link but not the feedback; a delivery failure is logged and the decision
+    stands. No notification centre, no Celery.
+  - Tests: approval end to end, every refusal, concurrent approve/reject by
+    the same reviewer (one decision), immutability, the hand-off, the email
+    (content, on-commit only, never on refusal or rollback, failures logged),
+    and the GraphQL path.
+- S3-007: Lifecycle audit trail (D-10).
+  - **`ideas.IdeaTransition`** (migration `ideas/0002`) — one append-only row
+    per successful status change: idea, from, to, actor, time. Written only by
+    `ideas.lifecycle` (`transition_idea`, `apply_review_transition`) inside the
+    transaction that changes the status, so a refused or rolled-back move
+    leaves no row and a successful one always has one. The actor is the
+    authorized caller, never an input. Rows refuse `save()` over an existing
+    row and `delete()`; the admin is read-only; CHECK constraints refuse
+    unknown statuses and no-op moves. No link to the review (ideas does not
+    depend on reviews); no backfill for earlier moves.
+  - **`ideaTransitions(ideaId)`** — read-only history for the idea's author
+    and the reviewers of its organization, like the review history; empty for
+    everybody else, `PUBLIC` readers included. No mutation.
+  - Refused transitions are logged with ids and the refusal reason only.
+  - Review history (`Review`) is unchanged and kept alongside: the review is
+    the evaluation, the transition is the lifecycle record.
+  - Reviewer emails on submission (D-11) are deliberately not implemented,
+    per the architecture's recommendation; documented.
+- S3-008: Integration, security and testing.
+  - **Take-over of a stalled review (D-2, §5.3).** When the reviewer holding
+    an open review is no longer eligible (membership inactive or removed,
+    `idea.review` removed, account deactivated, idea no longer readable to
+    them), another eligible reviewer takes it over with `startReview`: the
+    open round is completed as the new `WITHDRAWN` decision (no feedback, no
+    assessments) and round n+1 opens for them, in one transaction under the
+    idea row lock. The idea stays `UNDER_REVIEW`, so no `IdeaTransition` is
+    written and no email is sent; the take-over is logged with ids only. An
+    eligible reviewer's review is never taken, and concurrent take-overs
+    leave exactly one. `viewerCanStartReview` reports the take-over;
+    `completeReview` refuses `WITHDRAWN`. Migration
+    `reviews/0002_review_withdrawn_decision` widens the decision CHECK.
+  - **Only reviewable ideas can be submitted (D-6).** Every move to
+    `SUBMITTED` requires `ORGANIZATION` or `PUBLIC` visibility, so a
+    submitted idea is always readable by its reviewers. `PRIVATE` is still the
+    default and still author-only; the author widens it before submitting.
+    Ideas submitted as `PRIVATE` earlier are left as they are.
+  - **Frontend:** "Take over review" in the review workspace and a "Review
+    stalled" link on the idea card, both driven by the server's flag; a
+    withdrawn round is labelled and explained in the review history; the
+    decision form offers the three verdicts only; the visibility hint says a
+    private idea cannot be submitted.
+  - **Membership (D-1):** no new mechanism. Staff add memberships in the
+    Django admin and owners grant the Reviewer role with
+    `assignRoleToMembership`; tested end to end.
+  - **Tests:** end-to-end flows over HTTP (registration → admin membership →
+    role grant → draft → submit → review → approval with email and history;
+    changes requested → revision → second round; rejection; every
+    unauthorized caller), a two-tenant security sweep in both directions,
+    lifecycle-bypass and schema checks, races (changes requested vs approve
+    or reject, concurrent starts and take-overs, resubmission vs completion,
+    take-over vs a reinstated reviewer's completion) checked against shared
+    record invariants, take-over and submission-visibility suites.
+  - **Deferred:** stalled reviews in `reviewQueue`, a lifecycle-history
+    (`ideaTransitions`) view in the frontend, membership invitation.
+
+### Added — Development tooling
+
+- Temporary development categories: `python manage.py seed_dev_categories`
+  creates twelve sample `Category` rows (`ideas/dev_categories.py`) so the idea
+  form can be exercised end to end before category management exists in
+  Django Admin. Additive and idempotent - existing categories, including
+  administrator edits, are never changed or removed - and refused with `DEBUG`
+  off unless `--allow-non-debug` is passed. The frontend still reads
+  categories only through the `categories` query; the idea form now says when
+  categories failed to load or none exist. See
+  `docs/ideas-domain.md#development-categories-temporary-seed`.
+
+### Added — Sprint 2: Ideas & Problem Submission
+
+- S2-001: Ideas domain architecture — the `ideas` app, the platform's first
+  business domain beyond Identity & Access. Five entities: `Category`
+  (platform-wide, flat, reusable, retired rather than deleted once used),
+  `Idea`, `Comment`, `Vote` and `Attachment`, plus their migration and admin
+  registrations. Scope is deliberately schema-only: no service, selector,
+  GraphQL operation or UI ships in this item, and none is stubbed. The
+  design and the planned seams for S2-002 are in `docs/ideas-domain.md`.
+  - **Lifecycle** — the full vocabulary (`draft`, `submitted`,
+    `under_review`, `changes_requested`, `rejected`, `approved`,
+    `automation_proposal`) is established so implementing the review
+    workflow in Sprint 3 is behaviour, not a migration. Only `DRAFT →
+    SUBMITTED` belongs to Sprint 2. `status` and `visibility` are enforced by
+    database `CHECK` constraints *as well as* `choices`, because `choices`
+    only covers `full_clean()` and `bulk_create`/`QuerySet.update`/a
+    management command all bypass it; both are generated from one definition
+    so they cannot drift.
+  - **Visibility** — `public`/`organization`/`department`/`private`,
+    defaulting to `private` so a new submission is visible to nobody until
+    somebody deliberately widens it. `department` is a **reserved value**,
+    not a half-built feature: the platform has no Department model, and
+    inventing one inside `ideas` would have been a different sprint's work.
+    What enforcement will need is recorded in the domain doc.
+  - **No second authorization system.** `ideas` adds no permission codes and
+    no `permissions.py`; membership and organization permissions stay in
+    `organizations/authorization.py`. The one Ideas-specific decision -
+    which ideas a user may *read* - is a visibility filter in the future
+    selector layer, built on `get_membership`, not a parallel permission
+    hierarchy.
+  - **Tenancy** — `Idea.organization` is required on every row, so there is
+    no idea that exists outside a tenant and a forgotten tenant filter cannot
+    reach anything. `Category` is deliberately *not* tenant-scoped: it is
+    what makes ideas comparable across organizations later.
+  - **Storage boundary** — `Attachment` is metadata only
+    (`storage_key`, `filename`, `content_type`, `size`) and holds no file
+    field of any kind, so attachment bytes cannot end up in PostgreSQL. The
+    bucket, presigned uploads and signed downloads are later work. A test
+    asserts no `FileField`/`BinaryField`/`DataField` ever appears.
+  - **Deletion behaviour** — `Idea.category` is `PROTECT`, because an idea
+    that has been reviewed must not vanish when the category list is tidied;
+    `is_active=False` is the supported retirement. `organization` and the
+    child rows cascade, matching `Membership`'s rule in Sprint 1.
+  - **Indexes** — five composite indexes shaped like the queries Sprint 2
+    will actually make (organization feed, organization+status,
+    category, visibility, author), and the three `Idea` foreign keys that
+    lead one of them have Django's automatic single-column index switched
+    off, since it would be a strict prefix of an index PostgreSQL could
+    already use. Asserted by tests so the two cannot diverge.
+  - A test asserts the app's model set is exactly these five, so a review,
+    proposal or developer model arriving here fails the build.
+- S2-002: Idea creation and submission — the first complete vertical slice of
+  the Ideas domain, and the first business-domain operations on the platform.
+  A real authenticated user can open the Ideas area, file an idea, edit their
+  own draft, and submit it. `ideas/services.py` (create, update, submit),
+  `ideas/selectors.py` (the read layer), `ideas/schema.py` (the GraphQL
+  adapter), the `createIdea`/`updateIdea`/`submitIdea` mutations with
+  `idea`/`ideas`/`organizationIdeas`/`categories` queries, and the
+  `/app/ideas` frontend feature module.
+  - **Authorization stays Sprint 1's.** `ideas` adds no permission code and
+    no `permissions.py`: filing an idea requires an active membership in the
+    target organization via `organizations.authorization.get_membership`,
+    and editing or submitting requires authorship on top of that. Membership
+    is re-checked on *every* write rather than only at creation, so leaving an
+    organization takes the ability to write into it with you. An
+    `idea.create` permission code was considered and rejected — the question
+    is already answered, and a second answer would be free to drift from the
+    first.
+  - **The client is never trusted with ownership or tenancy.** `organizationId`
+    is an input to a *decision* (the server authorizes that organization and
+    then uses it) and the author is always the authenticated user, read from
+    the access token. Neither appears in any input type, so "file this as
+    somebody else" and "move this to another tenant" are not operations the
+    API has the vocabulary for. A test asserts the input dataclass has no
+    such field, so the property cannot be reintroduced quietly.
+  - **Refusals never confirm existence.** A nonexistent idea, another
+    author's, another tenant's, and one already submitted are answered
+    identically — at the service, the selector and the GraphQL layer — so
+    none of these operations can be used to discover which idea ids are real.
+  - **Reads go through selectors, and the filter cannot be skipped.** Every
+    read passes through `ideas/selectors.py`, which has already applied
+    tenancy and `Idea.visibility`; the returned `QuerySet`s mean a caller
+    cannot forget the filter by forgetting to apply it. `can_view_idea` and
+    the queryset filter are the same rule twice, and a test asserts they
+    agree, because a divergence would make the list and the "may I open
+    this?" answer contradict each other.
+  - **`DEPARTMENT` fails closed.** It is reserved vocabulary with no
+    Department model behind it, so the service refuses it as a *choice* and
+    the selectors treat it as author-only. Treating it as `ORGANIZATION`
+    would mean an idea an author deliberately narrowed to their department
+    was readable by their whole team — the exact outcome the reserved value
+    exists to prevent. The frontend's picker does not offer it either, and
+    the selectors are the one place that changes when the tier arrives.
+  - **Submission is a rule of the transition, not of the schema.** A draft is
+    incomplete by definition, so completeness — a title, a description of at
+    least 20 characters, a category — is checked by `submit_idea`, not by a
+    `null=False` column or a database constraint that would make a
+    half-written idea unsavable. `submitted_at` is stamped in the same
+    transaction as the status change, because the model treats the two as
+    inconsistent apart. Only `DRAFT → SUBMITTED` is implemented; the review
+    transitions are named in the enum and reachable from no mutation.
+  - **The GraphQL type is stricter than the organizations one, deliberately.**
+    `IdeaType` carries `authorId` and `organizationId` as ids and no nested
+    user object: a `PUBLIC` idea is readable by any signed-in member of the
+    platform, so an embedded user would publish a member's email address
+    along with it. `status` and `visibility` are enums built from the
+    model's own `TextChoices`, so the GraphQL names cannot drift from the
+    database's and the review-only statuses are part of the contract from the
+    start. A test asserts the field list contains no user or security field.
+  - **Frontend**: `features/ideas/` with the API module, `IdeaForm`
+    (create *and* edit — one form, because two would drift), `IdeaList`, and
+    `IdeasWorkspace`, routed at `/app/ideas` as an `/app` child so it
+    inherits `RequireAuth` and the existing `OrganizationProvider`. What the
+    UI offers is decided from the signed-in user's id, which is a question of
+    presentation and never a control: the server refuses an edit or a
+    submission regardless of whether the buttons were rendered. A refused
+    token, a rejected field, a field-less refusal and a transport failure are
+    four distinct outcomes in the UI, because collapsing them either sends a
+    user off to request something for a link that was fine, or tells them
+    their idea was accepted when the request never arrived.
+  - **No migration.** S2-002 is behaviour over the S2-001 schema;
+    `makemigrations --check` reports no changes, which is the intended
+    result rather than a lucky one.
+  - Not implemented, and deliberately: comments, voting, attachment uploads,
+    discovery, the review workflow, approval, automation proposals, developer
+    matching, AI and payments. `docs/ideas-domain.md` scoped comments and
+    votes into S2-002; this item implements neither, and the document now
+    says so.
+
+
+- S2-003: Idea lifecycle and visibility — the transition rules, and the
+  server-side read policy they run inside. `ideas/lifecycle.py` (the matrix),
+  `ideas/selectors.get_idea_for_update` (the locked read), the
+  `transitionIdea` mutation, `IdeaType.availableTransitions`, and the
+  review actions in the Ideas UI. No migration: this is behaviour over the
+  S2-001 schema.
+  - **The lifecycle is a table, not a chain of conditionals.** Seven
+    `(from, to) -> actor` pairs, asserted as a set so a pair added to the code
+    without being decided fails the test. The same table is what
+    `availableTransitions` renders to the client, so what the UI offers and
+    what the server accepts cannot come from two copies of the rules.
+  - **A status cannot be set directly.** There is no mutation that takes one
+    and no write input with a `status` field, so "promote my own idea to
+    Approved" is not an operation the API expresses. A test sends such a
+    request and requires the schema to reject it, and another enumerates every
+    root mutation to confirm `transitionIdea` is the only place a status may
+    be named.
+  - **Two actors, and the self-review rule is structural.** The author owns
+    `DRAFT → SUBMITTED` and `CHANGES_REQUESTED → SUBMITTED`; a reviewer owns
+    everything from `SUBMITTED` on. A reviewer is an active member holding a
+    **system role** in the idea's own organization who is **not** the author
+    — the exclusion matters because bootstrap makes everybody's own
+    organization theirs, so an author who also holds `Owner` genuinely holds
+    it and no role check would catch them.
+  - **No new permission code, and no `ideas/permissions.py`.** A dedicated
+    `idea.review` code is the shape to adopt if a custom Reviewer role is ever
+    needed; it is not added now because nothing else needs a second capability
+    code, and a code that only ever means "is an Owner" would duplicate
+    `Role.is_system` and have to be granted by hand in every organization
+    created before it existed.
+    `organizations.authorization.membership_holds_system_role` is the single
+    function to replace if that trade changes.
+  - **Refusals never confirm existence.** An unknown id, another tenant's
+    idea, somebody else's `PRIVATE` idea, and one a departed reviewer can no
+    longer see are all answered identically at the service, the selector and
+    the GraphQL layer.
+  - **Visibility and lifecycle agree.** A transition reads through the same
+    filter every other read uses, so a reviewer cannot act on a `PRIVATE`
+    idea they were never shown — being a reviewer is not a bypass of
+    visibility. `DEPARTMENT` continues to fail closed in both directions: the
+    service refuses it as a choice and the selectors treat it as author-only.
+  - **Transitions are serialized per idea.** The row is read with
+    `SELECT … FOR UPDATE` inside the transaction, so "approve" and "reject"
+    fired together cannot both apply — the second waits and finds a status
+    that no longer permits its move. Tested with two real connections and
+    threads, which is the only way the property is actually exercised; and
+    `of=('self',)` is what keeps the lock off the nullable `category` join,
+    without which PostgreSQL refuses the whole query.
+  - **`submitted_at` is written once and never rewritten**, on the first
+    `DRAFT → SUBMITTED` only, so a re-submission after review feedback keeps
+    the original stamp — which the model requires, since anything past
+    `DRAFT` must have one.
+  - **Refusals are distinguishable without leaking.** An actor who could not
+    have made the move is told they may not; somebody who could is told the
+    move does not exist. `submitIdea` keeps S2-002's exact wording ("Only a
+    draft can be edited.") for the case it shipped, because the frontend
+    shows the backend's message verbatim and a status-pair sentence would be
+    worse copy for somebody who has just clicked Submit twice.
+  - **Frontend:** status and visibility are rendered from one vocabulary
+    table, and the actions on each idea are rendered from
+    `availableTransitions` — so there is no client-side rule saying who may do
+    what, and an author holding the Owner role is offered nothing on their own
+    submitted idea. The `AUTOMATION_PROPOSAL` hand-off is deliberately not
+    offered: the transition exists so the lifecycle is complete, and a button
+    that leads nowhere would be worse than none.
+  - Not implemented, and deliberately: review queues, reviewer assignment,
+    reasons against a `CHANGES_REQUESTED` idea, dashboards, comments, voting,
+    attachment uploads, the `DEPARTMENT` tier, proposals, developer matching,
+    AI, payments and subscriptions. (Discovery arrives in S2-004.)
+- S2-005: Comments and discussion — the `Comment` model S2-001 designed,
+  implemented as a discussion attached to an idea:
+  `add_comment`/`update_comment`/`delete_comment` in `ideas/services.py`,
+  `list_comments`/`get_comment` in `ideas/selectors.py`, the
+  `comments`/`createComment`/`updateComment`/`deleteComment` operations, and
+  the discussion UI on the `/app/ideas` cards. No migration: the S2-001
+  `Comment` model is used as designed.
+  - **Reading a comment is reading the idea.** A comment has no tenancy, no
+    visibility and no state of its own, so `list_comments` resolves the idea
+    through `get_idea` and filters comments by the *same* `_visibility_filter`
+    every other read uses. There is no comment-shaped version of the rule that
+    could be more permissive than the idea's, and an unreadable idea is an
+    **empty page** rather than an error — a discussion must not be a better
+    oracle than the idea it hangs from.
+  - **Commenting follows readability, not membership**, which is the rule
+    `docs/ideas-domain.md` already set for voting. It is what lets anybody on
+    the platform answer a `PUBLIC` idea without first becoming a member of
+    someone else's organization; `PUBLIC` means platform-readable, and making
+    it read-only to outsiders would be a different visibility tier.
+  - **No elevated path, and no new authorization code.** Edit and delete are
+    the comment's author and nobody else — not an administrator, not an
+    organization Owner, and not the idea's own author, because ownership of an
+    idea is not ownership of the discussion under it. `organizations` has no
+    capability meaning "moderate a discussion" to check, and inventing one
+    would be the second authorization system S2-001 ruled out. There is also no
+    membership re-check on edit or delete, unlike `update_idea`: a comment was
+    never a write *into a tenant*, so that gate would strand a comment on a
+    `PUBLIC` idea its author may still read after leaving an organization.
+  - **Refusals never confirm existence.** An unknown comment id, another
+    author's comment and a comment on an unreadable idea all answer
+    `"Comment is unavailable."`; an unknown idea and an unreadable one both
+    answer `"Idea is unavailable."`
+  - **Content is validated, normalized and never truncated.** Rejected when
+    blank, whitespace-only, or over `MAX_COMMENT_LENGTH` (2000 — a module
+    constant, a judgement call of the same kind as `MIN_DESCRIPTION_LENGTH`).
+    Truncation would store text the author did not write and report success, so
+    the only honest answer is a refusal the UI can show next to the box.
+    Stripped at the ends and CRLF folded to LF, but internal whitespace is left
+    alone: collapsing it would destroy the indentation of a pasted code block.
+    Content is plain text throughout — stored verbatim, returned as a plain
+    GraphQL `String`, and rendered as text by the client. Nothing escapes it in
+    storage, because escaping belongs at render time.
+  - **A deterministic order, stated where the tie-break is needed.** Oldest
+    first, because a discussion is read in the order it happened. `created_at`
+    is microsecond-resolution, so `created_at, pk` — and the tie-break is in
+    the selector because `Comment.Meta.ordering` is `['created_at']` alone,
+    which is arbitrary for two comments written in the same instant and lets a
+    page boundary show one twice and skip another.
+  - **Paging reuses S2-004's module unchanged**, including the same default of
+    20 and maximum of 50, and `CommentPage` reuses the same `PageInfo` type as
+    `IdeaPage` — a second pagination type would be a second set of conventions
+    to learn. A discussion is a corollary of an idea being readable, so it gets
+    the ideas page size rather than one of its own.
+  - **The discussion-state rule lives beside the transition matrix.**
+    `DISCUSSION_CLOSED_STATUSES = {REJECTED}`, closed because it has no
+    outgoing transition and a comment there has no future move to inform.
+    `AUTOMATION_PROPOSAL` is terminal in this app too and stays **open** —
+    being terminal here is not the same as being finished with, and closing a
+    handoff would cut off the conversation it invites. `DRAFT` is open too.
+    Editing and deleting stay available in a closed discussion: retracting
+    what you wrote is not participating in it. The invariant is asserted
+    against `TRANSITIONS` rather than repeated, so the rule and the lifecycle
+    cannot drift into two answers.
+  - **Additive GraphQL change, reported deliberately:** `IdeaType` gains
+    `discussionOpen: Boolean!`, computed from the same rule `createComment`
+    enforces. No existing field changed and nothing was removed; the reason for
+    adding it rather than having the client re-derive "is this rejected?" is
+    the same one `availableTransitions` was added for — a client-side copy of a
+    lifecycle rule is a second answer to a question the server owns.
+  - **Frontend:** the discussion is a disclosure inside each idea's card,
+    fetched when it is opened rather than on mount (a list of twenty ideas
+    would otherwise be twenty requests), with at most one open at a time. A
+    successful post, edit or delete updates the thread in place and never
+    re-fetches the ideas list, so the reader keeps their filters and their
+    page. Two submissions in one tick are dropped by a ref rather than by
+    state, because state is not readable synchronously from a click handler
+    and a double-posted comment is a duplicate somebody has to delete by hand.
+    A failed read is reported as a failure rather than as an empty discussion,
+    because "nobody has commented" and "we could not ask" are different claims.
+  - Not implemented, and deliberately: threading/replies (S2-001 declined a
+    parent pointer because "who may see a reply to a private comment" has real
+    authorization depth), moderation and soft delete, mentions and
+    notifications (Sprint 3), voting (S2-006), attachments (S2-007), and rate
+    limiting on comment writes — this project has no throttling mechanism, and
+    introducing one here would be a new security framework for a single
+    operation.
+- S2-007: Attachments & supporting evidence — the `Attachment` model S2-001
+  designed, as `upload_attachment`/`delete_attachment` in `ideas/services.py`,
+  file validation in `ideas/attachments.py`, a pluggable object-storage
+  abstraction in `ideas/storage.py`, `attachments`/`attachment`/
+  `deleteAttachment` in the GraphQL schema, two HTTP endpoints for the binary
+  transfer GraphQL cannot carry (`ideas/views.py`), and an evidence section
+  on the `/app/ideas` cards. No migration: the S2-001 `Attachment` model
+  already had every field this needed.
+  - **GraphQL is metadata and lifecycle; HTTP is bytes.** `attachments
+    (ideaId)`, `attachment(id)` and `deleteAttachment(id)` follow this
+    schema's existing conventions; there is no `addAttachment` mutation and
+    never will be, because a multipart upload and a streamed download are
+    not JSON-in/JSON-out operations. `POST /ideas/<id>/attachments/` and
+    `GET /ideas/<id>/attachments/<id>/download/` authenticate with the same
+    `Authorization: Bearer` header every GraphQL request carries.
+  - **Upload and delete require idea *authorship*, not merely
+    readability** — the first write in this domain where the two differ.
+    Comments and votes follow readability because participation and interest
+    both follow what a reader is shown; evidence is closer to editing the
+    idea than to responding to it. Deliberately **no lifecycle gate**
+    either, unlike a draft's own content (`update_idea` is `DRAFT`-only):
+    evidence accumulates throughout review, so this follows the shape
+    S2-006 established for votes (readable/authored, any status) rather
+    than S2-002's draft-only edit rule or S2-005's discussion-closes-on-
+    rejection rule. Listing and download stay readability-gated, the same
+    as comments and votes, so every reader who can see an idea can see and
+    fetch its evidence even though only its author can add or remove any.
+  - **The client chooses nothing that matters for safety.** The storage key
+    (`ideas.storage.generate_storage_key`) is built from the idea's id and a
+    random token, never from client input — the actual path-traversal
+    defense, not a check run against one. The recorded content type
+    (`ideas.attachments.canonical_content_type`) is derived from the file's
+    validated extension and confirmed against its own leading bytes; the
+    browser's `Content-Type` claim is never read as data. The display
+    filename is reduced to its last path segment on both separator styles
+    before anything else touches it.
+  - **Two independent file-type checks.** An explicit extension allow-list
+    (PDF; PNG/JPEG/GIF/WebP; CSV/TXT; DOC/DOCX/XLS/XLSX — nothing executable
+    or script-shaped), and the file's own leading bytes checked against the
+    signature its extension claims, so a renamed `.exe` wearing a `.pdf`
+    name is still refused. A denylist of dangerous signatures (`MZ`, ELF, a
+    shebang, Mach-O/Java) is checked against *every* upload regardless of
+    extension, including the two extensions (CSV, TXT) with no positive
+    signature of their own. Size is capped by `ATTACHMENT_MAX_UPLOAD_BYTES`
+    (10 MB default), checked against the upload's own measured size.
+  - **Not idempotent, on either operation** — matching `add_comment`/
+    `delete_comment`'s shape, not the votes' toggle shape. Uploading twice
+    creates two attachments; deleting twice refuses the second time, because
+    there is nothing left for it to name. The one race actually handled: a
+    database failure *after* a successful storage write deletes the
+    now-orphaned object rather than leaving it unreferenced; a storage
+    failure *after* a successful database delete is logged and left as an
+    orphan rather than resurrecting a row the caller was already told is
+    gone — the database, not the storage backend, is authoritative for
+    whether an attachment exists.
+  - **Storage is a pluggable abstraction, not a hardcoded filesystem path.**
+    `ideas/storage.py` calls only `django.core.files.storage`'s registry
+    (`STORAGES['attachments']`, `config/settings/base.py`); today that
+    resolves to Django's own filesystem backend (the only one installed),
+    and nothing in `ideas/services.py` or `ideas/views.py` would need to
+    change to point it at an object-storage backend later —
+    `ATTACHMENTS_STORAGE_BACKEND` is a settings/environment change once one
+    is actually provisioned. Download and upload go through this server for
+    the same reason: no bucket exists yet to presign a URL against.
+  - **Never rendered inline.** `Content-Disposition: attachment`
+    unconditionally, for every accepted content type including images — an
+    uploaded file is never trusted content, and this is the one rule that
+    makes an allow-list of "safe to render inline" types unnecessary.
+  - **Frontend:** a collapsed "Supporting evidence" section per idea card,
+    fetched only while open, independent of the discussion disclosure next
+    to it. Upload and delete controls render only for the idea's own author
+    (`idea.authorId === user.id`) — a courtesy, since the server enforces
+    authorship regardless — and download is offered to every reader who can
+    see the section. A courtesy client-side check (extension, non-zero size,
+    10 MB) rejects an obviously-doomed file before a round trip; the server's
+    own message is what is shown for anything that check lets through.
+    `uploadAttachmentRequest`/`downloadAttachmentRequest` are the only two
+    functions in `ideasApi.ts` that call `fetch` directly instead of
+    `graphqlClient`, attaching the same bearer token read fresh from
+    `tokenStore`. Neither an upload nor a delete re-fetches the ideas list.
+  - Not implemented, and deliberately: an actual object-storage bucket,
+    presigned/signed upload or download URLs, virus/malware scanning,
+    thumbnails or previews, versioning, per-attachment access grants beyond
+    the idea's own visibility, and any AI processing of attachment content —
+    those are later work, not omissions.
+- S2-008: Ideas domain integration, security and hardening — an audit of
+  S2-001 through S2-007 as one system, with fixes limited to what it found.
+  No P0 (security or tenant-isolation) defect was found. No new feature, no
+  API contract change, no migration and no new lifecycle state.
+  - **Security/integration tests** — `ideas/tests/test_integration_security.py`
+    walks attack paths across features rather than within one: two
+    organizations in both directions, GraphQL and the attachment HTTP
+    endpoints answering every (reader, idea) pair identically, another
+    tenant's `PUBLIC` idea being readable but not attachable, `DEPARTMENT`
+    staying author-only for every attachment operation, an attachment id
+    borrowed under a different readable idea's URL, former members, a still-
+    valid token for a deactivated account, a `PRIVATE` idea staying invisible
+    to reviewers after submission, and comments/votes/attachments of an
+    unreadable idea being unreachable by their own ids.
+  - **Upload endpoint** — authenticates and authorizes *before* reading
+    `request.FILES`, so an anonymous or unauthorized caller is refused without
+    Django parsing the multipart body (anonymous with no file is now 401, not
+    400). Validation failures are 400 and a storage failure is 502; both used
+    to fall through `IdeaError`'s default `'forbidden'` reason to 404.
+  - **Frontend** — discovery, discussion and evidence fetches discard a
+    superseded response, so an older request settling last (or failing) can no
+    longer replace or wipe the current answer; vote controls take the
+    server's numbers again whenever the list is re-fetched instead of pinning
+    the last vote response; the download blob URL is revoked on a timer rather
+    than synchronously after `click()`; and the copy no longer claims drafts
+    are always private or that submitting changes who can see an idea.
+  - **Documented, deliberately unchanged** — content is not editable in
+    `CHANGES_REQUESTED` (`update_idea` stays draft-only; a future refinement),
+    and a submitted `PRIVATE` idea cannot be reviewed because visibility and
+    status are independent. Stale docstrings in `ideas/models.py` and the
+    sprint table in `docs/ideas-domain.md` were corrected.
+- S2-006: Voting and engagement — the `Vote` model S2-001 designed, as
+  `vote_for_idea`/`remove_vote` in `ideas/services.py`, `voteIdea`/`removeVote`
+  and `IdeaVoteState` in the GraphQL schema, and a vote control on the
+  `/app/ideas` cards. No migration: the S2-001 `Vote` model and its
+  `unique_vote_per_user_idea` constraint are sufficient, and are relied on
+  rather than replaced.
+  - **One user, one vote per idea — enforced twice, on purpose.** A service
+    check answers the common case (a double-clicked button, a retried request);
+    the database constraint answers the one a check-then-insert cannot, which
+    is two *simultaneous* requests that both read "no vote" and both insert.
+    The constraint is the final boundary because it is the only thing that
+    cannot be raced. The loser catches `IntegrityError`, reads the row the
+    winner inserted, and **returns it as a success** — the state the caller
+    asked for does exist, so an error would be a worse answer than the truth.
+    An `IntegrityError` with no row behind it is re-raised rather than
+    swallowed, so a genuine fault is not dressed up as success. Proven with two
+    real connections and threads, and again deterministically so the
+    `IntegrityError` branch itself is exercised rather than left to timing.
+  - **Idempotency, chosen and asymmetric.** Voting twice succeeds, withdrawing
+    twice succeeds, withdrawing a vote that was never cast succeeds — all
+    because "no vote of mine" is the same fact either way, and a toggle
+    double-clicked should not produce an error about a state the reader already
+    reached. The one place it does **not** apply is the visibility gate: an
+    unreadable idea is refused rather than silently accepted, or the
+    idempotent branch would confirm the operation is available there.
+  - **Voting is gated on visibility alone, with no lifecycle condition** — a
+    deliberate divergence from S2-005's discussion rule, and the reason is
+    written down because it reads like an oversight otherwise. `docs/ideas-domain.md`
+    states the rule for votes as "a user may not vote on an idea they cannot
+    read", full stop, so a `REJECTED` idea can still be voted on. A comment is
+    participation in a *decision*; a vote is interest in the *idea*, which
+    outlives its own review state. Pinned by a test so it is not "corrected"
+    into a copy of the comment rule.
+  - **No elevated path and no new permission code.** Vote and withdraw are the
+    authenticated user's and nobody else's; `voteIdea` and `removeVote` take an
+    `id` and nothing else, so "vote as somebody else" is not a request this
+    API can express. `remove_vote` is scoped to the caller's own vote, so
+    another user's row is not even a statement it can name.
+  - **An unreadable idea leaks nothing.** The read side resolves through
+    `get_idea` first, so an idea the caller cannot read never becomes readable
+    enough to have a count; the mutation payloads carry a null `voteState` on
+    every refusal rather than a zeroed one, which would still confirm the idea
+    exists.
+  - **Counts are computed, never stored.** No denormalized column and no
+    cache, so there is no invalidation path to get wrong. A stored count would
+    have to be maintained on vote, un-vote and idea deletion, and would be
+    wrong the moment one of those failed.
+  - **No N+1, and S2-004's query count is unchanged.** `IdeaType` gained
+    `voteCount` and `viewerHasVoted`, annotated onto the page via
+    `Coalesce(Subquery(count), 0)` and `Exists(...)` — so a page of fifty ideas
+    still costs the same three queries as one, and Django does not carry
+    annotations into `.count()`, which is pinned. `Coalesce` is load-bearing: a
+    `COUNT` over an empty group returns SQL `NULL`, and `NULL` into a
+    non-nullable `Int!` is a GraphQL error on the overwhelmingly common case
+    of an idea nobody has voted on. An unannotated `Idea` (a single idea, or a
+    row a mutation just wrote) falls back to two queries, which is why the
+    *list* path is annotated and the single path is not.
+  - **Additive GraphQL change:** two fields on `IdeaType`, one new type, two
+    mutations. Nothing existing changed or was removed, and `ideas`,
+    `organizationIdeas`, `IdeaPage` and `PageInfo` are untouched.
+  - **Frontend:** the count and the reader's own answer arrive on each card, so
+    twenty controls cost no extra requests. Control state is keyed by idea id,
+    so a late response writes the idea it was for and never whichever one is on
+    screen. **No optimistic update** — the rendered count is the one the
+    mutation returned, which already accounts for other people's concurrent
+    votes — so a failed vote leaves the number exactly where it was and there
+    is nothing to roll back. The in-flight guard is a `useRef` rather than
+    state, because state cannot be read synchronously from a click handler, and
+    it is not module state because that would be shared by every mounted list
+    and would leak between tests. Neither voting nor commenting re-fetches the
+    ideas list, so a reader's filters and page survive both.
+  - Not implemented, and deliberately: ranking, scoring or trending of the votes
+    that now exist, a "who voted" listing (the domain has no policy for that
+    aggregate), downvotes or vote weights, attachments (S2-007), proposals,
+    developer matching, AI, payments, analytics, and any rate limiting — this
+    project has no throttling mechanism, and adding one here would be a new
+    security framework for a single operation.
+- S2-004: Categories and discovery — browsing ideas by category, search, and
+  combined filters over a bounded page.
+  `selectors.list_discoverable_ideas`, `selectors.IdeaFilters`,
+  `ideas/pagination.py`, `IdeaFiltersInput` and the `IdeaPage`/`PageInfo`
+  types on `ideas`/`organizationIdeas`, and the discovery UI on
+  `/app/ideas`. No migration: this is behaviour over the S2-001 schema.
+  - **One read path.** `list_discoverable_ideas` is the only place the
+    visibility filter, the discovery filters and pagination meet, and both
+    queries go through it — so there is no second queryset for an unfiltered
+    idea to escape through. `organizationIdeas` is a scoped wrapper over the
+    same selector rather than a parallel query.
+  - **Filters can only remove rows.** `_visibility_filter` is applied first
+    and every filter narrows what it allowed; an idea matching the tenant, the
+    category, the status and the search *exactly* is still not returned when
+    it is private. `IdeaFilters` has no `visibility` and no `author_id`
+    field, because a filter that reads like a grant (`visibility=public`)
+    behaves like one the day somebody sends it.
+  - **An unowned organization answers empty, not forbidden.** An
+    `organization_id` the caller has no active membership of yields an empty
+    page — the same answer as for an organization that does not exist, so the
+    argument cannot be used to probe which ids are real.
+  - **A filter that cannot be understood empties the result** rather than
+    being ignored. A client that asked for category "abc" and got the
+    unfiltered list would read that as "no ideas in this category" when it
+    means "that category does not exist".
+  - **Search is a bound parameter, over two fields.** `icontains` on
+    `title` and `description`; the long-form fields (`problem_statement` and
+    friends) are deliberately not searched, because they are not exposed by
+    the API and matching text a reader may not read turns search into an
+    oracle. Django escapes the pattern metacharacters, so a reader who types
+    `%` searches for the character — pinned by a test, because it is a
+    property of the ORM rather than of this code, and swapping `icontains`
+    for `raw` to get trigram search would quietly turn it into "everything".
+  - **Retirement is not deletion.** A retired category leaves the picker but
+    keeps its history: an idea filed under it is still readable and still
+    matches that category as a filter. S2-001's `PROTECT` is what makes that
+    consistent. A retired category cannot reach a *private* idea, because
+    visibility is filtered first.
+  - **Paging is bounded and deterministic.** `ideas/pagination.py`, default 20
+    and maximum 50, clamped rather than refused so a client asking for 1000
+    rows gets a page and an error would only tell it to try again.
+    `pageInfo` echoes `offset`/`limit` back *as applied*. Ordering is
+    `-created_at, -pk` — the tie-breaker is what makes `offset` a correct way
+    to page, since `created_at` is microsecond-resolution and two ideas filed
+    in the same instant would otherwise let a page boundary repeat one row
+    and skip another. Three queries per page (memberships, count, fetch); the
+    `COUNT` is a deliberate trade, since `limit + 1` cannot answer "showing
+    1-20 of 137".
+  - **`ideas` and `organizationIdeas` now return a page, not a list.** A
+    shape change to a shipped query, taken deliberately: returning the whole
+    filtered table is not a thing this platform can keep doing as ideas
+    accumulate, and the alternative — a second, filtered-for-caller's-own-use
+    query — would be a second read policy to keep honest. A client that needs
+    everything pages through it.
+  - **There is no `organizationId` filter.** A tenant is scoped by the query
+    that names it, so a request cannot name two tenants at once and leave the
+    server to resolve the conflict.
+  - **Frontend:** the search box is debounced at 300ms, so a reader typing a
+    word sends one query instead of one per keystroke; the text in the box and
+    the filter in effect are separate values. A narrowing filter returns to
+    page 1 — written once, in the workspace, because it needs the filters and
+    the page together. A write reloads the list without discarding the
+    reader's place, which is why data loading moved into
+    `hooks/useIdeaDiscovery` and the remount-to-reload trick went away. The
+    three empty states — nothing here, nothing matches, nothing on this page —
+    are kept apart, because they are different facts.
+  - Not implemented, and deliberately: comments, voting, attachment uploads,
+    a discovery *algorithm* or social feed, AI, payments, subscriptions, a
+    marketplace, and Sprint 3's review queue.
+
+### Added — Sprint 1: Identity & Access
+
+- S1-002: User registration — the `identity` app's `User` model (email as
+  the login identifier, Django's own password hashing) and a `register`
+  GraphQL mutation with email normalization and password/phone validation.
+  See `backend/identity/models.py` and `services.py`.
+- S1-003: Email/password authentication — `login`/`refreshToken`/`logout`
+  mutations, short-lived JWT access tokens held in memory only, and a
+  persistent, rotating `RefreshSession` credential delivered as an HttpOnly
+  cookie (never `localStorage`). `me` resolves the current user from the
+  access token alone. `CORS_ALLOW_CREDENTIALS` is on for the cookie, still
+  scoped to an explicit, non-wildcard origin allow-list.
+- S1-004: Google sign-in — the `googleLogin` mutation over Google Identity
+  Services' ID-token (OIDC) flow rather than an authorization-code exchange,
+  so no client secret exists on either side. Credential verification
+  (`backend/identity/google_oauth.py`) covers signature, issuer, audience
+  and expiry, plus one-time-use replay protection keyed by the token's
+  hash. **Account-linking policy: refuse, never link** — only an exact
+  `(provider, provider_subject)` match authenticates into an existing
+  account; a matching email is refused with the same generic message as an
+  invalid credential, *regardless* of `email_verified`. Auto-linking by
+  verified email was considered and rejected; the reasoning is recorded in
+  `identity/authentication.py`.
+- S1-005: Current user and protected application — the `me` query as the
+  single authoritative identity source (no arguments, so no client value can
+  influence it), `RequireAuth` gating `/app`, and the dashboard shell.
+- S1-006: Organization membership — `Organization`/`Membership` models, the
+  `createOrganization` bootstrap mutation, and `meOrganizations`/
+  `meMemberships`. The bootstrap is deliberately gated on authentication
+  alone: requiring a membership permission there would be circular, since
+  the membership does not exist until the organization does.
+- S1-007: Roles and permissions — `Role`, `Permission` and `MembershipRole`,
+  all organization-scoped, with a system `Owner` role granted the full
+  permission set at creation.
+- S1-008: Authorization and tenant isolation — every organization-scoped
+  operation resolves the caller's active membership and derives permission
+  from it (`organizations/authorization.py`); nothing reads authorization
+  input from the request. Cross-tenant requests return nothing and never
+  confirm the target exists.
+- S1-009: Sprint 1 integration and security hardening —
+  - Fixed the backend Google configuration: `GOOGLE_OAUTH_CLIENT_ID` was
+    read by the code while the local `backend/.env` stored the value under
+    the wrong name, silently disabling Google sign-in. Corrected locally,
+    documented in `backend/.env.example`, and pinned by tests that assert
+    the exact variable name and that a misnamed one is ignored.
+  - Removed a real Google client id from `frontend/.env.example`; the
+    template is a placeholder again and a test rejects any real-looking
+    client id in either template.
+  - Added a shared cache abstraction: three separated aliases
+    (`default`, `replay_protection`, `auth_throttle`) selected by
+    `CACHE_URL`, which is now **required** in deployed environments and
+    refused if it resolves to a per-process backend. Google replay
+    protection and the new rate limits are correct across processes because
+    of it, and both fail closed if the cache is unreachable.
+  - Added authentication rate limiting (`identity/throttling.py`) on
+    `login` (per account *and* per client), `googleLogin` (per client),
+    `refreshToken` (per credential *and* per client) and `register` (per
+    client), checked before the expensive work, with hashed subjects, a
+    shared counter, recovery on window expiry, and no change to the generic
+    authentication messages.
+  - Reworked the frontend's access-token lifecycle: `tokenStore` holds the
+    expiry alongside the token, and the new `tokenRefresh` refreshes
+    proactively before expiry through a *single* in-flight promise (the
+    refresh cookie is single-use, so overlapping refreshes would revoke
+    each other), treats a failed refresh as terminal for the session
+    instead of retrying, and writes nothing to browser storage.
+  - Wired `SignUpForm` to the real `register` mutation, mapping the
+    backend's field-level errors onto the matching fields and replacing the
+    fake timeout. Registration does not authenticate, so success shows a
+    confirmation leading to sign-in.
+  - Added end-to-end HTTP integration suites: the complete authentication
+    journey (cookie attributes, refresh rotation, replay rejection, logout,
+    post-logout refresh), tenant isolation across two organizations, the
+    Google sign-in flow end to end, the organization bootstrap model, the
+    CSRF posture of `/graphql/`, and a two-sided GraphQL schema contract
+    check shared with the frontend.
+  - `.coveragerc` now includes `organizations`, so coverage reflects
+    S1-006/S1-007/S1-008.
+  - A refused Google account-linking collision is now reported
+    specifically: a caller whose credential Google verified as
+    `email_verified: true` is told the address already has an account, with
+    the two real next steps, instead of a bare "Could not sign in with
+    Google." with nothing to act on. The **refusal is unchanged** - Google
+    sign-in still never auto-links by email, verified or not. The disclosure
+    is gated on `email_verified` precisely so it cannot become an
+    account-existence oracle: nobody can present a Google credential for an
+    address they do not control, so the only addresses anyone can get an
+    answer about are their own. Every other failure keeps the single generic
+    message, and one message covers the whole collision class so a caller
+    cannot learn whether the existing account is password-registered or
+    belongs to a different Google identity. See
+    `identity/authentication.py`'s `GoogleEmailInUseError`.
+  - A transport failure during sign-in no longer rejects or strands the
+    form. `login`/`loginWithGoogle` now always resolve to an outcome, so a
+    backend that is simply not running shows an actionable error and
+    re-enables the form instead of leaving the button spinning and logging
+    an uncaught rejection. The message is deliberately not one of the
+    backend's generic authentication messages - those report a decision the
+    request never reached.
+  - Documentation corrected: `frontend/README.md` described automatic
+    Google account linking, a design that was rejected; `docs/architecture.md`
+    now reflects S1-005 through S1-009 and `docs/environments.md` documents
+    `CACHE_URL`.
+- S1-010: Password reset and account activation — the two emailed-link flows,
+  and the frontend that consumes them. `EmailToken` (with `EmailTokenPurpose`),
+  `identity/email.py` and its two plain-text templates, the
+  `requestPasswordReset`/`resetPassword`/`activateAccount`/
+  `resendActivationEmail` mutations, the five SMTP/frontend-origin settings,
+  and the `/activate-account` route the confirmation link needs.
+  - **Neither request side discloses whether an address is registered.**
+    `requestPasswordReset` and `resendActivationEmail` take a caller-supplied
+    address, so a different answer for a hit than for a miss would make each
+    an account-existence oracle. Every outcome — no account, deactivated,
+    already verified, or Google-only with no password to reset — returns one
+    message, and only the hit side sends anything. The frontend displays that
+    message verbatim rather than wording its own, for the same reason.
+  - **Only a hash is stored.** The raw token exists in exactly one place,
+    the email; `EmailToken.token_hash` is a SHA-256 digest, so a database
+    leak yields nothing replayable. A fast hash is right here precisely
+    because the value is 384 bits of `secrets` output rather than a
+    human-chosen secret — the reasoning `RefreshSession` already used,
+    applied again rather than assumed.
+  - **One-time, expiring, superseded.** A redeemed token is recorded as used
+    rather than deleted, so "already used" stays distinguishable from "never
+    existed" in the record even though the caller cannot tell them apart.
+    Requesting a new link supersedes any outstanding one for the same
+    purpose, so a leaked older email stops being a live credential — and
+    superseding cannot erase the record that an earlier link was redeemed.
+  - **One message for every unusable token**, and one per flow: never real,
+    expired, already used, or belonging to the other operation. A message per
+    case would tell whoever holds a stolen link exactly how far it got.
+  - **A reset ends every session on the account**, the caller's own browser
+    included, and clears its refresh cookie in the same response. Without
+    that step a password changed *because it may have been stolen* leaves the
+    attacker's existing session signed in until it expires on its own
+    schedule.
+  - **Verification is not a login requirement.** `login` does not check
+    `isVerified`, so an unconfirmed account owns a legitimate account and is
+    not locked out of it. Making verification an authorization gate is a
+    separate decision, to be taken in one place, once there is a reason to.
+  - **Delivery failure is logged, never raised**, at `ERROR` with the user's
+    primary key and never the token — raising would either leak account
+    existence to fix a mail problem or force every caller to reimplement the
+    catch. The cost is that a broken mail setup is found in the logs rather
+    than in a support ticket, which is why production settings now *require*
+    the five email variables and refuse the console backend outright: both
+    flows report generic success whether or not anything was sent, so a
+    deployment that cannot send is otherwise indistinguishable from one
+    nobody has used yet.
+  - **All four operations are throttled** on the S1-009 infrastructure, with
+    the per-address limits keyed on the *submitted* address and never
+    resolved to a user, so a miss costs the caller the same budget as a hit.
+    The password-reset and activation-resend limits are the mail-cannon
+    bound; the reset/activation execution limits are about how much work an
+    anonymous request can cause, not about guessing an unguessable token.
+  - **Frontend wiring**: `ForgotPasswordForm` and `ResetPasswordForm` are no
+    longer placeholders, and a new `/activate-account` route exists for the
+    confirmation link. The three outcomes are kept apart on purpose — a
+    refused token, a rejected password, and an unreachable server are three
+    different facts, and treating them as one either sends a user off to
+    request a new link for a link that was fine, or tells them their link is
+    dead when the request never arrived. Following an activation link is an
+    explicit press rather than a request on mount, because mail clients and
+    link scanners fetch URLs before a person sees them and the token is
+    single-use.
+  - Tests: the flows at the service, GraphQL, transport and real-HTTP layers,
+    the four throttle policies, the settings guards, and `.env.example`
+    completeness. Several were written to fail first — a throttle rendered as
+    "check your email" on the forgot-password form, and a permanently
+    disabled confirm button on the activation page, were both caught this
+    way.
+
 ### Added — Sprint 0: Foundation
 
 - S0-001: Repository foundation — `frontend/`, `backend/`, `docs/`,

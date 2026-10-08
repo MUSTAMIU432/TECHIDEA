@@ -1,1 +1,37 @@
 @import 'tailwindcss';
+
+@theme {
+  /* Dark, technology-forward green used for the Automation Platform brand
+     panel and interactive accents across the app. */
+  --color-brand-50: #eefdf6;
+  --color-brand-100: #d7f5e6;
+  --color-brand-200: #b0e9cf;
+  --color-brand-300: #6fd3a8;
+  --color-brand-400: #2fb37e;
+  --color-brand-500: #1c8a63;
+  --color-brand-600: #146349;
+  --color-brand-700: #0f4a37;
+  --color-brand-800: #0a3327;
+  --color-brand-900: #06231a;
+  --color-brand-950: #04120d;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The moving segment of an upload whose progress is not reported: a file in
+   flight, not a percentage (see `FileUploadPanel`). */
+@keyframes upload-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}

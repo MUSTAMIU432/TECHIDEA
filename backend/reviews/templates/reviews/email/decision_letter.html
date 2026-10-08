@@ -1,0 +1,61 @@
+{% comment %}
+The decision letter's announcement. Inline styles and tables because email clients
+ignore stylesheets. Deliberately carries no feedback or criteria (see
+reviews/decision_letters.py): the letter itself is read in the app.
+{% endcomment %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if approved %}Your idea has been approved{% else %}An update on your idea{% endif %}</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+          <tr>
+            <td style="background:{% if approved %}#14532d{% else %}#1e293b{% endif %};padding:20px 28px;">
+              <span style="font-size:18px;font-weight:800;letter-spacing:0.5px;color:#ffffff;">MUSTA<span style="color:#86efac;">NET</span></span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:36px 28px 8px 28px;text-align:center;">
+              {% if approved %}
+              <div style="font-size:44px;line-height:1;">&#127881;</div>
+              <h1 style="margin:16px 0 8px 0;font-size:24px;line-height:1.3;color:#14532d;">Congratulations, {{ first_name }}!</h1>
+              <p style="margin:0;font-size:16px;line-height:1.6;color:#334155;">Your idea <strong>&ldquo;{{ title }}&rdquo;</strong> has been approved by the {{ platform }} review team.</p>
+              {% else %}
+              <div style="font-size:40px;line-height:1;">&#128140;</div>
+              <h1 style="margin:16px 0 8px 0;font-size:22px;line-height:1.3;color:#1e293b;">Thank you, {{ first_name }}</h1>
+              <p style="margin:0;font-size:16px;line-height:1.6;color:#334155;">The {{ platform }} review team has reached a decision on your idea <strong>&ldquo;{{ title }}&rdquo;</strong>, and has written you a letter.</p>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 28px 8px 28px;">
+              <p style="margin:0;font-size:15px;line-height:1.7;color:#475569;text-align:center;">
+                {% if approved %}
+                Your letter explains what happens next: the team is now preparing a proposal for you, and nothing goes ahead until you give your go-ahead.
+                {% else %}
+                We are grateful for the care you put into it. Your letter explains the decision, and we would genuinely welcome your next idea.
+                {% endif %}
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:24px 28px 36px 28px;">
+              <a href="{{ idea_url }}" style="display:inline-block;background:{% if approved %}#15803d{% else %}#334155{% endif %};color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 28px;border-radius:10px;">Read your letter</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 28px;background:#f8fafc;border-top:1px solid #e2e8f0;">
+              <p style="margin:0;font-size:12px;line-height:1.6;color:#64748b;text-align:center;">You are receiving this because you submitted this idea to {{ platform }}. The letter is kept in the app, behind your sign-in.</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

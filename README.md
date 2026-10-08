@@ -52,7 +52,7 @@ Full details: [`docs/architecture.md`](docs/architecture.md).
 automation-platform/
 ├── backend/           # Django project (config, graphql_api, tests)
 ├── frontend/          # React + TypeScript + Vite app
-├── docs/              # Architecture, environments, development, testing, Git workflow
+├── docs/              # Architecture, environments, development, testing, domain docs, Git workflow
 ├── infrastructure/    # Placeholder: no infrastructure implemented yet
 ├── scripts/           # Placeholder: no scripts yet
 ├── .github/           # CI workflow, issue/PR templates
@@ -73,6 +73,8 @@ use yet.
 - [`docs/git-workflow.md`](docs/git-workflow.md) — branches and pull requests
 - [`docs/environments.md`](docs/environments.md) — environment variables and
   environments
+- [`docs/ideas-domain.md`](docs/ideas-domain.md) — the ideas & problem
+  submission domain: entities, lifecycle, visibility and boundaries
 
 ## Contributing
 

@@ -1,0 +1,21 @@
+{% comment %}
+Plain text on purpose - see identity/email.py's module docstring for why the
+platform's transactional messages carry no HTML part. `action_url` is the
+single-use invitation link (invitations.services mints the token;
+invitations/email.py builds the URL).
+{% endcomment %}
+{% if invited_by_first_name %}{{ invited_by_first_name }} has invited you{% else %}You have been invited{% endif %} to join "{{ tenant_name }}" on {{ app_name }} as a {{ role_name }}.
+
+Open this link to accept the invitation:
+
+{{ action_url }}
+
+The link can be used once, and stops working after {{ lifetime }}. It only
+works if you are signed in with the email address it was sent to. If you do
+not have an account yet, create one with that address, then open the link again.
+
+If you were not expecting this, you can ignore this email: nothing is added to
+{{ tenant_name }} until somebody with that email address accepts the invitation,
+and the person who sent it can withdraw it at any time.
+
+- The {{ app_name }} team

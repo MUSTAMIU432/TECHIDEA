@@ -3,3 +3,21 @@ django-environ==0.14.0
 psycopg[binary]==3.3.5
 strawberry-graphql-django==0.89.2
 django-cors-headers==4.9.0
+# JWT access-token encode/decode only (identity/tokens.py). Chosen over
+# djangorestframework-simplejwt because the project doesn't use DRF and
+# simplejwt is built around DRF's request/view/serializer stack - pulling
+# it in would mean adopting a chunk of an unrelated framework just for
+# token math. PyJWT is a small, framework-agnostic, actively maintained
+# library that does only the encode/decode/verify we actually need; the
+# refresh-token/session logic it doesn't provide (rotation, revocation,
+# server-side storage) is deliberately hand-rolled in identity/models.py
+# and identity/authentication.py instead of trusted to a token library.
+PyJWT==2.15.0
+# Google ID token (OIDC) verification for "Sign in with Google"
+# (identity/google_oauth.py). Google's own client library, not a generic
+# JWT check: it fetches and caches Google's current signing keys, and
+# `verify_oauth2_token` validates signature, issuer and audience together
+# rather than each being hand-implemented (and hand-verified) here. The
+# [requests] extra provides the HTTP transport the verifier uses to fetch
+# those keys - no other feature of the package is used.
+google-auth[requests]==2.58.0

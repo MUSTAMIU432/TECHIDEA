@@ -1,0 +1,19 @@
+{% comment %}
+Plain text on purpose - see identity/email.py's module docstring. `summary` is
+the notification's own short body, written by the domain and bounded to 500
+characters; the content it announces (a review report, its criteria and
+recommendations) is deliberately NOT reproduced here. An inbox is readable by
+more than its owner and outlives the account's access, so the full thing stays
+behind authentication.
+{% endcomment %}
+Hello{% if first_name %} {{ first_name }}{% endif %},
+
+{{ summary }}
+
+{% if count > 1 %}You have {{ count }} updates waiting in {{ app_name }}.{% else %}You have an update waiting in {{ app_name }}.{% endif %}
+
+Open your notifications to read them:
+
+{{ notifications_url }}
+
+- The {{ app_name }} team
