@@ -67,7 +67,7 @@ More detail: [`frontend/README.md`](../frontend/README.md#testing).
 | ---- | -------- |
 | Backend unit and integration tests | `backend/tests/test_*.py` |
 | Frontend component and utility tests | beside the source file, `*.test.ts(x)` |
-| End-to-end tests | not set up |
+| End-to-end tests | not automated; a manual walkthrough with three accounts is in [`pipeline-test-guide.pdf`](pipeline-test-guide.pdf) |
 
 ## Coverage
 
