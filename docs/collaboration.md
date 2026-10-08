@@ -78,11 +78,64 @@ an idea):
 - **Status.** While a team works it, the idea reads "under review"; when the lead approves it
   reads "approved" (admin console included).
 
+**The decision, and who tells the owner (`reviews/decision_letters.py`).**
+
+- **Changes requested** goes from the review team straight to the owner: a notification,
+  the feedback in the review history, and the *Revise idea* form with the feedback on top.
+  The owner answers on the idea's page, in the **Respond to the review** panel: revise,
+  add documents, then say what changed and resubmit - one step on the server
+  (`reviews/change_responses.py`), so the response and the new version arrive together.
+  The next round's reviewer reads the response at the top of their review panel. Any
+  resubmission marks the owner's changes-requested notifications for that idea read.
+- **Approved** or **Rejected** does not reach the owner by itself. The decision is
+  recorded (the idea moves, the report is written) and a **decision letter** is drafted
+  from a template - congratulations, or a gracious and specific no that quotes the
+  team's feedback. The administrators who send letters are notified.
+- A platform administrator holding `release_proposals` (the *Decisions & proposals*
+  role) reads it on the console's **Decisions** page, edits it if they want, and sends
+  it. Never somebody who decided the review. Every send is audited.
+- Until it is sent, the owner sees the idea as **still under review**: the status, its
+  label and stage, the last round and the report are all held back (`ideas.schema`'s
+  `_as_seen_by`, `reviews.selectors.list_idea_reviews`, `ideaReviewReport`).
+- Once sent, the owner gets a notification, a styled email that announces the letter and
+  links to it (the letter itself stays behind sign-in), and the letter at the top of the
+  idea's page.
+- For an approval, sending the letter is also the admin's **go-ahead for the proposal**:
+  the review team cannot start writing it until then (its panel says it is waiting for
+  the platform admin), and is notified the moment it is sent (`proposal.writing_opened`).
+  So the owner hears that the idea was approved before the team writes, let alone
+  releases, its proposal.
+
+**Where a reviewer works (`reviews/workboard.py`).** `/app/reviews` has two tabs for a
+platform reviewer: **My work** - every idea their review teams (or they) are handling, from the
+review to delivery, each with its step of the journey, whether it needs them, and a button to the
+page where the next action is taken - and the **Review queue**. Each proposal has its own page,
+`/app/reviews/proposals/:ideaId`, with the idea folded on top and the proposal form in sections
+that fold. Notifications are the gateway, not the workspace: each kind links to the page where it
+is acted on (`notifications.models.WORK_PATHS`) - a queue nudge to the queue on that idea, a
+proposal notification to its proposal page, an admin's to the console page. The owner's land on
+the section of the idea page they are about (`#respond`, `#decision-letter`, `#proposal`, which
+the page scrolls to and highlights) - still only for somebody who can read the idea - and delivery
+news opens the project on its tab (`?tab=uat`, `?tab=deployment`, ...). In the notification
+centre, opening one marks it read, and read ones fold away under *Earlier*.
+
 **The proposal, and the go-ahead after it (`reviews/proposals.py`).**
 
 1. After the lead approves, the review team **writes the proposal** on the idea's page: any member
-   edits, only the **lead** sends it to the admin, and only once the executive summary, problem,
-   proposed solution, scope, deliverables, timeline and acceptance criteria are filled in.
+   edits, only the **lead** sends it to the admin, and only once it is **complete**: executive
+   summary, problem, **feasibility**, proposed solution, **requirements**, scope, deliverables,
+   overall timeline, **timeline and milestones**, **financial requirements**, **whether the owner
+   pays** (yes / no), the **payment plan** when they do, and acceptance criteria. Estimated
+   effort, risks and assumptions are optional. With no charge, the payment plan is not part of
+   the proposal at all. All of it travels into delivery with the go-ahead.
+   Every start, saved change and send is recorded as an `IdeaProposalContribution` (who, which
+   sections actually changed, when); re-saving unchanged text records nothing.
+   **Following the progress:** the console's *Proposals* page (`proposalProgress`, release
+   permission only) lists every approved idea - *not started*, *being written*, *sent back*,
+   *with the admin*, *released*, *declined* - with sections written out of all, the required
+   ones still missing, the team's lead and members (and any former member who wrote part of it),
+   each person's contributions and the sections they changed, and recent activity. The admin can
+   read a draft at any point, but can only decide on one the lead has sent.
 2. A platform admin holding the new `administration.release_proposals` permission (console page
    *Proposals*) **releases** it to the owner, **sends it back** with feedback, or **declines** it
    with a reason. Anyone who wrote or sent the proposal is refused, even holding the permission.
@@ -92,7 +145,13 @@ an idea):
    a watermark across it. Each opening is recorded (`IdeaProposalView`). The page says plainly
    that a photo or screenshot of the screen cannot be prevented - the watermark is the deterrent.
    The owner never sees the proposal before it is released, and never edits it.
-4. The owner gives the **go-ahead from that page**. The go-ahead is refused until a proposal has
+4. The owner **answers the proposal from that page** (`reviews/proposal_answers.py`): go ahead
+   with development or not; if so, whether they accept the timeline and - only when they pay -
+   the payment plan (agreed, or needs discussion), a preferred start and any conditions; if
+   not, why (required). Going ahead **is** the go-ahead, in the same transaction. A no tells the
+   admins and the review team, and the go-ahead is refused from then on. The answers are shown
+   on the console's *Proposals* page and on the opportunity's *Overview*, so whoever assigns and
+   builds it reads the owner's terms first. The go-ahead is refused until a proposal has
    been released (`ideas.go_ahead.NO_PROPOSAL`). The review report page no longer has a go-ahead
    button; it points to the proposal.
 5. The go-ahead **opens the automation opportunity in the same transaction**, already *ready for

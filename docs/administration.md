@@ -52,6 +52,8 @@ All codes are `administration.<codename>`. Every capability other than
 | `manage_user_accounts` | Activate and deactivate accounts |
 | `manage_organization_roles` | Assign and remove an organization's roles on its memberships |
 | `manage_categories` | Create, rename and retire/restore categories |
+| `manage_reviewers` | Make platform reviewers and form review teams (*Reviewers*) |
+| `manage_platform_roles` | Give accounts the platform's other jobs - developer, delivery manager, intake, proposal approver (*Platform roles*) |
 
 `inspect_idea_content` also gates **private message bodies** - see §3.1. It is
 the console's "content a member wrote" permission, and a message is the one place
@@ -71,12 +73,45 @@ python manage.py grant_platform_admin admin@example.com --revoke
 ```
 
 The command adds or removes the account from the **"Platform administrators"**
-group, which holds every console permission. The grant is audited with no
+group, which holds every console permission, including the two *staffing* ones
+(`manage_reviewers`, `manage_platform_roles`; migration `administration/0005` added
+them to an existing group). The grant is audited with no
 actor, which marks a command-line operation. For narrower grants, such as a
 read-only support role with `access_console` alone, use Django Admin's
 group/permission screens. **The console cannot grant platform
 administration.** A console that could mint administrators would turn one
 compromised administrator account into many.
+
+### Platform roles: everybody else's job, given in the console
+
+The administrators' group staffs the platform but does not do its work: it holds
+no review, routing or release permission. Those jobs, and the delivery ones, are
+given to **existing accounts** in the console, never by command:
+
+| Page | Role | What the holder can do | Where the work is then handed out |
+| ---- | ---- | ---------------------- | --------------------------------- |
+| *Reviewers* | Reviewer (in a review team, one lead) | Review submitted ideas | Intake routes an idea to a team (*Ideas* -> idea -> *Assign to a review team*) |
+| *Platform roles* | Intake | Route submitted ideas to a review team | - |
+| *Platform roles* | Decisions & proposals | Send each approval or rejection to its owner as a letter; release, send back or decline a proposal | *Decisions*, *Proposals* |
+| *Platform roles* | Delivery manager | Run the Developer Queue | - |
+| *Platform roles* | Developer | Be assigned an opportunity | A delivery manager assigns it from the *Developer Queue* |
+
+**The console is for platform administrators only.** A reviewer holds the review
+permission and nothing else here: they work from the **platform review queue** at
+`/app/reviews` and on the idea's page, and see no *Admin* button. *Intake* and
+*Proposal approver* are console work, so they can be given only to an account that
+is already a platform administrator, and their groups grant no console access of
+their own (migration `administration/0006` took it away from existing groups).
+
+A role is eligibility, not work. Each role is a Django group with exactly its
+permissions (`administration/platform_roles.py`); every grant and removal is an
+audit entry (`platform_role.granted` / `platform_role.revoked`, with the role in
+the metadata). An administrator may take a role themselves - a small platform needs
+one person in several jobs - and the conflicts are refused where the work happens:
+a lead cannot route to their own team, a proposal's writer cannot release it, an
+author cannot review their own idea, a builder cannot accept their own work.
+Removal is refused for a developer still delivering an opportunity, and for the
+last delivery manager while delivery work is open.
 
 ## 2. Security boundaries
 
@@ -192,6 +227,7 @@ is asserted against the schema itself in
 | Assign / remove an organization role | `adminAssignMembershipRole`, `adminRemoveMembershipRole` | `manage_organization_roles` | The organization domain's own rules (`organizations.services.grant_membership_role` / `revoke_membership_role`): active memberships only, the role must belong to the membership's organization, no duplicates, and **the last active Owner keeps the Owner role** |
 | Create / rename a category | `adminCreateCategory`, `adminUpdateCategory` | `manage_categories` | Unique name; the slug is kept on rename. The same `ideas.Category` rows the idea form uses |
 | Retire / restore a category | `adminSetCategoryActive` | `manage_categories` | Existing ideas keep their category; retired categories are no longer offered for new ideas. No delete (`Idea.category` is `PROTECT`) |
+| Give / remove a platform role | `grantPlatformRole`, `revokePlatformRole` (read: `platformRoles`) | `manage_platform_roles` | Existing, active accounts only; not twice; a delivering developer and the last delivery manager with open work keep theirs (§1) |
 
 Every destructive or access-changing action is behind a confirmation dialog
 that states its consequences and accepts an optional, audited reason.
